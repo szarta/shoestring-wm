@@ -3,10 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use smithay::{
     backend::{
-        renderer::{
-            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
-            gles::GlesRenderer,
-        },
+        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -106,9 +103,36 @@ pub fn init_winit(
 
                 {
                     let (renderer, mut framebuffer) = backend.bind().unwrap();
+
+                    // Re-pick the cursor frame for this output's scale, then
+                    // build pointer render elements above the space.
+                    let scale_int = match output.current_scale() {
+                        smithay::output::Scale::Integer(i) => i as u32,
+                        smithay::output::Scale::Fractional(f) => f.ceil() as u32,
+                        _ => 1,
+                    };
+                    state.refresh_cursor_buffer(scale_int);
+                    let cursor_elements: Vec<crate::drawing::PointerRenderElement<GlesRenderer>> =
+                        if let Some((pe, location, hotspot)) = state.cursor_render_snapshot() {
+                            let scale: smithay::utils::Scale<f64> =
+                                output.current_scale().fractional_scale().into();
+                            let physical_location: smithay::utils::Point<
+                                i32,
+                                smithay::utils::Physical,
+                            > = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                                (location.x - hotspot.0 as f64) * scale.x,
+                                (location.y - hotspot.1 as f64) * scale.y,
+                            ))
+                            .to_i32_round();
+                            use smithay::backend::renderer::element::AsRenderElements;
+                            pe.render_elements(renderer, physical_location, scale, 1.0)
+                        } else {
+                            Vec::new()
+                        };
+
                     smithay::desktop::space::render_output::<
                         _,
-                        WaylandSurfaceRenderElement<GlesRenderer>,
+                        crate::drawing::PointerRenderElement<GlesRenderer>,
                         _,
                         _,
                     >(
@@ -118,7 +142,7 @@ pub fn init_winit(
                         1.0,
                         0,
                         [&state.space],
-                        &[],
+                        &cursor_elements,
                         &mut damage_tracker,
                         [0.1, 0.1, 0.1, 1.0],
                     )

@@ -5,7 +5,8 @@
 //! - single primary GPU only (no multi-GPU fallback paths)
 //! - one scale across all outputs (from `general.output_scale` in config)
 //! - no XWayland, dmabuf-feedback, syncobj, DRM lease, screencopy
-//! - no cursor plane / pointer image (cursor not drawn; M8/M9 territory)
+//! - no cursor plane (cursor sprite is composited into the framebuffer
+//!   from an xcursor theme; see [`crate::cursor`] and [`crate::drawing`])
 //! - no FPS overlay, no presentation-throttle heuristics
 //! - 8-bit color only
 //!
@@ -655,6 +656,17 @@ impl ShoestringWm {
         // Refresh first so newly-mapped surfaces show up this frame.
         self.space.refresh();
 
+        // Capture cursor state and refresh its buffer before we mutably
+        // re-borrow `self.udev` below — the renderer borrow conflicts with
+        // any `&mut self` method call from inside the borrow scope.
+        let scale_int = match output.current_scale() {
+            smithay::output::Scale::Integer(i) => i as u32,
+            smithay::output::Scale::Fractional(f) => f.ceil() as u32,
+            _ => 1,
+        };
+        self.refresh_cursor_buffer(scale_int);
+        let cursor_snapshot = self.cursor_render_snapshot();
+
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
@@ -674,7 +686,7 @@ impl ShoestringWm {
             }
         };
 
-        let elements: Vec<
+        let space_elements: Vec<
             SpaceRenderElements<UdevRenderer<'_>, WaylandSurfaceRenderElement<UdevRenderer<'_>>>,
         > = smithay::desktop::space::space_render_elements(
             &mut renderer,
@@ -683,6 +695,42 @@ impl ShoestringWm {
             1.0,
         )
         .unwrap_or_default();
+
+        // Cursor goes on top: build pointer elements from a captured snapshot
+        // (taken before we re-borrowed `self.udev` above), then prepend them
+        // — render_frame draws first-element-first.
+        let cursor_elements: Vec<crate::drawing::PointerRenderElement<UdevRenderer<'_>>> =
+            if let Some((pe, location, hotspot)) = cursor_snapshot {
+                let scale: smithay::utils::Scale<f64> =
+                    output.current_scale().fractional_scale().into();
+                let physical_location: smithay::utils::Point<i32, smithay::utils::Physical> =
+                    smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                        (location.x - hotspot.0 as f64) * scale.x,
+                        (location.y - hotspot.1 as f64) * scale.y,
+                    ))
+                    .to_i32_round();
+                use smithay::backend::renderer::element::AsRenderElements;
+                pe.render_elements(&mut renderer, physical_location, scale, 1.0)
+            } else {
+                Vec::new()
+            };
+
+        let mut elements: Vec<
+            crate::drawing::OutputRenderElements<
+                UdevRenderer<'_>,
+                WaylandSurfaceRenderElement<UdevRenderer<'_>>,
+            >,
+        > = Vec::with_capacity(space_elements.len() + cursor_elements.len());
+        elements.extend(
+            cursor_elements
+                .into_iter()
+                .map(crate::drawing::OutputRenderElements::Pointer),
+        );
+        elements.extend(
+            space_elements
+                .into_iter()
+                .map(crate::drawing::OutputRenderElements::Space),
+        );
 
         let result = surface.drm_output.render_frame(
             &mut renderer,

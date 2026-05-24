@@ -2,6 +2,8 @@
 
 mod backend;
 mod binds;
+mod cursor;
+mod drawing;
 mod grabs;
 mod handlers;
 mod input;

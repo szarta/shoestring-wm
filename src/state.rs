@@ -3,7 +3,7 @@ use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Instant};
 use shoestring_config::Config;
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
-    input::{Seat, SeatState},
+    input::{pointer::CursorImageStatus, Seat, SeatState},
     reexports::{
         calloop::{
             generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
@@ -25,6 +25,13 @@ use smithay::{
         socket::ListeningSocketSource,
     },
 };
+
+/// `(pointer_element_snapshot, pointer_location, (hotspot_x, hotspot_y))`.
+pub type CursorSnapshot = (
+    crate::drawing::PointerElement,
+    smithay::utils::Point<f64, smithay::utils::Logical>,
+    (i32, i32),
+);
 
 pub struct ShoestringWm {
     pub start_time: Instant,
@@ -63,6 +70,14 @@ pub struct ShoestringWm {
     pub seat: Seat<Self>,
 
     pub ipc: Option<crate::ipc::Server>,
+
+    pub cursor: crate::cursor::Cursor,
+    pub cursor_status: CursorImageStatus,
+    pub pointer_element: crate::drawing::PointerElement,
+    /// Last image we uploaded as a `MemoryRenderBuffer`. We re-use the buffer
+    /// when the chosen xcursor frame is unchanged across renders (the common
+    /// case — static cursors stay on a single frame indefinitely).
+    pub pointer_image: Option<xcursor::parser::Image>,
 }
 
 impl ShoestringWm {
@@ -131,6 +146,10 @@ impl ShoestringWm {
             data_device_state,
             seat,
             ipc: None,
+            cursor: crate::cursor::Cursor::load(),
+            cursor_status: CursorImageStatus::default_named(),
+            pointer_element: crate::drawing::PointerElement::default(),
+            pointer_image: None,
         }
     }
 
@@ -310,6 +329,71 @@ impl ShoestringWm {
         self.emit_ipc(shoestring_ipc::Event::WorkspaceChanged {
             active: target.one_based(),
         });
+    }
+
+    /// Refresh `pointer_element`'s memory buffer for the next render. Picks
+    /// the right xcursor frame for `scale` + elapsed time; only uploads a new
+    /// `MemoryRenderBuffer` when the chosen `Image` differs from the previous
+    /// frame (true for every render on static cursors).
+    pub fn refresh_cursor_buffer(&mut self, scale: u32) {
+        if self.cursor.is_empty() {
+            return;
+        }
+        let elapsed = self.start_time.elapsed();
+        let Some(frame) = self.cursor.current_frame(scale, elapsed).cloned() else {
+            return;
+        };
+        let same_as_last = self
+            .pointer_image
+            .as_ref()
+            .map(|prev| prev.size == frame.size && prev.pixels_rgba == frame.pixels_rgba)
+            .unwrap_or(false);
+        if same_as_last {
+            return;
+        }
+        let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+            &frame.pixels_rgba,
+            smithay::backend::allocator::Fourcc::Argb8888,
+            (frame.width as i32, frame.height as i32),
+            1,
+            smithay::utils::Transform::Normal,
+            None,
+        );
+        self.pointer_element.set_buffer(buffer);
+        self.pointer_image = Some(frame);
+    }
+
+    /// Snapshot the data needed to render the cursor this frame. Cheap to
+    /// clone (the buffer is `Arc`-backed), and separating this from the
+    /// renderer call lets backends release a `&mut self` borrow before
+    /// calling into the renderer (which itself borrows `self.udev`).
+    pub fn cursor_render_snapshot(&self) -> Option<CursorSnapshot> {
+        use smithay::input::pointer::CursorImageStatus;
+        let pointer = self.seat.get_pointer()?;
+        let location = pointer.current_location();
+        let hotspot = match &self.cursor_status {
+            CursorImageStatus::Hidden => return None,
+            CursorImageStatus::Named(_) => self
+                .pointer_image
+                .as_ref()
+                .map(|i| (i.xhot as i32, i.yhot as i32))
+                .unwrap_or((0, 0)),
+            CursorImageStatus::Surface(surface) => {
+                use smithay::wayland::compositor::with_states;
+                with_states(surface, |states| {
+                    let attrs = states
+                        .data_map
+                        .get::<std::sync::Mutex<smithay::input::pointer::CursorImageAttributes>>();
+                    attrs
+                        .map(|a| {
+                            let h = a.lock().unwrap().hotspot;
+                            (h.x, h.y)
+                        })
+                        .unwrap_or((0, 0))
+                })
+            }
+        };
+        Some((self.pointer_element.clone(), location, hotspot))
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from
