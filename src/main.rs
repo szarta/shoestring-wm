@@ -116,6 +116,11 @@ struct State {
     selected: usize,
     /// Shared fuzzy matcher. Created once.
     matcher: fuzzy_matcher::skim::SkimMatcherV2,
+    /// Set true on the first wl_keyboard::Enter we receive. Used by Leave
+    /// to decide whether to exit: a Leave before we ever had focus would
+    /// be spurious (we haven't even shown ourselves yet), but a Leave
+    /// after Enter means another surface stole focus and we should quit.
+    ever_focused: bool,
 }
 
 /// One entry in the candidate list.
@@ -209,6 +214,7 @@ fn main() -> Result<()> {
         matches: Vec::new(),
         selected: 0,
         matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
+        ever_focused: false,
     };
     // Seed the visible matches with the empty-query result (top alphabetical).
     recompute_matches(&mut state);
@@ -1054,7 +1060,18 @@ impl Dispatch<WlKeyboard, ()> for State {
                     state.dirty = true;
                 }
             }
-            // Enter/Leave/RepeatInfo aren't needed for M1.
+            wl_keyboard::Event::Enter { .. } => {
+                state.ever_focused = true;
+                tracing::debug!("keyboard focus entered");
+            }
+            // The only way we lose focus while alive is another surface
+            // stealing it (e.g. user pressed Super+P while a menu is
+            // already up, spawning a second instance). Exit so we don't
+            // become an invisible background process.
+            wl_keyboard::Event::Leave { .. } if state.ever_focused => {
+                tracing::debug!("keyboard focus left; exiting");
+                state.running = false;
+            }
             _ => {}
         }
     }
