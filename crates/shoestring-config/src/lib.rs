@@ -4,7 +4,10 @@
 //! does not depend on xkbcommon — the WM resolves them into a [`BindingTable`]
 //! at startup.
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -32,8 +35,12 @@ pub struct General {
     pub repeat_rate: i32,
 }
 
-fn default_repeat_delay() -> i32 { 600 }
-fn default_repeat_rate() -> i32 { 25 }
+fn default_repeat_delay() -> i32 {
+    600
+}
+fn default_repeat_rate() -> i32 {
+    25
+}
 
 impl Default for General {
     fn default() -> Self {
@@ -162,13 +169,41 @@ impl Config {
                     args: vec![],
                 },
             },
-            Binding { mods: super_shift(), key: "q".into(), action: Action::Quit },
-            Binding { mods: super_only(), key: "e".into(), action: Action::TileLeft },
-            Binding { mods: super_only(), key: "w".into(), action: Action::TileRight },
-            Binding { mods: super_only(), key: "m".into(), action: Action::Maximize },
-            Binding { mods: super_only(), key: "d".into(), action: Action::Minimize },
-            Binding { mods: super_shift(), key: "d".into(), action: Action::Unminimize },
-            Binding { mods: super_only(), key: "x".into(), action: Action::Close },
+            Binding {
+                mods: super_shift(),
+                key: "q".into(),
+                action: Action::Quit,
+            },
+            Binding {
+                mods: super_only(),
+                key: "e".into(),
+                action: Action::TileLeft,
+            },
+            Binding {
+                mods: super_only(),
+                key: "w".into(),
+                action: Action::TileRight,
+            },
+            Binding {
+                mods: super_only(),
+                key: "m".into(),
+                action: Action::Maximize,
+            },
+            Binding {
+                mods: super_only(),
+                key: "d".into(),
+                action: Action::Minimize,
+            },
+            Binding {
+                mods: super_shift(),
+                key: "d".into(),
+                action: Action::Unminimize,
+            },
+            Binding {
+                mods: super_only(),
+                key: "x".into(),
+                action: Action::Close,
+            },
             // Workspace navigation — mirrors the user's Openbox W-h / W-l.
             Binding {
                 mods: super_only(),
@@ -215,7 +250,10 @@ impl Config {
                 action: Action::ChangeVt { vt: n },
             });
         }
-        Self { general: General::default(), bindings }
+        Self {
+            general: General::default(),
+            bindings,
+        }
     }
 }
 

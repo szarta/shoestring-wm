@@ -5,11 +5,13 @@ use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
-        calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic},
+        calloop::{
+            generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+        },
         wayland_server::{
-            Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
+            Display, DisplayHandle,
         },
     },
     utils::{Logical, Point},
@@ -128,7 +130,10 @@ impl ShoestringWm {
         }
     }
 
-    fn init_wayland_listener(display: Display<Self>, event_loop: &mut EventLoop<'static, Self>) -> OsString {
+    fn init_wayland_listener(
+        display: Display<Self>,
+        event_loop: &mut EventLoop<'static, Self>,
+    ) -> OsString {
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
         let socket_name = listening_socket.socket_name().to_os_string();
         let loop_handle = event_loop.handle();
@@ -166,11 +171,13 @@ impl ShoestringWm {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space.element_under(pos).and_then(|(window, location)| {
-            window
-                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                .map(|(s, p)| (s, (p + location).to_f64()))
-        })
+        self.space
+            .element_under(pos)
+            .and_then(|(window, location)| {
+                window
+                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(s, p)| (s, (p + location).to_f64()))
+            })
     }
 
     /// The window whose toplevel surface currently holds keyboard focus.
@@ -267,10 +274,7 @@ impl ShoestringWm {
             if self.layout.is_minimized(&w) {
                 continue;
             }
-            let loc = self
-                .workspaces
-                .saved_location(&w)
-                .unwrap_or((0, 0).into());
+            let loc = self.workspaces.saved_location(&w).unwrap_or((0, 0).into());
             self.space.map_element(w, loc, false);
         }
 
@@ -278,7 +282,9 @@ impl ShoestringWm {
         // that aren't currently mapped, e.g. ones the user minimized while
         // it was the active workspace).
         let pick = loop {
-            let Some(w) = self.workspaces.last_focused(target) else { break None };
+            let Some(w) = self.workspaces.last_focused(target) else {
+                break None;
+            };
             if self.space.elements().any(|el| el == &w) {
                 break Some(w);
             }
@@ -305,7 +311,10 @@ impl ShoestringWm {
         };
         let active = self.workspaces.active();
         if target == active {
-            tracing::debug!(ws = active.one_based(), "move_focused: target == active, skip");
+            tracing::debug!(
+                ws = active.one_based(),
+                "move_focused: target == active, skip"
+            );
             return;
         }
         tracing::debug!(
@@ -327,7 +336,9 @@ impl ShoestringWm {
 
         // Refocus whatever's next on the active workspace.
         let pick = loop {
-            let Some(w) = self.workspaces.last_focused(active) else { break None };
+            let Some(w) = self.workspaces.last_focused(active) else {
+                break None;
+            };
             if self.space.elements().any(|el| el == &w) {
                 break Some(w);
             }

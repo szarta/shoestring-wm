@@ -78,7 +78,12 @@ impl WorkspaceManager {
 
     /// Register a window with a workspace + initial location. Idempotent —
     /// later calls overwrite the assignment.
-    pub fn assign(&mut self, window: Window, workspace: WorkspaceId, location: Point<i32, Logical>) {
+    pub fn assign(
+        &mut self,
+        window: Window,
+        workspace: WorkspaceId,
+        location: Point<i32, Logical>,
+    ) {
         self.windows.insert(
             window,
             WindowInfo {

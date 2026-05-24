@@ -2,7 +2,7 @@
 //! string-named binds into (modmask, keysym) → Action lookups.
 
 use shoestring_config::{Action, Binding, Config};
-use smithay::input::keyboard::{ModifiersState, xkb};
+use smithay::input::keyboard::{xkb, ModifiersState};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -17,10 +17,18 @@ bitflags::bitflags! {
 impl ModMask {
     pub fn from_state(state: &ModifiersState) -> Self {
         let mut m = ModMask::empty();
-        if state.ctrl { m |= ModMask::CTRL; }
-        if state.alt { m |= ModMask::ALT; }
-        if state.shift { m |= ModMask::SHIFT; }
-        if state.logo { m |= ModMask::LOGO; }
+        if state.ctrl {
+            m |= ModMask::CTRL;
+        }
+        if state.alt {
+            m |= ModMask::ALT;
+        }
+        if state.shift {
+            m |= ModMask::SHIFT;
+        }
+        if state.logo {
+            m |= ModMask::LOGO;
+        }
         m
     }
 
@@ -73,7 +81,10 @@ fn compile_one(b: &Binding) -> Result<CompiledBind, String> {
     let mut mods = ModMask::empty();
     for name in &b.mods {
         let Some(m) = ModMask::parse_name(name) else {
-            return Err(format!("unknown modifier '{name}' in binding for key '{}'", b.key));
+            return Err(format!(
+                "unknown modifier '{name}' in binding for key '{}'",
+                b.key
+            ));
         };
         mods |= m;
     }

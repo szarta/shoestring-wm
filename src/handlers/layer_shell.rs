@@ -15,15 +15,15 @@
 //! [`LayerSurface`]: smithay::desktop::LayerSurface
 
 use smithay::{
-    desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
+    desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType},
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     wayland::{
         compositor::with_states,
         shell::{
             wlr_layer::{
-                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
-                WlrLayerShellHandler, WlrLayerShellState,
+                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
+                WlrLayerShellState,
             },
             xdg::PopupSurface,
         },
@@ -68,7 +68,9 @@ impl WlrLayerShellHandler for ShoestringWm {
     }
 
     fn new_popup(&mut self, _parent: WlrLayerSurface, popup: PopupSurface) {
-        let _ = self.popups.track_popup(smithay::desktop::PopupKind::Xdg(popup));
+        let _ = self
+            .popups
+            .track_popup(smithay::desktop::PopupKind::Xdg(popup));
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
@@ -90,11 +92,16 @@ impl WlrLayerShellHandler for ShoestringWm {
 /// re-`arrange` on any subsequent state change so exclusive zones stay in sync.
 pub fn handle_commit(state: &mut ShoestringWm, surface: &WlSurface) -> bool {
     // Find the output owning this layer surface (if any).
-    let Some(output) = state.space.outputs().find(|o| {
-        layer_map_for_output(o)
-            .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
-            .is_some()
-    }).cloned() else {
+    let Some(output) = state
+        .space
+        .outputs()
+        .find(|o| {
+            layer_map_for_output(o)
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .is_some()
+        })
+        .cloned()
+    else {
         return false;
     };
 

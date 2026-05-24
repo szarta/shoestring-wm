@@ -23,36 +23,36 @@ use anyhow::Result;
 use smithay::{
     backend::{
         allocator::{
-            Fourcc,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
+            Fourcc,
         },
         drm::{
-            CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType,
             compositor::FrameFlags,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
+            CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType,
         },
-        egl::{self, EGLContext, EGLDevice, EGLDisplay, context::ContextPriority},
+        egl::{self, context::ContextPriority, EGLContext, EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             element::surface::WaylandSurfaceRenderElement,
             gles::{Capability, GlesRenderer},
-            multigpu::{GpuManager, MultiRenderer, gbm::GbmGlesBackend},
+            multigpu::{gbm::GbmGlesBackend, GpuManager, MultiRenderer},
         },
         session::{
-            Event as SessionEvent, Session,
             libseat::{self, LibSeatSession},
+            Event as SessionEvent, Session,
         },
-        udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
+        udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent},
     },
     desktop::space::SpaceRenderElements,
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
         calloop::{
-            EventLoop, RegistrationToken,
             timer::{TimeoutAction, Timer},
+            EventLoop, RegistrationToken,
         },
-        drm::control::{ModeTypeFlags, connector, crtc},
+        drm::control::{connector, crtc, ModeTypeFlags},
         input::Libinput,
         rustix::fs::OFlags,
         wayland_server::backend::GlobalId,
@@ -78,12 +78,8 @@ type UdevRenderer<'a> = MultiRenderer<
     GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
 >;
 
-type ShoestringDrmOutput = DrmOutput<
-    GbmAllocator<DrmDeviceFd>,
-    GbmFramebufferExporter<DrmDeviceFd>,
-    (),
-    DrmDeviceFd,
->;
+type ShoestringDrmOutput =
+    DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
 
 type ShoestringOutputManager = DrmOutputManager<
     GbmAllocator<DrmDeviceFd>,
@@ -142,8 +138,8 @@ enum DeviceAddError {
 /// [`UdevData`] on `state.udev`. Returns once everything is registered;
 /// the actual rendering happens inside the loop.
 pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut ShoestringWm) -> Result<()> {
-    let (session, session_notifier) = LibSeatSession::new()
-        .map_err(|e| anyhow::anyhow!("libseat session init failed: {e}"))?;
+    let (session, session_notifier) =
+        LibSeatSession::new().map_err(|e| anyhow::anyhow!("libseat session init failed: {e}"))?;
     let seat_name = session.seat();
     tracing::info!(%seat_name, "libseat session acquired");
 
@@ -219,7 +215,9 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
                 if let Err(e) = libinput_context.resume() {
                     tracing::warn!(error = ?e, "libinput resume failed");
                 }
-                let Some(udev) = state.udev.as_mut() else { return };
+                let Some(udev) = state.udev.as_mut() else {
+                    return;
+                };
                 let nodes: Vec<DrmNode> = udev.backends.keys().copied().collect();
                 for node in &nodes {
                     if let Some(backend) = udev.backends.get_mut(node) {
@@ -323,9 +321,7 @@ fn device_added(
         .expect("insert drm notifier");
 
     let render_node = {
-        let display = unsafe {
-            EGLDisplay::new(gbm.clone()).map_err(DeviceAddError::AddNode)?
-        };
+        let display = unsafe { EGLDisplay::new(gbm.clone()).map_err(DeviceAddError::AddNode)? };
         let egl_device =
             EGLDevice::device_for_display(&display).map_err(DeviceAddError::AddNode)?;
         if egl_device.is_software() {
@@ -387,7 +383,9 @@ fn device_added(
 
 fn device_changed(state: &mut ShoestringWm, node: DrmNode) {
     let udev = state.udev.as_mut().expect("udev");
-    let Some(device) = udev.backends.get_mut(&node) else { return };
+    let Some(device) = udev.backends.get_mut(&node) else {
+        return;
+    };
 
     let scan = match device
         .drm_scanner
@@ -404,10 +402,16 @@ fn device_changed(state: &mut ShoestringWm, node: DrmNode) {
     let events: Vec<_> = scan.into_iter().collect();
     for ev in events {
         match ev {
-            DrmScanEvent::Connected { connector, crtc: Some(crtc) } => {
+            DrmScanEvent::Connected {
+                connector,
+                crtc: Some(crtc),
+            } => {
                 connector_connected(state, node, connector, crtc);
             }
-            DrmScanEvent::Disconnected { connector, crtc: Some(crtc) } => {
+            DrmScanEvent::Disconnected {
+                connector,
+                crtc: Some(crtc),
+            } => {
                 connector_disconnected(state, node, connector, crtc);
             }
             _ => {}
@@ -417,7 +421,9 @@ fn device_changed(state: &mut ShoestringWm, node: DrmNode) {
 
 fn device_removed(state: &mut ShoestringWm, node: DrmNode) {
     let udev = state.udev.as_mut().expect("udev");
-    let Some(device) = udev.backends.get_mut(&node) else { return };
+    let Some(device) = udev.backends.get_mut(&node) else {
+        return;
+    };
 
     let crtcs: Vec<_> = device
         .drm_scanner
@@ -445,7 +451,9 @@ fn connector_connected(
     crtc: crtc::Handle,
 ) {
     let udev = state.udev.as_mut().expect("udev");
-    let Some(device) = udev.backends.get_mut(&node) else { return };
+    let Some(device) = udev.backends.get_mut(&node) else {
+        return;
+    };
 
     let render_node = device.render_node.unwrap_or(udev.primary_gpu);
     let mut renderer = match udev.gpus.single_renderer(&render_node) {
@@ -465,9 +473,18 @@ fn connector_connected(
 
     let drm_device = device.drm_output_manager.device();
     let info = display_info::for_connector(drm_device, connector.handle());
-    let make = info.as_ref().and_then(|i| i.make()).unwrap_or_else(|| "Unknown".into());
-    let model = info.as_ref().and_then(|i| i.model()).unwrap_or_else(|| "Unknown".into());
-    let serial = info.as_ref().and_then(|i| i.serial()).unwrap_or_else(|| "Unknown".into());
+    let make = info
+        .as_ref()
+        .and_then(|i| i.make())
+        .unwrap_or_else(|| "Unknown".into());
+    let model = info
+        .as_ref()
+        .and_then(|i| i.model())
+        .unwrap_or_else(|| "Unknown".into());
+    let serial = info
+        .as_ref()
+        .and_then(|i| i.serial())
+        .unwrap_or_else(|| "Unknown".into());
 
     let mode_id = connector
         .modes()
@@ -492,10 +509,13 @@ fn connector_connected(
 
     // Lay outputs left-to-right in the order they arrive. M9 will add a
     // config-driven arrangement.
-    let x = state
-        .space
-        .outputs()
-        .fold(0, |acc, o| acc + state.space.output_geometry(o).map(|g| g.size.w).unwrap_or(0));
+    let x = state.space.outputs().fold(0, |acc, o| {
+        acc + state
+            .space
+            .output_geometry(o)
+            .map(|g| g.size.w)
+            .unwrap_or(0)
+    });
     let position = (x, 0).into();
     output.set_preferred(wl_mode);
     output.change_current_state(Some(wl_mode), None, None, Some(position));
@@ -554,7 +574,9 @@ fn connector_disconnected(
     crtc: crtc::Handle,
 ) {
     let udev = state.udev.as_mut().expect("udev");
-    let Some(device) = udev.backends.get_mut(&node) else { return };
+    let Some(device) = udev.backends.get_mut(&node) else {
+        return;
+    };
 
     if let Some(surface) = device.surfaces.remove(&crtc) {
         state.space.unmap_output(&surface.output);
@@ -571,26 +593,34 @@ impl ShoestringWm {
     /// VBlank handler: the GPU just finished presenting a frame on `crtc`.
     /// Acknowledge it and schedule the next render one frame later.
     pub(crate) fn frame_finish(&mut self, node: DrmNode, crtc: crtc::Handle) {
-        let Some(udev) = self.udev.as_mut() else { return };
-        let Some(device) = udev.backends.get_mut(&node) else { return };
-        let Some(surface) = device.surfaces.get_mut(&crtc) else { return };
+        let Some(udev) = self.udev.as_mut() else {
+            return;
+        };
+        let Some(device) = udev.backends.get_mut(&node) else {
+            return;
+        };
+        let Some(surface) = device.surfaces.get_mut(&crtc) else {
+            return;
+        };
 
         if let Err(e) = surface.drm_output.frame_submitted() {
             tracing::warn!(?crtc, error = ?e, "frame_submitted failed");
         }
 
         // Frame interval from the output's current mode.
-        let refresh_mhz = surface.output.current_mode().map(|m| m.refresh).unwrap_or(60_000);
+        let refresh_mhz = surface
+            .output
+            .current_mode()
+            .map(|m| m.refresh)
+            .unwrap_or(60_000);
         let frame_us = 1_000_000_000u64 / refresh_mhz as u64;
         let interval = Duration::from_micros(frame_us);
 
         let timer = Timer::from_duration(interval);
-        let _ = self
-            .loop_handle
-            .insert_source(timer, move |_, _, state| {
-                state.render_surface(node, crtc);
-                TimeoutAction::Drop
-            });
+        let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.render_surface(node, crtc);
+            TimeoutAction::Drop
+        });
     }
 
     /// Compose `space` onto `crtc` and queue the resulting frame.
@@ -598,18 +628,30 @@ impl ShoestringWm {
         // Snapshot the output for send_frame, since the borrow on `udev`
         // below precludes touching `self.space` while holding it.
         let output = {
-            let Some(udev) = self.udev.as_ref() else { return };
-            let Some(device) = udev.backends.get(&node) else { return };
-            let Some(surface) = device.surfaces.get(&crtc) else { return };
+            let Some(udev) = self.udev.as_ref() else {
+                return;
+            };
+            let Some(device) = udev.backends.get(&node) else {
+                return;
+            };
+            let Some(surface) = device.surfaces.get(&crtc) else {
+                return;
+            };
             surface.output.clone()
         };
 
         // Refresh first so newly-mapped surfaces show up this frame.
         self.space.refresh();
 
-        let Some(udev) = self.udev.as_mut() else { return };
-        let Some(device) = udev.backends.get_mut(&node) else { return };
-        let Some(surface) = device.surfaces.get_mut(&crtc) else { return };
+        let Some(udev) = self.udev.as_mut() else {
+            return;
+        };
+        let Some(device) = udev.backends.get_mut(&node) else {
+            return;
+        };
+        let Some(surface) = device.surfaces.get_mut(&crtc) else {
+            return;
+        };
 
         let render_node = device.render_node.unwrap_or(udev.primary_gpu);
         let mut renderer = match udev.gpus.single_renderer(&render_node) {
@@ -662,7 +704,9 @@ impl ShoestringWm {
         // buffer; otherwise frame-callback-driven clients sit idle.
         let elapsed = self.start_time.elapsed();
         self.space.elements().for_each(|w| {
-            w.send_frame(&output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
+            w.send_frame(&output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
         });
 
         self.popups.cleanup();

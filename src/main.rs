@@ -51,8 +51,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let (config, config_path) =
-        shoestring_config::load_or_default(cli.config.as_deref())?;
+    let (config, config_path) = shoestring_config::load_or_default(cli.config.as_deref())?;
     match &config_path {
         Some(p) => tracing::info!(path = %p.display(), "loaded config"),
         None => tracing::info!("no config file found; using built-in defaults"),
@@ -64,9 +63,13 @@ fn main() -> Result<()> {
     let mut state = ShoestringWm::new(&mut event_loop, display, config, config_path);
 
     let backend = cli.backend.unwrap_or_else(|| {
-        let in_session = std::env::var_os("WAYLAND_DISPLAY").is_some()
-            || std::env::var_os("DISPLAY").is_some();
-        if in_session { BackendKind::Winit } else { BackendKind::Tty }
+        let in_session =
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+        if in_session {
+            BackendKind::Winit
+        } else {
+            BackendKind::Tty
+        }
     });
     tracing::info!(?backend, "starting backend");
 

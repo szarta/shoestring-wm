@@ -7,9 +7,11 @@ use smithay::{
     desktop::Window,
     input::{
         keyboard::FilterResult,
-        pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData, MotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData, MotionEvent,
+        },
     },
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial},
+    utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
 };
 
 use crate::{
@@ -100,7 +102,11 @@ impl ShoestringWm {
             }
             Action::MoveWindowToWorkspaceRelative { delta } => {
                 let target = self.workspaces.active().shifted(delta as i32);
-                tracing::debug!(delta, target = target.one_based(), "MoveWindowToWorkspaceRelative");
+                tracing::debug!(
+                    delta,
+                    target = target.one_based(),
+                    "MoveWindowToWorkspaceRelative"
+                );
                 self.move_focused_to_workspace(target);
                 self.focus_workspace_id(target); // follow the window
             }
@@ -169,7 +175,9 @@ impl ShoestringWm {
     }
 
     fn close_focused(&mut self) {
-        let Some(window) = self.focused_window() else { return };
+        let Some(window) = self.focused_window() else {
+            return;
+        };
         window.toplevel().unwrap().send_close();
     }
 
@@ -195,7 +203,9 @@ impl ShoestringWm {
             w.toplevel().unwrap().send_pending_configure();
         });
 
-        let Some(window_loc) = self.space.element_location(window) else { return };
+        let Some(window_loc) = self.space.element_location(window) else {
+            return;
+        };
         let start_data = PointerGrabStartData {
             focus: None,
             button,
@@ -253,8 +263,12 @@ impl ShoestringWm {
             }
             InputEvent::PointerMotion { .. } => {}
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let Some(output) = self.space.outputs().next() else { return };
-                let Some(output_geo) = self.space.output_geometry(output) else { return };
+                let Some(output) = self.space.outputs().next() else {
+                    return;
+                };
+                let Some(output_geo) = self.space.output_geometry(output) else {
+                    return;
+                };
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
@@ -279,15 +293,13 @@ impl ShoestringWm {
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     let pos = pointer.current_location();
-                    let target = self
-                        .space
-                        .element_under(pos)
-                        .map(|(w, l)| (w.clone(), l));
+                    let target = self.space.element_under(pos).map(|(w, l)| (w.clone(), l));
                     let mods = keyboard.modifier_state();
 
-                    if let Some((window, _)) = target.as_ref().filter(|_| {
-                        mods.logo && (button == BTN_LEFT || button == BTN_RIGHT)
-                    }) {
+                    if let Some((window, _)) = target
+                        .as_ref()
+                        .filter(|_| mods.logo && (button == BTN_LEFT || button == BTN_RIGHT))
+                    {
                         let window = window.clone();
                         self.start_super_drag(button, &window, pos, serial);
                         // Don't deliver the press to the client — the grab owns the gesture.

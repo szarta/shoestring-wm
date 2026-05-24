@@ -2,14 +2,14 @@ use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     desktop::Window,
     reexports::wayland_server::{
-        Client,
         protocol::{wl_buffer, wl_surface::WlSurface},
+        Client,
     },
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, get_parent,
-            is_sync_subsurface, with_states,
+            get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
+            CompositorState,
         },
         shell::xdg::XdgToplevelSurfaceData,
         shm::{ShmHandler, ShmState},

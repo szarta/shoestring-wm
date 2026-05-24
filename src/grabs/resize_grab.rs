@@ -3,11 +3,10 @@ use std::cell::RefCell;
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent,
-        GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
-        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
-        GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
-        RelativeMotionEvent,
+        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
+        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -103,11 +102,18 @@ impl PointerGrab<ShoestringWm> for ResizeSurfaceGrab {
             });
         let min_w = min_size.w.max(1);
         let min_h = min_size.h.max(1);
-        let max_w = if max_size.w == 0 { i32::MAX } else { max_size.w };
-        let max_h = if max_size.h == 0 { i32::MAX } else { max_size.h };
+        let max_w = if max_size.w == 0 {
+            i32::MAX
+        } else {
+            max_size.w
+        };
+        let max_h = if max_size.h == 0 {
+            i32::MAX
+        } else {
+            max_size.h
+        };
 
-        self.last_window_size =
-            Size::from((new_w.clamp(min_w, max_w), new_h.clamp(min_h, max_h)));
+        self.last_window_size = Size::from((new_w.clamp(min_w, max_w), new_h.clamp(min_h, max_h)));
 
         let xdg = self.window.toplevel().unwrap();
         xdg.with_pending_state(|state| {
@@ -162,7 +168,11 @@ impl PointerGrab<ShoestringWm> for ResizeSurfaceGrab {
         handle.axis(data, details)
     }
 
-    fn frame(&mut self, data: &mut ShoestringWm, handle: &mut PointerInnerHandle<'_, ShoestringWm>) {
+    fn frame(
+        &mut self,
+        data: &mut ShoestringWm,
+        handle: &mut PointerInnerHandle<'_, ShoestringWm>,
+    ) {
         handle.frame(data);
     }
 
@@ -275,8 +285,14 @@ impl ResizeSurfaceState {
 
     fn commit(&mut self) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
         match *self {
-            Self::Resizing { edges, initial_rect } => Some((edges, initial_rect)),
-            Self::WaitingForLastCommit { edges, initial_rect } => {
+            Self::Resizing {
+                edges,
+                initial_rect,
+            } => Some((edges, initial_rect)),
+            Self::WaitingForLastCommit {
+                edges,
+                initial_rect,
+            } => {
                 *self = Self::Idle;
                 Some((edges, initial_rect))
             }

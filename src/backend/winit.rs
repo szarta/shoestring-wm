@@ -19,7 +19,10 @@ use smithay::{
 
 use crate::state::ShoestringWm;
 
-pub fn init_winit(event_loop: &mut EventLoop<'static, ShoestringWm>, state: &mut ShoestringWm) -> Result<()> {
+pub fn init_winit(
+    event_loop: &mut EventLoop<'static, ShoestringWm>,
+    state: &mut ShoestringWm,
+) -> Result<()> {
     // Force a physical-pixel initial size. winit's default is LogicalSize(1280, 800)
     // which gets multiplied by its guessed scale factor (often 2x-2.75x on HiDPI
     // panels in X11 sessions where nothing else actually does per-app scaling),

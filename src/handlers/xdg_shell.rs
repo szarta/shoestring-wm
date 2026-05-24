@@ -1,5 +1,7 @@
 use smithay::{
-    desktop::{PopupKind, PopupManager, Space, Window, find_popup_root_surface, get_popup_toplevel_coords},
+    desktop::{
+        find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager, Space, Window,
+    },
     reexports::wayland_server::protocol::{wl_seat, wl_surface::WlSurface},
     utils::Serial,
     wayland::{
@@ -22,7 +24,11 @@ impl XdgShellHandler for ShoestringWm {
         let window = Window::new_wayland_window(surface);
         let location = center_for_new_window(&self.space, &window);
         let active_ws = self.workspaces.active();
-        tracing::info!(?location, workspace = active_ws.one_based(), "mapping new toplevel");
+        tracing::info!(
+            ?location,
+            workspace = active_ws.one_based(),
+            "mapping new toplevel"
+        );
         self.space.map_element(window.clone(), location, false);
         self.workspaces.assign(window.clone(), active_ws, location);
         // Register with ext-foreign-toplevel-list so bars see this window.
@@ -54,7 +60,12 @@ impl XdgShellHandler for ShoestringWm {
         self.foreign_toplevels.remove(&window);
     }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             let geometry = positioner.get_geometry();
             state.geometry = geometry;
@@ -65,7 +76,8 @@ impl XdgShellHandler for ShoestringWm {
     }
 
     // move/resize requests are wired up in M3 (Super+drag pointer grabs).
-    fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+    }
     fn resize_request(
         &mut self,
         _surface: ToplevelSurface,
@@ -122,7 +134,8 @@ pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: 
         match popup {
             PopupKind::Xdg(ref xdg) => {
                 if !xdg.is_initial_configure_sent() {
-                    xdg.send_configure().expect("initial popup configure failed");
+                    xdg.send_configure()
+                        .expect("initial popup configure failed");
                 }
             }
             PopupKind::InputMethod(_) => {}

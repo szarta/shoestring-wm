@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use smithay::{
-    desktop::{Space, Window, layer_map_for_output},
+    desktop::{layer_map_for_output, Space, Window},
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{IsAlive, Logical, Rectangle},
 };
@@ -81,10 +81,7 @@ impl LayoutManager {
 /// Output usable rect for the monitor under the window's center, with any
 /// layer-shell exclusive zones (bars, docks) subtracted. Falls back to the
 /// first known output if the window sits outside every output.
-pub fn usable_rect_for(
-    space: &Space<Window>,
-    window: &Window,
-) -> Option<Rectangle<i32, Logical>> {
+pub fn usable_rect_for(space: &Space<Window>, window: &Window) -> Option<Rectangle<i32, Logical>> {
     let center = space.element_location(window).map(|loc| {
         let geo = window.geometry();
         (loc.x + geo.size.w / 2, loc.y + geo.size.h / 2)
@@ -144,7 +141,9 @@ pub fn set_layout(
     window: &Window,
     target: LayoutState,
 ) {
-    let Some(usable) = usable_rect_for(space, window) else { return };
+    let Some(usable) = usable_rect_for(space, window) else {
+        return;
+    };
     let current_loc = space.element_location(window).unwrap_or_default();
     let current_size = window.geometry().size;
     let current_rect = Rectangle::new(current_loc, current_size);
@@ -166,9 +165,7 @@ pub fn set_layout(
 
     let half_w = usable.size.w / 2;
     let new_rect = match target {
-        LayoutState::TiledLeft => {
-            Rectangle::new(usable.loc, (half_w, usable.size.h).into())
-        }
+        LayoutState::TiledLeft => Rectangle::new(usable.loc, (half_w, usable.size.h).into()),
         LayoutState::TiledRight => Rectangle::new(
             (usable.loc.x + half_w, usable.loc.y).into(),
             (usable.size.w - half_w, usable.size.h).into(),
