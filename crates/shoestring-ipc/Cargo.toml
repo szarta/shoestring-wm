@@ -1,0 +1,11 @@
+[package]
+name = "shoestring-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire types for the shoestring-wm IPC protocol."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

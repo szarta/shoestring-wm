@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = ["crates/shoestring-ipc", "crates/shoestring-config"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/barrendo/shoestring-wm"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[package]
+name = "shoestring-wm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A lightweight Rust Wayland window manager."
+
+[[bin]]
+name = "shoestring-wm"
+path = "src/main.rs"
+
+[features]
+default = ["winit", "tty"]
+winit = ["smithay/backend_winit"]
+tty = [
+    "smithay/backend_libinput",
+    "smithay/backend_udev",
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_egl",
+    "smithay/backend_session_libseat",
+    "smithay/renderer_gl",
+    "smithay/renderer_multi",
+    "dep:smithay-drm-extras",
+]
+
+[dependencies]
+shoestring-ipc = { path = "crates/shoestring-ipc" }
+shoestring-config = { path = "crates/shoestring-config" }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+bitflags = "2"
+thiserror = "2"
+
+[dependencies.smithay]
+git = "https://github.com/Smithay/smithay.git"
+rev = "95a8e45004f519f62f3490f2602c4082a7af9bf8"
+default-features = false
+features = [
+    "wayland_frontend",
+    "desktop",
+]
+
+[dependencies.smithay-drm-extras]
+git = "https://github.com/Smithay/smithay.git"
+rev = "95a8e45004f519f62f3490f2602c4082a7af9bf8"
+optional = true

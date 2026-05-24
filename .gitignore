@@ -1,0 +1,9 @@
+research/
+target/
+
+# Local task tracker (todo-sqlite-cli) — user-local, not project state.
+.todo-sqlite-cli
+todo.sqlite
+
+# Scratch notes file.
+test
