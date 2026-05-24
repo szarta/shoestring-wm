@@ -1,5 +1,6 @@
 research/
 target/
+docs/_build/
 
 # Local task tracker (todo-sqlite-cli) — user-local, not project state.
 .todo-sqlite-cli
