@@ -4,19 +4,20 @@
 //! a fuzzy-filtered dropdown. Keyboard input via wl_seat + xkbcommon
 //! (Exclusive interactivity routes every key to the menu while it's up).
 //!
-//! Modes:
-//!   --mode commands  (default) scans $PATH at startup; Enter spawns the
-//!                    selected binary detached.
-//!   --mode bookmarks reads $XDG_CONFIG_HOME/shoestring-menu/bookmarks
-//!                    (or ~/.config/shoestring-menu/bookmarks). Lines are
-//!                    `label\thandler` or bare. Handler is opened with
-//!                    xdg-open, unless it starts with `!` (exec directly).
+//! Mimics the user's existing dmenu wrappers (launch_ui_selection.sh and
+//! launch_bookmark_selection.sh): candidates come from a curated file
+//! rather than a $PATH scan, and bookmark dispatch extracts the URL from
+//! a markdown `[title](url)` segment and opens it via xdg-open.
+//!
+//! Defaults (overridable with --source PATH):
+//!   commands  $XDG_CONFIG_HOME/shoestring-wm/executables
+//!   bookmarks $XDG_CONFIG_HOME/shoestring-wm/bookmarks
 
 use std::{
     fs,
     io::Write,
     os::fd::{AsFd, AsRawFd},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
@@ -48,15 +49,16 @@ use xkbcommon::xkb;
 const INPUT_HEIGHT: u32 = 24;
 /// Dropdown row height. One row per match.
 const ROW_HEIGHT: u32 = 22;
-/// Maximum dropdown rows. Fixed-height surface so we don't need to dance
-/// with set_size + configure on every keystroke.
-const MAX_ROWS: usize = 10;
-/// Background fill, ARGB8888 (dark grey, matches the bar).
-const BG: u32 = 0xFF_22_22_22;
-/// Selected-row highlight.
-const SEL_BG: u32 = 0xFF_3D_5A_8E;
-/// Foreground (text) color.
-const FG: u32 = 0xFF_FF_FF_FF;
+/// Maximum dropdown rows. Matches dmenu's `-l 32`.
+const MAX_ROWS: usize = 32;
+/// Background fill, ARGB8888. Matches dmenu `-nb black`.
+const BG: u32 = 0xFF_00_00_00;
+/// Foreground (text) color. Matches dmenu `-nf '#66cccc'`.
+const FG: u32 = 0xFF_66_CC_CC;
+/// Selected-row highlight. Matches dmenu `-sb white`.
+const SEL_BG: u32 = 0xFF_FF_FF_FF;
+/// Selected-row text color. Matches dmenu `-sf black`.
+const SEL_FG: u32 = 0xFF_00_00_00;
 /// Font size in pixels.
 const FONT_PX: f32 = 14.0;
 /// Horizontal text inset from the strip edges.
@@ -105,7 +107,7 @@ struct State {
     cursor_byte: usize,
     /// Current mode (decides candidate source and how Enter dispatches).
     mode: Mode,
-    /// All candidates, alphabetically sorted, populated once at startup.
+    /// All candidates, in file order, populated once at startup.
     candidates: Vec<Candidate>,
     /// Indices into `candidates` for the current query, best-first. Capped
     /// at MAX_ROWS — we never render more than that.
@@ -116,9 +118,10 @@ struct State {
     matcher: fuzzy_matcher::skim::SkimMatcherV2,
 }
 
-/// One entry in the candidate list. For Commands mode `display == invoke`;
-/// for Bookmarks mode `display` is the label and `invoke` is the URL/path
-/// or `handler\turl` form.
+/// One entry in the candidate list.
+/// - Commands mode: `display == invoke` (the file line, whitespace-split at exec).
+/// - Bookmarks mode: `display` is the original markdown line; `invoke` is the URL
+///   extracted from `](...)`. xdg-open opens the URL on selection.
 #[derive(Clone, Debug)]
 struct Candidate {
     display: String,
@@ -132,12 +135,19 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let mode = parse_mode_arg()?;
-    let candidates = match mode {
-        Mode::Commands => scan_path_commands(),
-        Mode::Bookmarks => scan_bookmarks(),
+    let cli = parse_args()?;
+    let source = cli.source.unwrap_or_else(|| default_source(cli.mode));
+    let candidates = match cli.mode {
+        Mode::Commands => load_command_list(&source),
+        Mode::Bookmarks => load_bookmarks_md(&source),
     };
-    tracing::info!(mode = ?mode, count = candidates.len(), "candidates loaded");
+    tracing::info!(
+        mode = ?cli.mode,
+        source = %source.display(),
+        count = candidates.len(),
+        "candidates loaded"
+    );
+    let mode = cli.mode;
 
     let font = load_font().context("could not load any system font")?;
 
@@ -267,101 +277,95 @@ fn event_loop(
 
 // ---- CLI + candidate sources --------------------------------------------
 
-/// Single-flag CLI: `--mode commands|bookmarks` (default commands).
-/// Hand-rolled so we don't pull in clap for one flag.
-fn parse_mode_arg() -> Result<Mode> {
+struct Cli {
+    mode: Mode,
+    /// Override the default source file. None → use default_source(mode).
+    source: Option<PathBuf>,
+}
+
+/// Hand-rolled CLI: `--mode commands|bookmarks` (default commands) and
+/// `--source <path>` to override the default candidate file. Two flags;
+/// not worth pulling in clap.
+fn parse_args() -> Result<Cli> {
+    let mut mode = Mode::Commands;
+    let mut source: Option<PathBuf> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        None => Ok(Mode::Commands),
-        Some("-h" | "--help") => {
-            println!("shoestring-menu [--mode commands|bookmarks]");
-            std::process::exit(0);
-        }
-        Some("--mode") => {
-            let v = args.get(1).context("--mode needs a value")?;
-            match v.as_str() {
-                "commands" => Ok(Mode::Commands),
-                "bookmarks" => Ok(Mode::Bookmarks),
-                other => anyhow::bail!("unknown mode {other:?} (expected commands|bookmarks)"),
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                println!(
+                    "shoestring-menu [--mode commands|bookmarks] [--source PATH]\n\
+                     \n\
+                     Defaults (alongside the wm config):\n\
+                       commands  $XDG_CONFIG_HOME/shoestring-wm/executables\n\
+                       bookmarks $XDG_CONFIG_HOME/shoestring-wm/bookmarks"
+                );
+                std::process::exit(0);
             }
+            "--mode" => {
+                let v = args.get(i + 1).context("--mode needs a value")?;
+                mode = match v.as_str() {
+                    "commands" => Mode::Commands,
+                    "bookmarks" => Mode::Bookmarks,
+                    other => anyhow::bail!("unknown mode {other:?} (expected commands|bookmarks)"),
+                };
+                i += 2;
+            }
+            "--source" => {
+                let v = args.get(i + 1).context("--source needs a path")?;
+                source = Some(PathBuf::from(v));
+                i += 2;
+            }
+            other => anyhow::bail!("unknown arg {other:?}"),
         }
-        Some(other) => anyhow::bail!("unknown arg {other:?}"),
+    }
+    Ok(Cli { mode, source })
+}
+
+/// Default candidate file per mode. Lives alongside the wm's `config.toml`
+/// under `$XDG_CONFIG_HOME/shoestring-wm/` (or `$HOME/.config/...`).
+fn default_source(mode: Mode) -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_default();
+    let dir = base.join("shoestring-wm");
+    match mode {
+        Mode::Commands => dir.join("executables"),
+        Mode::Bookmarks => dir.join("bookmarks"),
     }
 }
 
-/// Walk $PATH and return deduped executable basenames (first-found wins,
-/// matching POSIX shell lookup). Sorted alphabetically so the empty-query
-/// view is stable.
-fn scan_path_commands() -> Vec<Candidate> {
-    use std::collections::HashSet;
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out: Vec<Candidate> = Vec::new();
-
-    for dir in std::env::split_paths(&path) {
-        let Ok(read) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for ent in read.flatten() {
-            let Ok(meta) = ent.metadata() else {
-                continue;
-            };
-            // Accept anything with any execute bit set. Directories named
-            // like commands are skipped via the is_file check.
-            if !meta.is_file() && !meta.file_type().is_symlink() {
-                continue;
-            }
-            // For symlinks, metadata() above followed the link (vs symlink_metadata),
-            // so this still rejects dangling links / non-files.
-            if meta.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-            let Some(name) = ent.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if seen.insert(name.clone()) {
-                out.push(Candidate {
-                    display: name.clone(),
-                    invoke: name,
-                });
-            }
+/// Load the curated command list. One command per line; lines may contain
+/// spaces (args are kept and whitespace-split at exec time). Blank lines
+/// and `#` comments are skipped. Mirrors `launch_ui_selection.sh`.
+fn load_command_list(path: &Path) -> Vec<Candidate> {
+    let raw = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = ?e, "command list unreadable");
+            return Vec::new();
         }
-    }
-    out.sort_by(|a, b| a.display.cmp(&b.display));
-    out
-}
-
-/// Resolve the bookmarks file path. `$XDG_CONFIG_HOME/shoestring-menu/bookmarks`
-/// if set, else `~/.config/shoestring-menu/bookmarks`. Returns None if neither
-/// env var resolves (no $HOME and no $XDG_CONFIG_HOME).
-fn bookmarks_path() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        let mut p = PathBuf::from(xdg);
-        p.push("shoestring-menu");
-        p.push("bookmarks");
-        return Some(p);
-    }
-    let home = std::env::var_os("HOME")?;
-    let mut p = PathBuf::from(home);
-    p.push(".config");
-    p.push("shoestring-menu");
-    p.push("bookmarks");
-    Some(p)
-}
-
-/// Parse the bookmarks file. Each non-empty, non-comment line is either:
-///   `label<TAB>handler-spec` — label shown, handler-spec opened on Enter
-///   `bare-line`              — used as both label and handler-spec
-/// handler-spec defaults to xdg-open; prefix with `!` to exec directly
-/// (whitespace-split, no shell). Comments start with `#`.
-fn scan_bookmarks() -> Vec<Candidate> {
-    let Some(path) = bookmarks_path() else {
-        tracing::warn!("no $HOME or $XDG_CONFIG_HOME; bookmarks disabled");
-        return Vec::new();
     };
-    let raw = match fs::read_to_string(&path) {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| Candidate {
+            display: l.to_string(),
+            invoke: l.to_string(),
+        })
+        .collect()
+}
+
+/// Load a markdown bookmarks file. Each entry is expected to look like
+///   `- [Title](URL) <!-- TAGS: ... -->`
+/// We display the full line (so tags and URL are fuzzy-searchable) but
+/// extract URL between `](` and the matching `)` for dispatch. Lines that
+/// don't contain a parseable URL are skipped. Mirrors
+/// `launch_bookmark_selection.sh`.
+fn load_bookmarks_md(path: &Path) -> Vec<Candidate> {
+    let raw = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = ?e, "bookmarks file unreadable");
@@ -370,20 +374,41 @@ fn scan_bookmarks() -> Vec<Candidate> {
     };
     let mut out = Vec::new();
     for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let (display, invoke) = match line.split_once('\t') {
-            Some((label, handler)) => (label.trim().to_string(), handler.trim().to_string()),
-            None => (line.to_string(), line.to_string()),
+        let Some(url) = extract_md_url(trimmed) else {
+            continue;
         };
-        if display.is_empty() || invoke.is_empty() {
-            continue;
-        }
-        out.push(Candidate { display, invoke });
+        out.push(Candidate {
+            display: trimmed.to_string(),
+            invoke: url,
+        });
     }
     out
+}
+
+/// Find the URL inside a markdown `[label](url)` segment. Tracks paren
+/// depth so URLs containing `(...)` survive. Returns None if no parseable
+/// link is present.
+fn extract_md_url(line: &str) -> Option<String> {
+    let start = line.find("](")? + 2;
+    let tail = &line[start..];
+    let mut depth = 1_i32;
+    for (i, ch) in tail.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(tail[..i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Recompute `state.matches` from `state.query`. Empty query shows the top
@@ -498,7 +523,8 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     // --- Dropdown rows ---
     for (row_idx, cand_idx) in state.matches.iter().copied().enumerate() {
         let row_top = INPUT_HEIGHT as i32 + (row_idx as i32) * ROW_HEIGHT as i32;
-        if row_idx == state.selected {
+        let selected = row_idx == state.selected;
+        if selected {
             fill_rect(
                 &mut mmap,
                 w,
@@ -521,7 +547,7 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
             FONT_PX,
             PADDING_X,
             label,
-            FG,
+            if selected { SEL_FG } else { FG },
         );
     }
 
@@ -814,24 +840,21 @@ fn dispatch_selection(state: &State) {
     };
     match state.mode {
         Mode::Commands => {
-            if let Err(e) = spawn_detached(&[&cmd]) {
+            // Whitespace-split so curated entries like `code --some-flag`
+            // exec with args. No shell quoting — users who need that can
+            // wrap their entry in a script.
+            let tokens: Vec<&str> = cmd.split_whitespace().collect();
+            if tokens.is_empty() {
+                return;
+            }
+            if let Err(e) = spawn_detached(&tokens) {
                 tracing::error!(error = ?e, "spawn failed");
             }
         }
         Mode::Bookmarks => {
-            // `!cmd args...` → exec directly (no shell). Whitespace split is
-            // deliberate — bookmarks are a personal config file, so users
-            // who need quoting can wrap in a script.
-            if let Some(rest) = cmd.strip_prefix('!') {
-                let tokens: Vec<&str> = rest.split_whitespace().collect();
-                if tokens.is_empty() {
-                    tracing::error!("bookmark `!` handler has no command");
-                    return;
-                }
-                if let Err(e) = spawn_detached(&tokens) {
-                    tracing::error!(error = ?e, "bookmark spawn failed");
-                }
-            } else if let Err(e) = spawn_detached(&["xdg-open", &cmd]) {
+            // `cmd` is the URL we extracted at load time. xdg-open routes to
+            // the user's configured default browser.
+            if let Err(e) = spawn_detached(&["xdg-open", &cmd]) {
                 tracing::error!(error = ?e, "xdg-open failed");
             }
         }
@@ -1030,3 +1053,41 @@ noop_dispatch!(
     WlOutput,
     ZwlrLayerShellV1,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_url_basic() {
+        assert_eq!(
+            extract_md_url("- [Foo](https://example.com)").as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn extract_url_with_tag_comment() {
+        let line = "- [Foo](https://example.com) <!-- TAGS: a,b -->";
+        assert_eq!(extract_md_url(line).as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn extract_url_with_inner_parens() {
+        // Wikipedia-style URLs with disambiguation parens.
+        let line = "- [Bar](https://en.wikipedia.org/wiki/Foo_(bar)) <!-- T -->";
+        assert_eq!(
+            extract_md_url(line).as_deref(),
+            Some("https://en.wikipedia.org/wiki/Foo_(bar)")
+        );
+    }
+
+    #[test]
+    fn extract_url_missing_returns_none() {
+        assert_eq!(extract_md_url("- plain text, no link").as_deref(), None);
+        assert_eq!(
+            extract_md_url("- [unterminated](https://x").as_deref(),
+            None
+        );
+    }
+}
