@@ -76,6 +76,7 @@ impl ShoestringWm {
         for w in bind_warnings {
             tracing::warn!(target: "shoestring_wm::config", "{w}");
         }
+        bindings.log_compiled();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);

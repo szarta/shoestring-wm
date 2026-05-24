@@ -75,6 +75,21 @@ impl BindingTable {
             .find(|b| b.mods == mods && b.keysym == keysym)
             .map(|b| &b.action)
     }
+
+    /// Emit one debug-level line per compiled bind so RUST_LOG=debug captures
+    /// the live binding table at startup. Useful when a bind appears not to
+    /// fire — confirms it was actually registered with the expected keysym.
+    pub fn log_compiled(&self) {
+        for b in &self.binds {
+            tracing::debug!(
+                keysym = b.keysym,
+                keysym_name = %xkb::keysym_get_name(xkb::Keysym::new(b.keysym)),
+                mods = ?b.mods,
+                action = ?b.action,
+                "compiled bind"
+            );
+        }
+    }
 }
 
 fn compile_one(b: &Binding) -> Result<CompiledBind, String> {

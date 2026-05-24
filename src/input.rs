@@ -248,10 +248,19 @@ impl ShoestringWm {
                         // a binding registered as "q" matches Super+Shift+q
                         // (which would otherwise produce keysym Q).
                         let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() else {
+                            tracing::debug!("keypress: no raw_latin/current sym");
                             return FilterResult::Forward;
                         };
                         let mask = ModMask::from_state(mods);
-                        match state.bindings.lookup(mask, sym.raw()) {
+                        let matched = state.bindings.lookup(mask, sym.raw());
+                        tracing::debug!(
+                            keysym = sym.raw(),
+                            keysym_name = %smithay::input::keyboard::xkb::keysym_get_name(sym),
+                            ?mask,
+                            matched = matched.is_some(),
+                            "keypress"
+                        );
+                        match matched {
                             Some(a) => FilterResult::Intercept(a.clone()),
                             None => FilterResult::Forward,
                         }
