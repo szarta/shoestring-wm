@@ -42,14 +42,35 @@ struct Cli {
     command: Option<String>,
 }
 
+/// Initialise tracing. Writes to stderr by default; if `SHOESTRING_WM_LOG`
+/// is set, appends to that file instead (with ANSI escapes disabled so the
+/// file stays grep-friendly). The file case is the practical way to debug
+/// the TTY backend, where stderr scrolls past on the console.
+fn init_tracing() {
+    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match std::env::var_os("SHOESTRING_WM_LOG") {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .expect("open SHOESTRING_WM_LOG path");
+            tracing_subscriber::fmt()
+                .with_env_filter(env)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(env).init();
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
     let (config, config_path) = shoestring_config::load_or_default(cli.config.as_deref())?;
     match &config_path {
