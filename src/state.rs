@@ -85,7 +85,12 @@ impl ShoestringWm {
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
-        seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        seat.add_keyboard(
+            Default::default(),
+            config.general.repeat_delay,
+            config.general.repeat_rate,
+        )
+        .unwrap();
         seat.add_pointer();
 
         let space = Space::default();

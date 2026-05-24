@@ -18,11 +18,31 @@ pub struct Config {
     pub bindings: Vec<Binding>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct General {
     #[serde(default)]
     pub focus_mode: FocusMode,
+    /// Milliseconds before a held key starts repeating. Matches the
+    /// X server's default ("Repeat delay"). Lower = more aggressive.
+    #[serde(default = "default_repeat_delay")]
+    pub repeat_delay: i32,
+    /// Repeats-per-second once repeat kicks in.
+    #[serde(default = "default_repeat_rate")]
+    pub repeat_rate: i32,
+}
+
+fn default_repeat_delay() -> i32 { 600 }
+fn default_repeat_rate() -> i32 { 25 }
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            focus_mode: FocusMode::default(),
+            repeat_delay: default_repeat_delay(),
+            repeat_rate: default_repeat_rate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
