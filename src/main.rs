@@ -1,9 +1,16 @@
 //! shoestring-menu: dmenu-style launcher for shoestring-wm.
 //!
-//! Top-anchored layer-shell surface with an editable single-line input.
-//! Keyboard input via wl_seat + xkbcommon (Exclusive interactivity, so the
-//! compositor routes all key events to the menu while it's up). Command
-//! mode (PATH scan + spawn) arrives in M2; bookmarks mode in M3.
+//! Top-anchored layer-shell surface with an editable single-line input and
+//! a fuzzy-filtered dropdown. Keyboard input via wl_seat + xkbcommon
+//! (Exclusive interactivity routes every key to the menu while it's up).
+//!
+//! Modes:
+//!   --mode commands  (default) scans $PATH at startup; Enter spawns the
+//!                    selected binary detached.
+//!   --mode bookmarks reads $XDG_CONFIG_HOME/shoestring-menu/bookmarks
+//!                    (or ~/.config/shoestring-menu/bookmarks). Lines are
+//!                    `label\thandler` or bare. Handler is opened with
+//!                    xdg-open, unless it starts with `!` (exec directly).
 
 use std::{
     fs,
@@ -128,9 +135,7 @@ fn main() -> Result<()> {
     let mode = parse_mode_arg()?;
     let candidates = match mode {
         Mode::Commands => scan_path_commands(),
-        // M3 fills this in; for now an empty list keeps the binary usable
-        // (Esc still works) when called with --mode bookmarks.
-        Mode::Bookmarks => Vec::new(),
+        Mode::Bookmarks => scan_bookmarks(),
     };
     tracing::info!(mode = ?mode, count = candidates.len(), "candidates loaded");
 
@@ -325,6 +330,59 @@ fn scan_path_commands() -> Vec<Candidate> {
         }
     }
     out.sort_by(|a, b| a.display.cmp(&b.display));
+    out
+}
+
+/// Resolve the bookmarks file path. `$XDG_CONFIG_HOME/shoestring-menu/bookmarks`
+/// if set, else `~/.config/shoestring-menu/bookmarks`. Returns None if neither
+/// env var resolves (no $HOME and no $XDG_CONFIG_HOME).
+fn bookmarks_path() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let mut p = PathBuf::from(xdg);
+        p.push("shoestring-menu");
+        p.push("bookmarks");
+        return Some(p);
+    }
+    let home = std::env::var_os("HOME")?;
+    let mut p = PathBuf::from(home);
+    p.push(".config");
+    p.push("shoestring-menu");
+    p.push("bookmarks");
+    Some(p)
+}
+
+/// Parse the bookmarks file. Each non-empty, non-comment line is either:
+///   `label<TAB>handler-spec` — label shown, handler-spec opened on Enter
+///   `bare-line`              — used as both label and handler-spec
+/// handler-spec defaults to xdg-open; prefix with `!` to exec directly
+/// (whitespace-split, no shell). Comments start with `#`.
+fn scan_bookmarks() -> Vec<Candidate> {
+    let Some(path) = bookmarks_path() else {
+        tracing::warn!("no $HOME or $XDG_CONFIG_HOME; bookmarks disabled");
+        return Vec::new();
+    };
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = ?e, "bookmarks file unreadable");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (display, invoke) = match line.split_once('\t') {
+            Some((label, handler)) => (label.trim().to_string(), handler.trim().to_string()),
+            None => (line.to_string(), line.to_string()),
+        };
+        if display.is_empty() || invoke.is_empty() {
+            continue;
+        }
+        out.push(Candidate { display, invoke });
+    }
     out
 }
 
@@ -761,8 +819,21 @@ fn dispatch_selection(state: &State) {
             }
         }
         Mode::Bookmarks => {
-            // M3 fills in the real handler. Log so the dev flow is obvious.
-            tracing::warn!(target = %cmd, "bookmarks dispatch not implemented yet (M3)");
+            // `!cmd args...` → exec directly (no shell). Whitespace split is
+            // deliberate — bookmarks are a personal config file, so users
+            // who need quoting can wrap in a script.
+            if let Some(rest) = cmd.strip_prefix('!') {
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                if tokens.is_empty() {
+                    tracing::error!("bookmark `!` handler has no command");
+                    return;
+                }
+                if let Err(e) = spawn_detached(&tokens) {
+                    tracing::error!(error = ?e, "bookmark spawn failed");
+                }
+            } else if let Err(e) = spawn_detached(&["xdg-open", &cmd]) {
+                tracing::error!(error = ?e, "xdg-open failed");
+            }
         }
     }
 }
