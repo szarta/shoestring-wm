@@ -37,11 +37,17 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 use xkbcommon::xkb;
 
-/// Input strip height in logical pixels. The dropdown (M2) will grow the
-/// total surface height beyond this.
+/// Input strip height in logical pixels.
 const INPUT_HEIGHT: u32 = 24;
+/// Dropdown row height. One row per match.
+const ROW_HEIGHT: u32 = 22;
+/// Maximum dropdown rows. Fixed-height surface so we don't need to dance
+/// with set_size + configure on every keystroke.
+const MAX_ROWS: usize = 10;
 /// Background fill, ARGB8888 (dark grey, matches the bar).
 const BG: u32 = 0xFF_22_22_22;
+/// Selected-row highlight.
+const SEL_BG: u32 = 0xFF_3D_5A_8E;
 /// Foreground (text) color.
 const FG: u32 = 0xFF_FF_FF_FF;
 /// Font size in pixels.
@@ -65,6 +71,12 @@ const FONT_CANDIDATES: &[&str] = &[
     "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Commands,
+    Bookmarks,
+}
+
 struct State {
     compositor: WlCompositor,
     shm: WlShm,
@@ -84,6 +96,26 @@ struct State {
     /// landing on a char boundary.
     query: String,
     cursor_byte: usize,
+    /// Current mode (decides candidate source and how Enter dispatches).
+    mode: Mode,
+    /// All candidates, alphabetically sorted, populated once at startup.
+    candidates: Vec<Candidate>,
+    /// Indices into `candidates` for the current query, best-first. Capped
+    /// at MAX_ROWS — we never render more than that.
+    matches: Vec<usize>,
+    /// Selected row in `matches`. Clamped to matches.len()-1.
+    selected: usize,
+    /// Shared fuzzy matcher. Created once.
+    matcher: fuzzy_matcher::skim::SkimMatcherV2,
+}
+
+/// One entry in the candidate list. For Commands mode `display == invoke`;
+/// for Bookmarks mode `display` is the label and `invoke` is the URL/path
+/// or `handler\turl` form.
+#[derive(Clone, Debug)]
+struct Candidate {
+    display: String,
+    invoke: String,
 }
 
 fn main() -> Result<()> {
@@ -92,6 +124,15 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    let mode = parse_mode_arg()?;
+    let candidates = match mode {
+        Mode::Commands => scan_path_commands(),
+        // M3 fills this in; for now an empty list keeps the binary usable
+        // (Esc still works) when called with --mode bookmarks.
+        Mode::Bookmarks => Vec::new(),
+    };
+    tracing::info!(mode = ?mode, count = candidates.len(), "candidates loaded");
 
     let font = load_font().context("could not load any system font")?;
 
@@ -127,7 +168,14 @@ fn main() -> Result<()> {
         xkb_state: None,
         query: String::new(),
         cursor_byte: 0,
+        mode,
+        candidates,
+        matches: Vec::new(),
+        selected: 0,
+        matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
     };
+    // Seed the visible matches with the empty-query result (top alphabetical).
+    recompute_matches(&mut state);
 
     let surface = state.compositor.create_surface(&qh, ());
     // Layer::Overlay so the menu floats above normal app windows. None for
@@ -140,7 +188,10 @@ fn main() -> Result<()> {
         &qh,
         (),
     );
-    layer_surface.set_size(0, INPUT_HEIGHT);
+    // Fixed total height: input strip plus the dropdown's full slot capacity.
+    // Empty rows render as solid BG, so the surface always looks "right".
+    let total_h = INPUT_HEIGHT + (MAX_ROWS as u32) * ROW_HEIGHT;
+    layer_surface.set_size(0, total_h);
     layer_surface.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
     // Exclusive zone 0: we're an overlay, not a reserved strip — apps under
     // us keep their full window area.
@@ -209,6 +260,130 @@ fn event_loop(
     Ok(())
 }
 
+// ---- CLI + candidate sources --------------------------------------------
+
+/// Single-flag CLI: `--mode commands|bookmarks` (default commands).
+/// Hand-rolled so we don't pull in clap for one flag.
+fn parse_mode_arg() -> Result<Mode> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => Ok(Mode::Commands),
+        Some("-h" | "--help") => {
+            println!("shoestring-menu [--mode commands|bookmarks]");
+            std::process::exit(0);
+        }
+        Some("--mode") => {
+            let v = args.get(1).context("--mode needs a value")?;
+            match v.as_str() {
+                "commands" => Ok(Mode::Commands),
+                "bookmarks" => Ok(Mode::Bookmarks),
+                other => anyhow::bail!("unknown mode {other:?} (expected commands|bookmarks)"),
+            }
+        }
+        Some(other) => anyhow::bail!("unknown arg {other:?}"),
+    }
+}
+
+/// Walk $PATH and return deduped executable basenames (first-found wins,
+/// matching POSIX shell lookup). Sorted alphabetically so the empty-query
+/// view is stable.
+fn scan_path_commands() -> Vec<Candidate> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<Candidate> = Vec::new();
+
+    for dir in std::env::split_paths(&path) {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in read.flatten() {
+            let Ok(meta) = ent.metadata() else {
+                continue;
+            };
+            // Accept anything with any execute bit set. Directories named
+            // like commands are skipped via the is_file check.
+            if !meta.is_file() && !meta.file_type().is_symlink() {
+                continue;
+            }
+            // For symlinks, metadata() above followed the link (vs symlink_metadata),
+            // so this still rejects dangling links / non-files.
+            if meta.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+            let Some(name) = ent.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if seen.insert(name.clone()) {
+                out.push(Candidate {
+                    display: name.clone(),
+                    invoke: name,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.display.cmp(&b.display));
+    out
+}
+
+/// Recompute `state.matches` from `state.query`. Empty query shows the top
+/// alphabetical entries; non-empty query fuzzy-scores everything and keeps
+/// the MAX_ROWS best.
+fn recompute_matches(state: &mut State) {
+    use fuzzy_matcher::FuzzyMatcher;
+
+    state.matches.clear();
+    if state.query.is_empty() {
+        state
+            .matches
+            .extend(0..state.candidates.len().min(MAX_ROWS));
+    } else {
+        let mut scored: Vec<(i64, usize)> = state
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                state
+                    .matcher
+                    .fuzzy_match(&c.display, &state.query)
+                    .map(|s| (s, i))
+            })
+            .collect();
+        // Higher score first; break ties by alphabetical order (stable input).
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        state
+            .matches
+            .extend(scored.into_iter().take(MAX_ROWS).map(|(_, i)| i));
+    }
+    if state.selected >= state.matches.len() {
+        state.selected = state.matches.len().saturating_sub(1);
+    }
+}
+
+/// Spawn a child fully detached from this process: setsid so SIGHUP from
+/// our exit doesn't kill it, stdio nulled, no waiting (orphan reaps to PID 1).
+fn spawn_detached(argv: &[&str]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let (prog, rest) = argv.split_first().context("empty argv")?;
+    let mut cmd = Command::new(prog);
+    cmd.args(rest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Detach: new session means we don't get killed by the terminal/parent.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn().with_context(|| format!("spawn {prog}"))?;
+    Ok(())
+}
+
 fn load_font() -> Result<Font> {
     if let Some(path) = std::env::var_os("SHOESTRING_MENU_FONT") {
         let bytes = fs::read(&path).context("$SHOESTRING_MENU_FONT unreadable")?;
@@ -244,13 +419,53 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
     fill_bg(&mut mmap, w, h, BG);
 
-    // Draw prompt + query as one string so the caret math stays simple.
+    // --- Input strip (top INPUT_HEIGHT pixels) ---
     let line = format!("{}{}", PROMPT, state.query);
-    draw_text(&mut mmap, w, h, &state.font, FONT_PX, PADDING_X, &line, FG);
-    // Caret: vertical bar at the pixel offset of (PROMPT + query[..cursor]).
+    draw_text_at(
+        &mut mmap,
+        w,
+        h,
+        0,
+        INPUT_HEIGHT,
+        &state.font,
+        FONT_PX,
+        PADDING_X,
+        &line,
+        FG,
+    );
     let pre_caret = format!("{}{}", PROMPT, &state.query[..state.cursor_byte]);
     let caret_x = PADDING_X + measure_text(&state.font, FONT_PX, &pre_caret);
-    draw_caret(&mut mmap, w, h, caret_x, FG);
+    draw_caret(&mut mmap, w, INPUT_HEIGHT, caret_x, FG);
+
+    // --- Dropdown rows ---
+    for (row_idx, cand_idx) in state.matches.iter().copied().enumerate() {
+        let row_top = INPUT_HEIGHT as i32 + (row_idx as i32) * ROW_HEIGHT as i32;
+        if row_idx == state.selected {
+            fill_rect(
+                &mut mmap,
+                w,
+                h,
+                0,
+                row_top,
+                w as i32,
+                ROW_HEIGHT as i32,
+                SEL_BG,
+            );
+        }
+        let label = &state.candidates[cand_idx].display;
+        draw_text_at(
+            &mut mmap,
+            w,
+            h,
+            row_top,
+            ROW_HEIGHT,
+            &state.font,
+            FONT_PX,
+            PADDING_X,
+            label,
+            FG,
+        );
+    }
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer =
@@ -274,11 +489,17 @@ fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
     }
 }
 
+/// Draw one line of text vertically centered inside [band_top, band_top+band_h]
+/// on a surface of size (w, surface_h). Glyphs are clipped to the full surface
+/// — band_h only affects baseline placement, not clipping, so glyphs near the
+/// font's ascent/descent extremes don't lose pixels at row boundaries.
 #[allow(clippy::too_many_arguments)]
-fn draw_text(
+fn draw_text_at(
     mmap: &mut MmapMut,
     w: u32,
-    h: u32,
+    surface_h: u32,
+    band_top: i32,
+    band_h: u32,
     font: &Font,
     size_px: f32,
     x_start: i32,
@@ -294,7 +515,7 @@ fn draw_text(
                 new_line_size: size_px,
             });
     let band = line_metrics.ascent - line_metrics.descent;
-    let baseline_y = ((h as f32 - band) / 2.0 + line_metrics.ascent).round() as i32;
+    let baseline_y = band_top + ((band_h as f32 - band) / 2.0 + line_metrics.ascent).round() as i32;
 
     let mut pen_x = x_start as f32;
     for ch in text.chars() {
@@ -304,7 +525,7 @@ fn draw_text(
         blit_alpha(
             mmap,
             w,
-            h,
+            surface_h,
             gx,
             gy,
             metrics.width as u32,
@@ -313,6 +534,37 @@ fn draw_text(
             color,
         );
         pen_x += metrics.advance_width;
+    }
+}
+
+/// Solid-color rect blit. Used for the selected-row highlight.
+#[allow(clippy::too_many_arguments)]
+fn fill_rect(
+    mmap: &mut MmapMut,
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    rect_w: i32,
+    rect_h: i32,
+    color: u32,
+) {
+    let bytes = color.to_ne_bytes();
+    let stride = w as usize * 4;
+    let x0 = x.max(0) as usize;
+    let x1 = (x + rect_w).clamp(0, w as i32) as usize;
+    let y0 = y.max(0) as usize;
+    let y1 = (y + rect_h).clamp(0, h as i32) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let pixel = bytes;
+    for row in y0..y1 {
+        let row_off = row * stride;
+        for col in x0..x1 {
+            let off = row_off + col * 4;
+            mmap[off..off + 4].copy_from_slice(&pixel);
+        }
     }
 }
 
@@ -396,26 +648,40 @@ fn draw_caret(mmap: &mut MmapMut, w: u32, h: u32, x: i32, color: u32) {
 /// Apply a single keysym (already translated through xkb) plus optional
 /// printable UTF-8 text to the query buffer. Returns true if the redraw
 /// flag should be raised.
-fn handle_key(state: &mut State, sym: xkb::Keysym, utf8: &str, ctrl: bool) -> bool {
+fn handle_key(state: &mut State, sym: xkb::Keysym, utf8: &str, ctrl: bool, shift: bool) -> bool {
     use xkb::keysyms::*;
     let raw = sym.raw();
+
+    // -- Exit / dispatch --
     if raw == KEY_Escape {
         state.running = false;
         return false;
     }
-    if raw == KEY_BackSpace {
-        if state.cursor_byte == 0 {
-            return false;
+    if raw == KEY_Return || raw == KEY_KP_Enter {
+        dispatch_selection(state);
+        state.running = false;
+        return false;
+    }
+
+    // -- Selection navigation --
+    if raw == KEY_Down || (raw == KEY_Tab && !shift) {
+        if !state.matches.is_empty() {
+            state.selected = (state.selected + 1) % state.matches.len();
         }
-        let prev = state.query[..state.cursor_byte]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        state.query.replace_range(prev..state.cursor_byte, "");
-        state.cursor_byte = prev;
         return true;
     }
+    if raw == KEY_Up || (raw == KEY_ISO_Left_Tab) || (raw == KEY_Tab && shift) {
+        if !state.matches.is_empty() {
+            state.selected = if state.selected == 0 {
+                state.matches.len() - 1
+            } else {
+                state.selected - 1
+            };
+        }
+        return true;
+    }
+
+    // -- Caret motion --
     if raw == KEY_Left {
         let prev = state.query[..state.cursor_byte]
             .char_indices()
@@ -441,10 +707,28 @@ fn handle_key(state: &mut State, sym: xkb::Keysym, utf8: &str, ctrl: bool) -> bo
         state.cursor_byte = state.query.len();
         return true;
     }
-    // Ctrl+U: clear the line (dmenu convention).
+
+    // -- Query edits (must recompute_matches) --
+    if raw == KEY_BackSpace {
+        if state.cursor_byte == 0 {
+            return false;
+        }
+        let prev = state.query[..state.cursor_byte]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        state.query.replace_range(prev..state.cursor_byte, "");
+        state.cursor_byte = prev;
+        state.selected = 0;
+        recompute_matches(state);
+        return true;
+    }
     if ctrl && (raw == KEY_u || raw == KEY_U) {
         state.query.clear();
         state.cursor_byte = 0;
+        state.selected = 0;
+        recompute_matches(state);
         return true;
     }
     // Insert any printable text. xkb's get_utf8 returns "" for non-character
@@ -455,7 +739,32 @@ fn handle_key(state: &mut State, sym: xkb::Keysym, utf8: &str, ctrl: bool) -> bo
     }
     state.query.insert_str(state.cursor_byte, utf8);
     state.cursor_byte += utf8.len();
+    state.selected = 0;
+    recompute_matches(state);
     true
+}
+
+/// Spawn the currently-selected match, or the literal query if no match is
+/// highlighted. M2 only handles Mode::Commands; M3 wires Mode::Bookmarks.
+fn dispatch_selection(state: &State) {
+    let cmd: String = if let Some(idx) = state.matches.get(state.selected).copied() {
+        state.candidates[idx].invoke.clone()
+    } else if !state.query.is_empty() {
+        state.query.clone()
+    } else {
+        return;
+    };
+    match state.mode {
+        Mode::Commands => {
+            if let Err(e) = spawn_detached(&[&cmd]) {
+                tracing::error!(error = ?e, "spawn failed");
+            }
+        }
+        Mode::Bookmarks => {
+            // M3 fills in the real handler. Log so the dev flow is obvious.
+            tracing::warn!(target = %cmd, "bookmarks dispatch not implemented yet (M3)");
+        }
+    }
 }
 
 // ---- Wayland dispatch impls ---------------------------------------------
@@ -489,7 +798,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
             } => {
                 layer_surface.ack_configure(serial);
                 let w = if width == 0 { 1 } else { width };
-                let h = if height == 0 { INPUT_HEIGHT } else { height };
+                let default_h = INPUT_HEIGHT + (MAX_ROWS as u32) * ROW_HEIGHT;
+                let h = if height == 0 { default_h } else { height };
                 state.size = Some((w, h));
                 state.dirty = true;
             }
@@ -614,7 +924,9 @@ impl Dispatch<WlKeyboard, ()> for State {
                 let utf8 = xkb_state.key_get_utf8(keycode);
                 let ctrl =
                     xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
-                if handle_key(state, sym, &utf8, ctrl) {
+                let shift =
+                    xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
+                if handle_key(state, sym, &utf8, ctrl, shift) {
                     state.dirty = true;
                 }
             }

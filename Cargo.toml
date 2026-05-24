@@ -39,3 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Keysym translation for wl_keyboard events. Same version shoestring-wm
 # resolves to, so the on-disk crate cache is shared.
 xkbcommon = "0.9"
+
+# skim-style fuzzy scoring. Small (one transitive crate, `thread_local`)
+# and gives dmenu/fzf-style subsequence matches out of the box.
+fuzzy-matcher = "0.3"
