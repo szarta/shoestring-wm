@@ -37,7 +37,14 @@ impl XdgShellHandler for ShoestringWm {
         let handle = self
             .foreign_toplevel_list
             .new_toplevel::<crate::state::ShoestringWm>("", "");
+        let id = handle.identifier();
         self.foreign_toplevels.insert(window.clone(), handle);
+        self.emit_ipc(shoestring_ipc::Event::WindowOpened {
+            id,
+            title: String::new(),
+            app_id: String::new(),
+            workspace: active_ws.one_based(),
+        });
         // Auto-focus newly mapped windows so the user doesn't have to click
         // them first. Matches the focusNew=yes Openbox behavior.
         self.focus_window(&window);
@@ -57,7 +64,13 @@ impl XdgShellHandler for ShoestringWm {
         self.layout.forget(&window);
         self.workspaces.forget(&window);
         // FT handle's Drop sends `closed`; just removing the entry suffices.
-        self.foreign_toplevels.remove(&window);
+        let id = self
+            .foreign_toplevels
+            .remove(&window)
+            .map(|h| h.identifier());
+        if let Some(id) = id {
+            self.emit_ipc(shoestring_ipc::Event::WindowClosed { id });
+        }
     }
 
     fn reposition_request(

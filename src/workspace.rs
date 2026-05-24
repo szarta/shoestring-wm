@@ -120,6 +120,13 @@ impl WorkspaceManager {
             .collect()
     }
 
+    /// Every tracked window with its workspace. Used by IPC `Windows` queries.
+    pub fn windows_on_any(&self) -> impl Iterator<Item = (Window, WorkspaceId)> + '_ {
+        self.windows
+            .iter()
+            .map(|(w, info)| (w.clone(), info.workspace))
+    }
+
     pub fn forget(&mut self, window: &Window) {
         self.windows.remove(window);
         for stack in &mut self.focus_history {

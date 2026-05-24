@@ -96,12 +96,15 @@ shoestring-wm/                  (workspace root)
 │   ├── workspace.rs            (workspace data + switching)
 │   ├── output.rs               (per-output state, hotplug)
 │   ├── config/                 (parse, watch, types)
-│   ├── ipc.rs                  (milestone 9 — server)
+│   ├── ipc.rs                  (M9 — server; newline-JSON over unix socket)
 │   └── util.rs
 ├── crates/
-│   ├── shoestring-ipc/         (Request/Response/Event types — published)
+│   ├── shoestring-ipc/         (Request/Response/Event wire types)
 │   │   ├── Cargo.toml
 │   │   └── src/lib.rs
+│   ├── shoestring-ctl/         (reference CLI client; M9)
+│   │   ├── Cargo.toml
+│   │   └── src/main.rs
 │   └── shoestring-config/      (config types, parser; depends on serde only)
 │       ├── Cargo.toml
 │       └── src/lib.rs

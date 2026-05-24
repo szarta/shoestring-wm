@@ -61,6 +61,8 @@ pub struct ShoestringWm {
     pub data_device_state: DataDeviceState,
 
     pub seat: Seat<Self>,
+
+    pub ipc: Option<crate::ipc::Server>,
 }
 
 impl ShoestringWm {
@@ -128,6 +130,7 @@ impl ShoestringWm {
             seat_state,
             data_device_state,
             seat,
+            ipc: None,
         }
     }
 
@@ -211,6 +214,9 @@ impl ShoestringWm {
         });
         let active = self.workspaces.active();
         self.workspaces.record_focus(active, window);
+
+        let id = self.foreign_toplevels.get(window).map(|h| h.identifier());
+        self.emit_ipc(shoestring_ipc::Event::WindowFocused { id });
     }
 
     /// Clear keyboard focus and deactivate every mapped window. Used when
@@ -225,6 +231,7 @@ impl ShoestringWm {
             w.set_activated(false);
             w.toplevel().unwrap().send_pending_configure();
         });
+        self.emit_ipc(shoestring_ipc::Event::WindowFocused { id: None });
     }
 
     /// Find a tracked window by its xdg toplevel surface. Considers both
@@ -300,6 +307,9 @@ impl ShoestringWm {
             to = target.one_based(),
             "workspace switched",
         );
+        self.emit_ipc(shoestring_ipc::Event::WorkspaceChanged {
+            active: target.one_based(),
+        });
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from

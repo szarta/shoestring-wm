@@ -5,6 +5,7 @@ mod binds;
 mod grabs;
 mod handlers;
 mod input;
+mod ipc;
 mod layout;
 mod state;
 mod workspace;
@@ -127,14 +128,18 @@ fn main() -> Result<()> {
         }
     }
 
+    // Point child processes at our socket.
+    std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
+
+    // IPC socket goes up after WAYLAND_DISPLAY is exported so
+    // default_socket_path() can resolve it.
+    state.start_ipc();
+
     tracing::info!(
         socket = ?state.socket_name,
         version = env!("CARGO_PKG_VERSION"),
         "shoestring-wm ready",
     );
-
-    // Point child processes at our socket.
-    std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
     if let Some(cmd) = cli.command.as_deref().or(Some("weston-terminal")) {
         spawn_client(cmd);

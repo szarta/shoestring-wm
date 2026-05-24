@@ -555,11 +555,20 @@ fn connector_connected(
     };
 
     let surface = SurfaceData {
-        output,
+        output: output.clone(),
         global: Some(global),
         drm_output,
     };
     device.surfaces.insert(crtc, surface);
+
+    state.emit_ipc(shoestring_ipc::Event::OutputAdded(
+        shoestring_ipc::OutputSummary {
+            name: output.name(),
+            width: wl_mode.size.w,
+            height: wl_mode.size.h,
+            scale: state.config.general.output_scale,
+        },
+    ));
 
     // First render is scheduled as an idle task so we return out of this
     // event handler before touching the surface again.
@@ -580,12 +589,14 @@ fn connector_disconnected(
     };
 
     if let Some(surface) = device.surfaces.remove(&crtc) {
+        let name = surface.output.name();
         state.space.unmap_output(&surface.output);
         state.space.refresh();
         surface.output.leave_all();
         if let Some(global) = surface.global {
             state.display_handle.remove_global::<ShoestringWm>(global);
         }
+        state.emit_ipc(shoestring_ipc::Event::OutputRemoved { name });
         tracing::info!(?node, ?crtc, conn = ?connector.handle(), "connector disconnected");
     }
 }

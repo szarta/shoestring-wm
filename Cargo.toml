@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/shoestring-ipc", "crates/shoestring-config"]
+members = ["crates/shoestring-ipc", "crates/shoestring-config", "crates/shoestring-ctl"]
 
 [workspace.package]
 version = "0.1.0"
@@ -43,6 +43,7 @@ tty = [
 [dependencies]
 shoestring-ipc = { path = "crates/shoestring-ipc" }
 shoestring-config = { path = "crates/shoestring-config" }
+serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

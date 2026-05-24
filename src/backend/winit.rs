@@ -72,6 +72,14 @@ pub fn init_winit(
     output.set_preferred(mode);
 
     state.space.map_output(&output, (0, 0));
+    state.emit_ipc(shoestring_ipc::Event::OutputAdded(
+        shoestring_ipc::OutputSummary {
+            name: output.name(),
+            width: mode.size.w,
+            height: mode.size.h,
+            scale: state.config.general.output_scale,
+        },
+    ));
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 

@@ -100,5 +100,10 @@ fn sync_foreign_toplevel(state: &mut ShoestringWm, window: &Window) {
     }
     if changed {
         handle.send_done();
+        state.emit_ipc(shoestring_ipc::Event::WindowTitleChanged {
+            id: handle.identifier(),
+            title: title.unwrap_or_default(),
+            app_id: app_id.unwrap_or_default(),
+        });
     }
 }
