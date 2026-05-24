@@ -34,6 +34,12 @@ anyhow = "1"
 # so this adds zero new crates.
 libc = "0.2"
 
+# shoestring-wm IPC wire types — for workspace + focus events. Path dep
+# across repo roots is deliberate: the two projects live side-by-side in
+# ~/data and ship as a pair.
+shoestring-ipc = { path = "../shoestring-wm/crates/shoestring-ipc" }
+serde_json = "1"
+
 # Structured logs (env-filterable). Match shoestring-wm so RUST_LOG works
 # the same way.
 tracing = "0.1"

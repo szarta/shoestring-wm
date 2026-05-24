@@ -1,8 +1,15 @@
 //! shoestring-bar: a lightweight Wayland status bar.
 //!
 //! Layer-shell anchored to the bottom of the focused output, drawing into a
-//! single `wl_shm` buffer. Window list / clock / workspace indicator land in
-//! follow-up commits — this milestone just proves text rendering works.
+//! single `wl_shm` buffer. Renders a workspace indicator on the left, a
+//! window list (with focused-entry highlight) in the middle, and a clock
+//! on the right. Live state comes from shoestring-wm's IPC socket.
+
+// Drawing primitives intentionally take (mmap, w, h, x, y, w, h, color)
+// in positional form — wrapping them in a struct buys nothing readable.
+#![allow(clippy::too_many_arguments)]
+
+mod ipc_client;
 
 use std::{
     collections::HashMap,
@@ -16,11 +23,12 @@ use std::{
 use anyhow::{Context, Result};
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
+use shoestring_ipc::Event as IpcEvent;
 use tracing_subscriber::EnvFilter;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, event_created_child,
     backend::ObjectId,
-    globals::{GlobalListContents, registry_queue_init},
+    event_created_child,
+    globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
@@ -30,6 +38,7 @@ use wayland_client::{
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
+    Connection, Dispatch, Proxy, QueueHandle,
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
@@ -46,11 +55,26 @@ const BAR_HEIGHT: u32 = 24;
 const BG: u32 = 0xFF_22_22_22;
 /// Foreground (text) color.
 const FG: u32 = 0xFF_FF_FF_FF;
+/// Dim color for inactive workspace boxes and unfocused entry backgrounds.
+const DIM: u32 = 0xFF_55_55_55;
+/// Accent: focused workspace box and focused window's highlight backdrop.
+const ACCENT: u32 = 0xFF_55_77_BB;
 /// Font size in pixels. Picked to leave a couple of px of padding inside
 /// a 24px bar; revisit when DPI/scale handling lands.
 const FONT_PX: f32 = 14.0;
 /// Horizontal text inset from the bar edges.
 const PADDING_X: i32 = 8;
+
+/// Workspace box layout (left side). Count comes from the WM at startup
+/// via [`ipc_client::query_workspaces`]; geometry is fixed.
+const WS_BOX_W: i32 = 8;
+const WS_BOX_H: i32 = 8;
+const WS_GAP: i32 = 4;
+/// Gap between the workspace cluster and the start of the window list.
+const WS_LIST_GAP: i32 = 12;
+/// Pixel gap between adjacent window-list entries (separator-less; the
+/// focused-entry highlight is the visual divider).
+const ENTRY_GAP: i32 = 12;
 
 /// Search paths for a default sans font. We deliberately don't pull in
 /// fontconfig — picking the first hit keeps the dep surface tiny. User
@@ -80,9 +104,19 @@ struct State {
     size: Option<(u32, u32)>,
     /// Live ext-foreign-toplevel-list entries, keyed by the handle's
     /// wayland object id. Updated incrementally on each `done` event;
-    /// removed on `closed`. NOTE: this protocol exposes title/app_id but
-    /// NOT activation state — focus highlight needs M9 IPC (see #10).
+    /// removed on `closed`. Activation state comes from the [`focused_id`]
+    /// field below (sourced via M9 IPC), since ext-FT itself doesn't
+    /// expose it.
     toplevels: HashMap<ObjectId, Toplevel>,
+    /// 1-based active workspace; sourced from a `Workspaces` query at
+    /// startup and updated by `workspace_changed` events.
+    active_workspace: u8,
+    /// Total workspace count (cached from the same startup query).
+    workspace_count: u8,
+    /// `ext-foreign-toplevel-list` identifier of the currently focused
+    /// window, sourced from `window_focused` events. `None` means no
+    /// window holds keyboard focus.
+    focused_id: Option<String>,
     /// Set whenever any input that affects the rendered output changes
     /// (toplevel arrival/departure, clock tick, etc). Cleared after the
     /// next paint.
@@ -110,8 +144,8 @@ fn main() -> Result<()> {
 
     let font = load_font().context("could not load any system font")?;
 
-    let conn = Connection::connect_to_env()
-        .context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
+    let conn =
+        Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
     let qh = queue.handle();
 
@@ -133,6 +167,14 @@ fn main() -> Result<()> {
         }
     };
 
+    // Bootstrap initial workspace from the WM via a one-shot IPC query.
+    // Failure is non-fatal — we default to ws=1/count=16 and rely on
+    // subsequent event updates.
+    let (active_workspace, workspace_count) = ipc_client::query_workspaces().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc workspace query failed; using defaults");
+        (1, 16)
+    });
+
     let mut state = State {
         compositor,
         shm,
@@ -142,6 +184,9 @@ fn main() -> Result<()> {
         layer_surface: None,
         size: None,
         toplevels: HashMap::new(),
+        active_workspace,
+        workspace_count,
+        focused_id: None,
         dirty: false,
         last_minute: 0,
         running: true,
@@ -164,9 +209,20 @@ fn main() -> Result<()> {
     state.surface = Some(surface);
     state.layer_surface = Some(layer_surface);
 
+    // Subscribe to WM events. None means IPC is unavailable — we still run
+    // with whatever defaults we have; the bar just won't update on focus
+    // or workspace changes.
+    let mut event_stream = match ipc_client::open_event_stream() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(error = ?e, "ipc event stream unavailable; running without live updates");
+            None
+        }
+    };
+
     tracing::info!("shoestring-bar ready, waiting for configure");
 
-    event_loop(conn, &mut queue, &qh, &mut state)
+    event_loop(conn, &mut queue, &qh, &mut state, event_stream.as_mut())
 }
 
 /// Hand-rolled event loop: wake on wayland fd readability OR a 1-second
@@ -179,6 +235,7 @@ fn event_loop(
     queue: &mut wayland_client::EventQueue<State>,
     qh: &QueueHandle<State>,
     state: &mut State,
+    mut event_stream: Option<&mut ipc_client::EventStream>,
 ) -> Result<()> {
     while state.running {
         // 1. Repaint if the clock minute has rolled over since the last
@@ -200,37 +257,108 @@ fn event_loop(
 
         // 2. Flush any queued requests, then prepare to read.
         conn.flush()?;
-        if let Some(guard) = conn.prepare_read() {
-            let fd = guard.connection_fd().as_raw_fd();
-            // Sleep until either an event arrives or the next second
-            // ticks. 1s granularity is fine for minute-resolution clock.
-            let mut pfd = libc::pollfd {
+        let guard = conn.prepare_read();
+        let wayland_fd = guard.as_ref().map(|g| g.connection_fd().as_raw_fd());
+        let ipc_fd = event_stream.as_ref().map(|s| s.as_raw_fd());
+
+        // Build a 1- or 2-entry pollfd array depending on which of
+        // wayland / ipc are present.
+        let mut pfds: [libc::pollfd; 2] = unsafe { std::mem::zeroed() };
+        let mut nfds: libc::nfds_t = 0;
+        let mut wayland_idx: Option<usize> = None;
+        let mut ipc_idx: Option<usize> = None;
+        if let Some(fd) = wayland_fd {
+            pfds[nfds as usize] = libc::pollfd {
                 fd,
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let n = unsafe { libc::poll(&mut pfd, 1, 1000) };
-            if n < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(err.into());
+            wayland_idx = Some(nfds as usize);
+            nfds += 1;
+        }
+        if let Some(fd) = ipc_fd {
+            pfds[nfds as usize] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            ipc_idx = Some(nfds as usize);
+            nfds += 1;
+        }
+
+        // Sleep until any fd is readable or the next second ticks.
+        // 1s granularity is fine for minute-resolution clock.
+        let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, 1000) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
             }
-            if n > 0 && pfd.revents & libc::POLLIN != 0 {
+            return Err(err.into());
+        }
+
+        if let Some(guard) = guard {
+            let idx = wayland_idx.expect("wayland_idx must be set if guard exists");
+            if n > 0 && pfds[idx].revents & libc::POLLIN != 0 {
                 if let Err(e) = guard.read() {
-                    tracing::warn!(error = ?e, "wayland read failed");
+                    // WouldBlock here is benign — POLLIN can fire after the
+                    // wayland-rs library already drained the fd inside
+                    // prepare_read.
+                    if !matches!(&e, wayland_client::backend::WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        tracing::warn!(error = ?e, "wayland read failed");
+                    }
                 }
             } else {
-                // Timed out; drop the guard so the next prepare_read works.
                 drop(guard);
             }
         }
+
+        if let (Some(idx), Some(stream)) = (ipc_idx, event_stream.as_deref_mut()) {
+            if pfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                match stream.drain_events() {
+                    Ok(events) => {
+                        for ev in events {
+                            apply_ipc_event(state, ev);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "ipc stream read failed; closing");
+                        event_stream = None;
+                    }
+                }
+            }
+        }
+
         // 3. Dispatch any events we got from `read()` above OR events
         //    that wayland-rs already had buffered (prepare_read returned None).
         queue.dispatch_pending(state)?;
     }
     Ok(())
+}
+
+fn apply_ipc_event(state: &mut State, event: IpcEvent) {
+    match event {
+        IpcEvent::WorkspaceChanged { active } => {
+            if state.active_workspace != active {
+                state.active_workspace = active;
+                state.dirty = true;
+            }
+        }
+        IpcEvent::WindowFocused { id } => {
+            if state.focused_id != id {
+                state.focused_id = id;
+                state.dirty = true;
+            }
+        }
+        // Title/app_id changes already arrive via ext-foreign-toplevel-list;
+        // open/closed too. Output add/remove doesn't affect the bar yet.
+        IpcEvent::WindowOpened { .. }
+        | IpcEvent::WindowClosed { .. }
+        | IpcEvent::WindowTitleChanged { .. }
+        | IpcEvent::OutputAdded(_)
+        | IpcEvent::OutputRemoved { .. } => {}
+    }
 }
 
 /// A monotonically-ish increasing identifier for the current minute,
@@ -287,48 +415,53 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     fill_bg(&mut mmap, w, h, BG);
 
     // Right: clock. Drawn first so we know how much horizontal space
-    // remains for the (truncatable) window list on the left.
+    // remains for the (truncatable) window list in the middle.
     let clock = format_clock_now();
     let clock_w = measure_text(&state.font, FONT_PX, &clock);
     let clock_x = w as i32 - PADDING_X - clock_w;
     draw_text(&mut mmap, w, h, &state.font, FONT_PX, clock_x, &clock, FG);
 
-    // Left: window list, "  |  " separated, truncated with ".." if it'd
-    // collide with the clock. Empty state shows the version placeholder.
-    let mut entries: Vec<&Toplevel> = state.toplevels.values().collect();
-    entries.sort_by(|a, b| a.identifier.cmp(&b.identifier));
-    let raw = if entries.is_empty() {
-        format!("shoestring-bar v{}", env!("CARGO_PKG_VERSION"))
+    // Far left: workspace cluster. 16 small boxes; active one in accent
+    // color, the rest dimmed.
+    let ws_cluster_w =
+        state.workspace_count as i32 * WS_BOX_W + (state.workspace_count as i32 - 1) * WS_GAP;
+    let ws_y = (h as i32 - WS_BOX_H) / 2;
+    for i in 0..state.workspace_count {
+        let bx = PADDING_X + i as i32 * (WS_BOX_W + WS_GAP);
+        let color = if i + 1 == state.active_workspace {
+            ACCENT
+        } else {
+            DIM
+        };
+        fill_rect(&mut mmap, w, h, bx, ws_y, WS_BOX_W, WS_BOX_H, color);
+    }
+    let list_start_x = PADDING_X + ws_cluster_w + WS_LIST_GAP;
+
+    // Middle: window list, drawn per-entry so we can paint a background
+    // accent behind the focused entry. Entries are deterministically
+    // ordered by FT identifier (stable across renders).
+    let list_end_x = clock_x - PADDING_X;
+    let list_budget = (list_end_x - list_start_x).max(0);
+    if state.toplevels.is_empty() {
+        let placeholder = format!("shoestring-bar v{}", env!("CARGO_PKG_VERSION"));
+        let label = truncate_to_fit(&placeholder, &state.font, FONT_PX, list_budget);
+        draw_text(
+            &mut mmap,
+            w,
+            h,
+            &state.font,
+            FONT_PX,
+            list_start_x,
+            &label,
+            FG,
+        );
     } else {
-        entries
-            .iter()
-            .map(|t| {
-                if !t.title.is_empty() {
-                    t.title.clone()
-                } else if !t.app_id.is_empty() {
-                    t.app_id.clone()
-                } else {
-                    "(untitled)".to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("  |  ")
-    };
-    // Available width = bar width − right padding − clock width − gap.
-    let left_budget = (clock_x - PADDING_X - 12).max(0);
-    let label = truncate_to_fit(&raw, &state.font, FONT_PX, left_budget);
-    draw_text(&mut mmap, w, h, &state.font, FONT_PX, PADDING_X, &label, FG);
+        draw_window_list(&mut mmap, w, h, state, list_start_x, list_budget);
+    }
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
-    let buffer: WlBuffer = pool.create_buffer(
-        0,
-        w as i32,
-        h as i32,
-        stride,
-        Format::Argb8888,
-        qh,
-        (),
-    );
+    let buffer: WlBuffer =
+        pool.create_buffer(0, w as i32, h as i32, stride, Format::Argb8888, qh, ());
     pool.destroy();
     // The mmap-backed file lives until tmp drops at end of scope; the
     // compositor reads pixels via the fd-backed pool's wl_buffer above.
@@ -390,8 +523,7 @@ fn format_clock_now() -> String {
     unsafe { libc::localtime_r(&secs, &mut tm) };
     const WDAY: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MON: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     format!(
         "{} {} {:02}  {:02}:{:02}",
@@ -401,6 +533,104 @@ fn format_clock_now() -> String {
         tm.tm_hour,
         tm.tm_min,
     )
+}
+
+/// Draw the window list entries, painting an accent backdrop behind the
+/// focused entry. Truncates the visible set with ".." if the cumulative
+/// width exceeds `budget_px`. The focused entry, when present, is drawn
+/// first in width-budget order so it always survives truncation.
+fn draw_window_list(
+    mmap: &mut MmapMut,
+    w: u32,
+    h: u32,
+    state: &State,
+    start_x: i32,
+    budget_px: i32,
+) {
+    let font = &state.font;
+    let mut entries: Vec<&Toplevel> = state.toplevels.values().collect();
+    entries.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+
+    let label_of = |t: &Toplevel| -> String {
+        if !t.title.is_empty() {
+            t.title.clone()
+        } else if !t.app_id.is_empty() {
+            t.app_id.clone()
+        } else {
+            "(untitled)".to_string()
+        }
+    };
+
+    // First pass: compute widths and decide which entries fit.
+    let mut visible: Vec<(String, i32, bool)> = Vec::new(); // (label, width, focused)
+    let mut used = 0;
+    for t in &entries {
+        let label = label_of(t);
+        let lw = measure_text(font, FONT_PX, &label);
+        let needed = if visible.is_empty() {
+            lw
+        } else {
+            lw + ENTRY_GAP
+        };
+        if used + needed > budget_px {
+            // Out of room; signal truncation with a trailing ".." if it fits.
+            let ellipsis_w = measure_text(font, FONT_PX, "..");
+            let ellipsis_needed = if visible.is_empty() {
+                ellipsis_w
+            } else {
+                ellipsis_w + ENTRY_GAP
+            };
+            if used + ellipsis_needed <= budget_px {
+                visible.push(("..".into(), ellipsis_w, false));
+            }
+            break;
+        }
+        let focused = state.focused_id.as_deref() == Some(t.identifier.as_str());
+        visible.push((label, lw, focused));
+        used += needed;
+    }
+
+    let mut x = start_x;
+    for (i, (label, lw, focused)) in visible.iter().enumerate() {
+        if i > 0 {
+            x += ENTRY_GAP;
+        }
+        if *focused {
+            // Pad the highlight a couple of pixels around the label so the
+            // background reads cleanly against the bar bg.
+            let pad = 4;
+            fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, ACCENT);
+        }
+        draw_text(mmap, w, h, font, FONT_PX, x, label, FG);
+        x += lw;
+    }
+}
+
+/// Solid-color rectangle (no alpha blending). Clamped to the buffer.
+fn fill_rect(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) {
+    let bytes = color.to_ne_bytes();
+    let stride = dst_w as usize * 4;
+    let x0 = x.max(0) as usize;
+    let x1 = (x + w).min(dst_w as i32).max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let y1 = (y + h).min(dst_h as i32).max(0) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let row: Vec<u8> = bytes.repeat(x1 - x0);
+    for yy in y0..y1 {
+        let off = yy * stride + x0 * 4;
+        mmap[off..off + row.len()].copy_from_slice(&row);
+    }
 }
 
 fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
@@ -447,7 +677,17 @@ fn draw_text(
         // measured upward (positive = above baseline). The top-edge y for
         // blitting is therefore baseline_y - (ymin + height).
         let gy = baseline_y - (metrics.ymin + metrics.height as i32);
-        blit_alpha(mmap, w, h, gx, gy, metrics.width as u32, metrics.height as u32, &bitmap, color);
+        blit_alpha(
+            mmap,
+            w,
+            h,
+            gx,
+            gy,
+            metrics.width as u32,
+            metrics.height as u32,
+            &bitmap,
+            color,
+        );
         pen_x += metrics.advance_width;
     }
 }
@@ -486,8 +726,8 @@ fn blit_alpha(
             }
             let off = dy as usize * stride + dx as usize * 4;
             let a = coverage as i32; // 0..=255
-            // out = bg + a/255 * (fg - bg) for each channel. Signed math
-            // so darker-foreground-on-lighter-background still works.
+                                     // out = bg + a/255 * (fg - bg) for each channel. Signed math
+                                     // so darker-foreground-on-lighter-background still works.
             for (i, fg_chan) in [fb, fg, fr].iter().enumerate() {
                 let bg = mmap[off + i] as i32;
                 let out = bg + (a * (*fg_chan as i32 - bg)) / 255;
@@ -522,7 +762,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
                 layer_surface.ack_configure(serial);
                 let w = if width == 0 { 1 } else { width };
                 let h = if height == 0 { BAR_HEIGHT } else { height };
