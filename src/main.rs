@@ -128,12 +128,33 @@ struct Candidate {
     invoke: String,
 }
 
+/// Initialise tracing. Writes to stderr by default; if `SHOESTRING_MENU_LOG`
+/// is set, appends to that file instead (ANSI disabled). Mirrors the wm's
+/// pattern — the menu is spawned by the wm so stdio is unreachable from a
+/// TTY; the file route is the only way to debug what we received.
+fn init_tracing() {
+    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match std::env::var_os("SHOESTRING_MENU_LOG") {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .expect("open SHOESTRING_MENU_LOG path");
+            tracing_subscriber::fmt()
+                .with_env_filter(env)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(env).init();
+        }
+    }
+}
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
     let cli = parse_args()?;
     let source = cli.source.unwrap_or_else(|| default_source(cli.mode));
@@ -735,9 +756,18 @@ fn draw_caret(mmap: &mut MmapMut, w: u32, h: u32, x: i32, color: u32) {
 fn handle_key(state: &mut State, sym: xkb::Keysym, utf8: &str, ctrl: bool, shift: bool) -> bool {
     use xkb::keysyms::*;
     let raw = sym.raw();
+    tracing::debug!(
+        keysym = raw,
+        keysym_name = %xkb::keysym_get_name(sym),
+        utf8 = ?utf8,
+        ctrl,
+        shift,
+        "menu key"
+    );
 
     // -- Exit / dispatch --
     if raw == KEY_Escape {
+        tracing::debug!("Escape: setting running=false");
         state.running = false;
         return false;
     }
