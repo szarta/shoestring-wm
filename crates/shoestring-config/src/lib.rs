@@ -174,6 +174,26 @@ impl Config {
                 key: "q".into(),
                 action: Action::Quit,
             },
+            // Launcher: Super+P → command picker, Super+B → bookmarks.
+            // Spawn the shoestring-menu binary; if it's not on $PATH the
+            // spawn fails and the WM logs a warning — bind still defined
+            // so installing it later "just works".
+            Binding {
+                mods: super_only(),
+                key: "p".into(),
+                action: Action::Spawn {
+                    command: "shoestring-menu".into(),
+                    args: vec![],
+                },
+            },
+            Binding {
+                mods: super_only(),
+                key: "b".into(),
+                action: Action::Spawn {
+                    command: "shoestring-menu".into(),
+                    args: vec!["--mode".into(), "bookmarks".into()],
+                },
+            },
             Binding {
                 mods: super_only(),
                 key: "e".into(),
