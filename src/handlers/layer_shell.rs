@@ -18,12 +18,13 @@ use smithay::{
     desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType},
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+    utils::SERIAL_COUNTER,
     wayland::{
         compositor::with_states,
         shell::{
             wlr_layer::{
-                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
-                WlrLayerShellState,
+                KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
+                WlrLayerShellHandler, WlrLayerShellState,
             },
             xdg::PopupSurface,
         },
@@ -74,6 +75,17 @@ impl WlrLayerShellHandler for ShoestringWm {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        // Was this the focused surface? If so, after unmapping we need to
+        // hand focus back to the previously-focused window on the active
+        // workspace (otherwise the keyboard goes nowhere and the user
+        // can't type into anything).
+        let had_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|kb| kb.current_focus())
+            .as_ref()
+            == Some(surface.wl_surface());
+
         if let Some((mut map, layer)) = self.space.outputs().find_map(|o| {
             let map = layer_map_for_output(o);
             let layer = map
@@ -83,6 +95,23 @@ impl WlrLayerShellHandler for ShoestringWm {
             layer.map(|l| (map, l))
         }) {
             map.unmap_layer(&layer);
+        }
+
+        if had_focus {
+            let active = self.workspaces.active();
+            let pick = loop {
+                let Some(w) = self.workspaces.last_focused(active) else {
+                    break None;
+                };
+                if self.space.elements().any(|el| el == &w) {
+                    break Some(w);
+                }
+                self.workspaces.discard_top_focus(active);
+            };
+            match pick {
+                Some(w) => self.focus_window(&w),
+                None => self.clear_focus(),
+            }
         }
     }
 }
@@ -116,9 +145,33 @@ pub fn handle_commit(state: &mut ShoestringWm, surface: &WlSurface) -> bool {
     let mut map = layer_map_for_output(&output);
     // Arrange first so the initial configure reflects exclusive-zone math.
     map.arrange();
+    let interactivity = map
+        .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+        .map(|layer| {
+            layer
+                .layer_surface()
+                .with_cached_state(|s| s.keyboard_interactivity)
+        })
+        .unwrap_or(KeyboardInteractivity::None);
     if !initial_configure_sent {
         if let Some(layer) = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
             layer.layer_surface().send_configure();
+        }
+    }
+    drop(map);
+
+    // Transfer keyboard focus to layers that request it (e.g.
+    // shoestring-menu's input strip). `layer_destroyed` restores focus
+    // to the previously-focused window when the layer goes away. Skip
+    // if focus is already on this surface so commits during typing
+    // don't churn the focus serial.
+    if interactivity == KeyboardInteractivity::Exclusive {
+        if let Some(kb) = state.seat.get_keyboard() {
+            let already = kb.current_focus().as_ref() == Some(surface);
+            if !already {
+                let serial = SERIAL_COUNTER.next_serial();
+                kb.set_focus(state, Some(surface.clone()), serial);
+            }
         }
     }
     true
