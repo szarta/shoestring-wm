@@ -104,13 +104,11 @@ pub fn init_winit(
                 {
                     let (renderer, mut framebuffer) = backend.bind().unwrap();
 
-                    // Re-pick the cursor frame for this output's scale, then
-                    // build pointer render elements above the space.
-                    let scale_int = match output.current_scale() {
-                        smithay::output::Scale::Integer(i) => i as u32,
-                        smithay::output::Scale::Fractional(f) => f.ceil() as u32,
-                        _ => 1,
-                    };
+                    // Re-pick the cursor frame for the configured scale (cursors
+                    // are raster sprites — fractional values round up to the next
+                    // whole pixel ratio). Read straight from config; per-output
+                    // scaling would change this.
+                    let scale_int = state.config.general.output_scale.ceil().max(1.0) as u32;
                     state.refresh_cursor_buffer(scale_int);
                     let cursor_elements: Vec<crate::drawing::PointerRenderElement<GlesRenderer>> =
                         if let Some((pe, location, hotspot)) = state.cursor_render_snapshot() {

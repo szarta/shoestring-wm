@@ -2,13 +2,14 @@ use shoestring_config::Action;
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     desktop::Window,
     input::{
         keyboard::FilterResult,
         pointer::{
             AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData, MotionEvent,
+            RelativeMotionEvent,
         },
     },
     utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
@@ -270,7 +271,44 @@ impl ShoestringWm {
                     self.dispatch_action(a);
                 }
             }
-            InputEvent::PointerMotion { .. } => {}
+            InputEvent::PointerMotion { event, .. } => {
+                // libinput (TTY backend) sends relative deltas. Add to the
+                // pointer's current location and clamp to the union of all
+                // mapped outputs so the cursor can't fly off the workspace.
+                let serial = SERIAL_COUNTER.next_serial();
+                let pointer = self.seat.get_pointer().unwrap();
+                let delta = event.delta();
+                let current = pointer.current_location();
+                let mut new = current + delta;
+                if let Some(bounds) = workspace_bounds(&self.space) {
+                    new.x = new
+                        .x
+                        .clamp(bounds.loc.x as f64, (bounds.loc.x + bounds.size.w) as f64);
+                    new.y = new
+                        .y
+                        .clamp(bounds.loc.y as f64, (bounds.loc.y + bounds.size.h) as f64);
+                }
+                let under = self.surface_under(new);
+                pointer.motion(
+                    self,
+                    under.clone(),
+                    &MotionEvent {
+                        location: new,
+                        serial,
+                        time: event.time_msec(),
+                    },
+                );
+                pointer.relative_motion(
+                    self,
+                    under,
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: event.delta_unaccel(),
+                        utime: event.time(),
+                    },
+                );
+                pointer.frame(self);
+            }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(output) = self.space.outputs().next() else {
                     return;
@@ -372,6 +410,20 @@ impl ShoestringWm {
             _ => {}
         }
     }
+}
+
+/// Bounding rect that covers every mapped output. Used to clamp the cursor
+/// so it can't be moved beyond the visible desktop.
+fn workspace_bounds(space: &smithay::desktop::Space<Window>) -> Option<Rectangle<i32, Logical>> {
+    let mut iter = space.outputs().filter_map(|o| space.output_geometry(o));
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, r| {
+        let x0 = acc.loc.x.min(r.loc.x);
+        let y0 = acc.loc.y.min(r.loc.y);
+        let x1 = (acc.loc.x + acc.size.w).max(r.loc.x + r.size.w);
+        let y1 = (acc.loc.y + acc.size.h).max(r.loc.y + r.size.h);
+        Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
+    }))
 }
 
 /// Pick which edges to resize from based on the pointer's quadrant within the

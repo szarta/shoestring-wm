@@ -658,12 +658,9 @@ impl ShoestringWm {
 
         // Capture cursor state and refresh its buffer before we mutably
         // re-borrow `self.udev` below — the renderer borrow conflicts with
-        // any `&mut self` method call from inside the borrow scope.
-        let scale_int = match output.current_scale() {
-            smithay::output::Scale::Integer(i) => i as u32,
-            smithay::output::Scale::Fractional(f) => f.ceil() as u32,
-            _ => 1,
-        };
+        // any `&mut self` method call from inside the borrow scope. Cursor
+        // is a raster sprite so we round any fractional scale up.
+        let scale_int = self.config.general.output_scale.ceil().max(1.0) as u32;
         self.refresh_cursor_buffer(scale_int);
         let cursor_snapshot = self.cursor_render_snapshot();
 

@@ -333,8 +333,11 @@ impl ShoestringWm {
 
     /// Refresh `pointer_element`'s memory buffer for the next render. Picks
     /// the right xcursor frame for `scale` + elapsed time; only uploads a new
-    /// `MemoryRenderBuffer` when the chosen `Image` differs from the previous
-    /// frame (true for every render on static cursors).
+    /// `MemoryRenderBuffer` when the chosen frame differs from the previous
+    /// (true for every render on static cursors). The buffer's reported scale
+    /// matches the output's so smithay maps the HiDPI sprite back to its
+    /// nominal logical size — otherwise a 48px frame at output-scale 2 would
+    /// render at 96 physical pixels.
     pub fn refresh_cursor_buffer(&mut self, scale: u32) {
         if self.cursor.is_empty() {
             return;
@@ -355,7 +358,7 @@ impl ShoestringWm {
             &frame.pixels_rgba,
             smithay::backend::allocator::Fourcc::Argb8888,
             (frame.width as i32, frame.height as i32),
-            1,
+            scale.max(1) as i32,
             smithay::utils::Transform::Normal,
             None,
         );
