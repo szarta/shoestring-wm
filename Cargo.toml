@@ -35,3 +35,7 @@ libc = "0.2"
 # Structured logs (env-filterable). Same env-var convention as wm/bar.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Keysym translation for wl_keyboard events. Same version shoestring-wm
+# resolves to, so the on-disk crate cache is shared.
+xkbcommon = "0.9"
