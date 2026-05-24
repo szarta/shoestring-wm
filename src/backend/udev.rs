@@ -3,7 +3,7 @@
 //!
 //! Aggressively stripped vs. anvil's reference:
 //! - single primary GPU only (no multi-GPU fallback paths)
-//! - integer scale (no fractional)
+//! - one scale across all outputs (from `general.output_scale` in config)
 //! - no XWayland, dmabuf-feedback, syncobj, DRM lease, screencopy
 //! - no cursor plane / pointer image (cursor not drawn; M8/M9 territory)
 //! - no FPS overlay, no presentation-throttle heuristics
@@ -517,8 +517,9 @@ fn connector_connected(
             .unwrap_or(0)
     });
     let position = (x, 0).into();
+    let scale = crate::backend::scale_from_config(state.config.general.output_scale);
     output.set_preferred(wl_mode);
-    output.change_current_state(Some(wl_mode), None, None, Some(position));
+    output.change_current_state(Some(wl_mode), None, Some(scale), Some(position));
     state.space.map_output(&output, position);
 
     output.user_data().insert_if_missing(|| UdevOutputId {

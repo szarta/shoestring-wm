@@ -40,6 +40,16 @@ struct Cli {
     /// Defaults to `weston-terminal` if available.
     #[arg(short = 'C', long = "command")]
     command: Option<String>,
+
+    /// Write the bundled default config to the user's config path (or to
+    /// `--config PATH` if given) and exit. Refuses to overwrite an existing
+    /// file unless `--force` is also passed.
+    #[arg(long)]
+    write_default_config: bool,
+
+    /// Allow `--write-default-config` to overwrite an existing file.
+    #[arg(long)]
+    force: bool,
 }
 
 /// Initialise tracing. Writes to stderr by default; if `SHOESTRING_WM_LOG`
@@ -71,6 +81,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     init_tracing();
+
+    if cli.write_default_config {
+        return write_default_config(cli.config.as_deref(), cli.force);
+    }
 
     let (config, config_path) = shoestring_config::load_or_default(cli.config.as_deref())?;
     match &config_path {
@@ -127,6 +141,28 @@ fn main() -> Result<()> {
     }
 
     event_loop.run(None, &mut state, |_| {})?;
+    Ok(())
+}
+
+fn write_default_config(path: Option<&std::path::Path>, force: bool) -> Result<()> {
+    let target = path
+        .map(std::path::PathBuf::from)
+        .or_else(shoestring_config::default_config_path)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no config path: pass --config or set $HOME/$XDG_CONFIG_HOME")
+        })?;
+
+    if target.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; pass --force to overwrite",
+            target.display()
+        );
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&target, shoestring_config::default_config_toml())?;
+    println!("wrote default config to {}", target.display());
     Ok(())
 }
 

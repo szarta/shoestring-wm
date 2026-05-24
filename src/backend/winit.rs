@@ -9,7 +9,7 @@ use smithay::{
         },
         winit::{self, WinitEvent},
     },
-    output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
+    output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::EventLoop,
         winit::{dpi::PhysicalSize, window::Window as WinitWindow},
@@ -17,7 +17,7 @@ use smithay::{
     utils::{Rectangle, Transform},
 };
 
-use crate::state::ShoestringWm;
+use crate::{backend::scale_from_config, state::ShoestringWm};
 
 pub fn init_winit(
     event_loop: &mut EventLoop<'static, ShoestringWm>,
@@ -40,16 +40,17 @@ pub fn init_winit(
     };
     // Inside an X11/winit dev session there is no per-app scaling — the
     // "physical" window size from winit is what the user sees, regardless of
-    // winit's guessed scale factor (often 2x/2.75x on HiDPI panels). Forcing
-    // scale=1 keeps clients rendering at the same DPI as the rest of the
-    // user's X11 desktop. Real DRM outputs in M7 will use their advertised
-    // scale.
+    // winit's guessed scale factor (often 2x/2.75x on HiDPI panels). Use the
+    // user-configured `general.output_scale` (default 1.0) so the nested
+    // session matches whatever HiDPI scale the real session will use.
+    let scale = scale_from_config(state.config.general.output_scale);
     tracing::info!(
         window_size = ?backend.window_size(),
         raw_scale = backend.scale_factor(),
-        "winit output created (forcing scale=1 for nested X11)",
+        configured_scale = state.config.general.output_scale,
+        ?scale,
+        "winit output created",
     );
-    let scale = Scale::Integer(1);
 
     let output = Output::new(
         "winit".to_string(),

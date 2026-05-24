@@ -9,10 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level config. Sections are all optional; missing sections take defaults.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -21,7 +21,7 @@ pub struct Config {
     pub bindings: Vec<Binding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct General {
     #[serde(default)]
@@ -33,6 +33,13 @@ pub struct General {
     /// Repeats-per-second once repeat kicks in.
     #[serde(default = "default_repeat_rate")]
     pub repeat_rate: i32,
+    /// Scale factor advertised to clients via `wl_output.scale`. Whole values
+    /// (1.0, 2.0, …) are sent as integer scales; non-integer values use
+    /// fractional scaling (clients supporting `wp_fractional_scale_v1` get
+    /// the exact value, others round up). Match this to the `Xft.dpi`
+    /// equivalent in the user's X session so text size carries over.
+    #[serde(default = "default_output_scale")]
+    pub output_scale: f64,
 }
 
 fn default_repeat_delay() -> i32 {
@@ -41,6 +48,9 @@ fn default_repeat_delay() -> i32 {
 fn default_repeat_rate() -> i32 {
     25
 }
+fn default_output_scale() -> f64 {
+    1.0
+}
 
 impl Default for General {
     fn default() -> Self {
@@ -48,11 +58,12 @@ impl Default for General {
             focus_mode: FocusMode::default(),
             repeat_delay: default_repeat_delay(),
             repeat_rate: default_repeat_rate(),
+            output_scale: default_output_scale(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FocusMode {
     #[default]
@@ -61,7 +72,7 @@ pub enum FocusMode {
     Sloppy,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     /// Modifier names; case-insensitive. Recognized: Super, Ctrl, Alt, Shift.
@@ -72,7 +83,7 @@ pub struct Binding {
     pub action: Action,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
     /// Run a command. `args` is split by the parser; pass tokens individually.
@@ -120,6 +131,26 @@ pub enum LoadError {
     Io(#[from] std::io::Error),
     #[error("toml: {0}")]
     Toml(#[from] toml::de::Error),
+}
+
+/// Serialize a default config to TOML with a header comment explaining how
+/// the file is meant to be edited. Used by `shoestring-wm --write-default-config`
+/// (ranger-style) and intended for packagers to drop as `/etc/skel`.
+pub fn default_config_toml() -> String {
+    let cfg = Config::with_default_bindings();
+    let body = toml::to_string_pretty(&cfg).expect("default config must serialize");
+    let header = "\
+# shoestring-wm configuration. Regenerate this file at any time with:
+#   shoestring-wm --write-default-config
+#
+# Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
+# minimize, unminimize, close, focus-workspace, focus-workspace-relative,
+# move-window-to-workspace, move-window-to-workspace-relative, change-vt.
+#
+# Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
+# Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
+";
+    format!("{header}\n{body}")
 }
 
 /// Resolve the user's config file path. Honors `$XDG_CONFIG_HOME`, falling
@@ -303,5 +334,27 @@ mod tests {
     fn focus_mode_defaults_to_click() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.general.focus_mode, FocusMode::ClickToFocus);
+    }
+
+    #[test]
+    fn output_scale_defaults_to_one() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.general.output_scale, 1.0);
+    }
+
+    #[test]
+    fn default_config_toml_round_trips() {
+        let dumped = default_config_toml();
+        let parsed: Config = toml::from_str(&dumped).expect("dumped default must parse");
+        let original = Config::with_default_bindings();
+        assert_eq!(parsed.bindings.len(), original.bindings.len());
+        assert_eq!(parsed.general.output_scale, original.general.output_scale);
+        assert_eq!(parsed.general.focus_mode, original.general.focus_mode);
+    }
+
+    #[test]
+    fn output_scale_parses_fractional() {
+        let cfg: Config = toml::from_str("[general]\noutput_scale = 1.5\n").unwrap();
+        assert_eq!(cfg.general.output_scale, 1.5);
     }
 }
