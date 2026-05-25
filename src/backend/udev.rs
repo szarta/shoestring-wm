@@ -90,11 +90,12 @@ type ShoestringOutputManager = DrmOutputManager<
 >;
 
 /// User-data tag we hang on each [`Output`] so VBlank handlers can find the
-/// [`SurfaceData`] that owns the crtc that just flipped.
+/// [`SurfaceData`] that owns the crtc that just flipped. Also used by
+/// screencopy to wake the right CRTC when a capture is pending.
 #[derive(Debug, PartialEq)]
-struct UdevOutputId {
-    device_id: DrmNode,
-    crtc: crtc::Handle,
+pub(crate) struct UdevOutputId {
+    pub(crate) device_id: DrmNode,
+    pub(crate) crtc: crtc::Handle,
 }
 
 pub struct UdevData {
@@ -711,6 +712,20 @@ impl ShoestringWm {
             } else {
                 Vec::new()
             };
+
+        // Run any pending screencopy captures for this output BEFORE the
+        // scanout render. The capture path renders the same scene into an
+        // offscreen GLES texture and reads back the requested region; doing
+        // it first means we still hold a live `&mut renderer` and aren't
+        // racing the swapchain. Reads `&self.space` and `&mut self.screencopy`
+        // — disjoint from the `self.udev`-rooted renderer borrow.
+        crate::screencopy::process_pending(
+            &mut self.screencopy,
+            &self.space,
+            &output,
+            &mut renderer,
+            &cursor_elements,
+        );
 
         let mut elements: Vec<
             crate::drawing::OutputRenderElements<

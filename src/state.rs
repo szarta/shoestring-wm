@@ -66,6 +66,7 @@ pub struct ShoestringWm {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
+    pub screencopy: crate::screencopy::ScreencopyState,
 
     pub seat: Seat<Self>,
 
@@ -102,6 +103,11 @@ impl ShoestringWm {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let screencopy = crate::screencopy::ScreencopyState {
+            manager_global: dh
+                .create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData),
+            pending: Vec::new(),
+        };
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -144,6 +150,7 @@ impl ShoestringWm {
             output_manager_state,
             seat_state,
             data_device_state,
+            screencopy,
             seat,
             ipc: None,
             cursor: crate::cursor::Cursor::load(),
@@ -397,6 +404,30 @@ impl ShoestringWm {
             }
         };
         Some((self.pointer_element.clone(), location, hotspot))
+    }
+
+    /// Schedule an immediate render of the output a pending screencopy frame
+    /// targets, so the capture happens promptly instead of waiting for the
+    /// next damage-driven render. In the winit backend rendering is already
+    /// continuous so this is a no-op; the udev backend wakes the matching
+    /// CRTC via an idle callback.
+    pub fn kick_render_for_screencopy(&mut self, output: &smithay::output::Output) {
+        let _ = output;
+        #[cfg(feature = "tty")]
+        {
+            if self.udev.is_some() {
+                if let Some(udev_id) = output
+                    .user_data()
+                    .get::<crate::backend::udev::UdevOutputId>()
+                {
+                    let node = udev_id.device_id;
+                    let crtc = udev_id.crtc;
+                    self.loop_handle.insert_idle(move |state| {
+                        state.render_surface(node, crtc);
+                    });
+                }
+            }
+        }
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from

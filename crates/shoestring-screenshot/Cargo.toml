@@ -1,0 +1,27 @@
+[package]
+name = "shoestring-screenshot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Screenshot client for shoestring-wm. Captures via wlr-screencopy and writes PNGs."
+
+[[bin]]
+name = "shoestring-screenshot"
+path = "src/main.rs"
+
+[dependencies]
+# Same wayland stack shoestring-bar uses — already in the resolved tree.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# SHM pool: mmap an anon tempfile, give the fd to the compositor, read back.
+memmap2 = "0.9"
+tempfile = "3"
+
+# PNG encoder. Lightweight, pure Rust.
+png = "0.17"
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

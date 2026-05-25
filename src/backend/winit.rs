@@ -128,6 +128,20 @@ pub fn init_winit(
                             Vec::new()
                         };
 
+                    // Fulfil any pending wlr-screencopy captures for this
+                    // output first. The helper binds an offscreen GLES
+                    // texture as the renderer's framebuffer, so doing it
+                    // before render_output ensures the window framebuffer is
+                    // the LAST bind, which is what backend.submit() requires
+                    // (otherwise eglSwapBuffersWithDamageKHR hits BAD_SURFACE).
+                    crate::screencopy::process_pending(
+                        &mut state.screencopy,
+                        &state.space,
+                        &output,
+                        renderer,
+                        &cursor_elements,
+                    );
+
                     smithay::desktop::space::render_output::<
                         _,
                         crate::drawing::PointerRenderElement<GlesRenderer>,

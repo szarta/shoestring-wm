@@ -1,5 +1,6 @@
 mod compositor;
 mod layer_shell;
+mod screencopy;
 mod xdg_shell;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};

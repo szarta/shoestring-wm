@@ -10,6 +10,7 @@ mod inject;
 mod input;
 mod ipc;
 mod layout;
+mod screencopy;
 mod state;
 mod workspace;
 
