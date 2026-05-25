@@ -127,6 +127,35 @@ impl ShoestringWm {
                     tracing::warn!(button, error = %e, "inject_click failed");
                 }
             }
+            Action::Lock => self.spawn_lock(),
+        }
+    }
+
+    /// Spawn the configured `lock_command`. The child binds
+    /// ext-session-lock-v1 itself; the WM doesn't wait for it. No-op
+    /// when already locked (a second locker would just get `finished`
+    /// from the manager filter anyway, but skipping the spawn keeps the
+    /// process tree clean).
+    pub fn spawn_lock(&mut self) {
+        if self.is_locked() {
+            tracing::debug!("lock: already locked, skipping spawn");
+            return;
+        }
+        let cmd_line = self.config.general.lock_command.clone();
+        let mut parts = cmd_line.split_whitespace();
+        let Some(program) = parts.next() else {
+            tracing::warn!("lock: lock_command is empty");
+            return;
+        };
+        let args: Vec<&str> = parts.collect();
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(&args);
+        if let Some(socket) = self.socket_name.to_str() {
+            cmd.env("WAYLAND_DISPLAY", socket);
+        }
+        match cmd.spawn() {
+            Ok(child) => tracing::info!(pid = child.id(), %cmd_line, "spawned lock"),
+            Err(e) => tracing::warn!(%cmd_line, error = %e, "spawn lock failed"),
         }
     }
 
@@ -260,6 +289,13 @@ impl ShoestringWm {
                         if key_state != KeyState::Pressed {
                             return FilterResult::Forward;
                         }
+                        // Suppress all binds while a session lock is up so
+                        // the user can't Quit / VT-switch / Spawn out of the
+                        // lock. Everything is forwarded to the lock surface
+                        // (which currently holds keyboard focus).
+                        if state.is_locked() {
+                            return FilterResult::Forward;
+                        }
                         // Use the keysym *before* shift/caps are applied so that
                         // a binding registered as "q" matches Super+Shift+q
                         // (which would otherwise produce keysym Q).
@@ -353,7 +389,10 @@ impl ShoestringWm {
                 let button = event.button_code();
                 let button_state = event.state();
 
-                if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
+                if ButtonState::Pressed == button_state
+                    && !pointer.is_grabbed()
+                    && !self.is_locked()
+                {
                     let pos = pointer.current_location();
                     let target = self.space.element_under(pos).map(|(w, l)| (w.clone(), l));
                     let mods = keyboard.modifier_state();

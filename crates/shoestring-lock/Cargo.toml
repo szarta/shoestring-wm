@@ -1,0 +1,36 @@
+[package]
+name = "shoestring-lock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Screen locker for shoestring-wm. Implements ext-session-lock-v1; verifies via PAM."
+
+[[bin]]
+name = "shoestring-lock"
+path = "src/main.rs"
+
+[dependencies]
+# Same wayland stack the bar and screenshot use — already resolved in tree.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+
+# Keyboard: parse the keymap the compositor hands us, translate keycodes.
+xkbcommon = { version = "0.9", features = ["wayland"] }
+
+# wl_shm pool: mmap an anon tempfile, give the fd to the compositor, draw.
+memmap2 = "0.9"
+tempfile = "3"
+
+# Software-rasterized text for the prompt + status line.
+fontdue = "0.9"
+
+# PAM password verification. pam-client2 / pam-sys2 ship hand-written
+# FFI (no bindgen) so they build without libclang. Runtime still needs
+# libpam.so.0 — present on every PAM-enabled distro.
+pam-client2 = { version = "0.5", default-features = false }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

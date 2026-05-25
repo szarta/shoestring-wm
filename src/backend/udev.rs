@@ -664,6 +664,10 @@ impl ShoestringWm {
         let scale_int = self.config.general.output_scale.ceil().max(1.0) as u32;
         self.refresh_cursor_buffer(scale_int);
         let cursor_snapshot = self.cursor_render_snapshot();
+        // Capture lock state before re-borrowing self.udev — the renderer
+        // borrow precludes calling &self methods further down.
+        let locked = self.is_locked();
+        let lock_surface = self.lock_surface_for(&output);
 
         let Some(udev) = self.udev.as_mut() else {
             return;
@@ -686,32 +690,46 @@ impl ShoestringWm {
 
         let space_elements: Vec<
             SpaceRenderElements<UdevRenderer<'_>, WaylandSurfaceRenderElement<UdevRenderer<'_>>>,
-        > = smithay::desktop::space::space_render_elements(
-            &mut renderer,
-            [&self.space],
-            &output,
-            1.0,
-        )
-        .unwrap_or_default();
+        > = if locked {
+            // Drop all client windows from the composition while locked.
+            Vec::new()
+        } else {
+            smithay::desktop::space::space_render_elements(
+                &mut renderer,
+                [&self.space],
+                &output,
+                1.0,
+            )
+            .unwrap_or_default()
+        };
 
         // Cursor goes on top: build pointer elements from a captured snapshot
         // (taken before we re-borrowed `self.udev` above), then prepend them
-        // — render_frame draws first-element-first.
-        let cursor_elements: Vec<crate::drawing::PointerRenderElement<UdevRenderer<'_>>> =
-            if let Some((pe, location, hotspot)) = cursor_snapshot {
-                let scale: smithay::utils::Scale<f64> =
-                    output.current_scale().fractional_scale().into();
-                let physical_location: smithay::utils::Point<i32, smithay::utils::Physical> =
-                    smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-                        (location.x - hotspot.0 as f64) * scale.x,
-                        (location.y - hotspot.1 as f64) * scale.y,
-                    ))
-                    .to_i32_round();
-                use smithay::backend::renderer::element::AsRenderElements;
-                pe.render_elements(&mut renderer, physical_location, scale, 1.0)
-            } else {
-                Vec::new()
-            };
+        // — render_frame draws first-element-first. While locked we don't
+        // render the cursor; the lock surface (if present) fills its place.
+        let cursor_elements: Vec<crate::drawing::PointerRenderElement<UdevRenderer<'_>>> = if locked
+        {
+            let scale: smithay::utils::Scale<f64> =
+                output.current_scale().fractional_scale().into();
+            crate::handlers::session_lock::lock_render_elements(
+                lock_surface.as_ref(),
+                &mut renderer,
+                scale,
+            )
+        } else if let Some((pe, location, hotspot)) = cursor_snapshot {
+            let scale: smithay::utils::Scale<f64> =
+                output.current_scale().fractional_scale().into();
+            let physical_location: smithay::utils::Point<i32, smithay::utils::Physical> =
+                smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                    (location.x - hotspot.0 as f64) * scale.x,
+                    (location.y - hotspot.1 as f64) * scale.y,
+                ))
+                .to_i32_round();
+            use smithay::backend::renderer::element::AsRenderElements;
+            pe.render_elements(&mut renderer, physical_location, scale, 1.0)
+        } else {
+            Vec::new()
+        };
 
         // Run any pending screencopy captures for this output BEFORE the
         // scanout render. The capture path renders the same scene into an
@@ -744,12 +762,15 @@ impl ShoestringWm {
                 .map(crate::drawing::OutputRenderElements::Space),
         );
 
-        let result = surface.drm_output.render_frame(
-            &mut renderer,
-            &elements,
-            [0.1, 0.1, 0.1, 1.0],
-            FrameFlags::DEFAULT,
-        );
+        let clear = if locked {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [0.1, 0.1, 0.1, 1.0]
+        };
+        let result =
+            surface
+                .drm_output
+                .render_frame(&mut renderer, &elements, clear, FrameFlags::DEFAULT);
 
         let rendered = match result {
             Ok(frame) => !frame.is_empty,

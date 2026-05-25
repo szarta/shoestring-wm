@@ -20,6 +20,7 @@ use smithay::{
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
+        session_lock::SessionLockManagerState,
         shell::{wlr_layer::WlrLayerShellState, xdg::XdgShellState},
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -67,6 +68,10 @@ pub struct ShoestringWm {
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub screencopy: crate::screencopy::ScreencopyState,
+    pub session_lock_state: SessionLockManagerState,
+    /// `Some` while a session lock is active. See
+    /// [`crate::handlers::session_lock`] for the protocol wiring.
+    pub lock_session: Option<crate::handlers::session_lock::LockState>,
 
     pub seat: Seat<Self>,
 
@@ -108,6 +113,10 @@ impl ShoestringWm {
                 .create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData),
             pending: Vec::new(),
         };
+        // Filter: every client may see ext-session-lock — clients without
+        // permission to actually lock just receive `finished` when they try.
+        // Our own gating (single locker at a time) lives in the handler.
+        let session_lock_state = SessionLockManagerState::new::<Self, _>(&dh, |_| true);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -151,6 +160,8 @@ impl ShoestringWm {
             seat_state,
             data_device_state,
             screencopy,
+            session_lock_state,
+            lock_session: None,
             seat,
             ipc: None,
             cursor: crate::cursor::Cursor::load(),

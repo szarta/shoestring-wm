@@ -40,6 +40,13 @@ pub struct General {
     /// equivalent in the user's X session so text size carries over.
     #[serde(default = "default_output_scale")]
     pub output_scale: f64,
+    /// Command spawned for `Action::Lock` and the `Lock` IPC request. The
+    /// string is split on whitespace; the first token is the executable
+    /// and the rest are passed as arguments. Defaults to
+    /// `"shoestring-lock"`, which is expected to be on `$PATH`. Replace
+    /// to substitute e.g. `swaylock` or a custom locker.
+    #[serde(default = "default_lock_command")]
+    pub lock_command: String,
 }
 
 fn default_repeat_delay() -> i32 {
@@ -51,6 +58,9 @@ fn default_repeat_rate() -> i32 {
 fn default_output_scale() -> f64 {
     1.0
 }
+fn default_lock_command() -> String {
+    "shoestring-lock".into()
+}
 
 impl Default for General {
     fn default() -> Self {
@@ -59,6 +69,7 @@ impl Default for General {
             repeat_delay: default_repeat_delay(),
             repeat_rate: default_repeat_rate(),
             output_scale: default_output_scale(),
+            lock_command: default_lock_command(),
         }
     }
 }
@@ -134,6 +145,12 @@ pub enum Action {
     /// `button` is `"left"` / `"right"` / `"middle"` or a numeric BTN_*
     /// code (e.g. `"272"`).
     InjectClick { button: String },
+    /// Spawn the configured lock binary
+    /// ([`General::lock_command`]). The binary is expected to bind
+    /// `ext-session-lock-v1` and request a lock; this action does not
+    /// itself drive the protocol so a misconfigured / missing binary
+    /// just logs and leaves the session unlocked.
+    Lock,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -157,7 +174,7 @@ pub fn default_config_toml() -> String {
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
 # minimize, unminimize, close, focus-workspace, focus-workspace-relative,
 # move-window-to-workspace, move-window-to-workspace-relative, change-vt,
-# inject-key, inject-text, inject-click.
+# inject-key, inject-text, inject-click, lock.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
@@ -266,6 +283,14 @@ impl Config {
                 mods: super_only(),
                 key: "x".into(),
                 action: Action::Close,
+            },
+            // Lock screen. Spawns `general.lock_command` (default
+            // `shoestring-lock`) which binds ext-session-lock-v1.
+            // Super+L is already workspace-next; pair with Shift.
+            Binding {
+                mods: super_shift(),
+                key: "l".into(),
+                action: Action::Lock,
             },
             // Workspace navigation — mirrors the user's Openbox W-h / W-l.
             Binding {

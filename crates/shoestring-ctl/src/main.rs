@@ -67,6 +67,10 @@ enum Command {
         #[arg(long, requires = "x")]
         y: Option<f64>,
     },
+    /// Lock the session. Spawns the WM's configured lock binary
+    /// (`general.lock_command` in the WM config, default
+    /// `shoestring-lock`).
+    Lock,
 }
 
 fn main() -> Result<()> {
@@ -92,6 +96,7 @@ fn main() -> Result<()> {
         Command::Key { keysym } => Request::InjectKey { keysym },
         Command::Type { text } => Request::InjectText { text },
         Command::Click { button, x, y } => Request::InjectClick { button, x, y },
+        Command::Lock => Request::Lock,
     };
 
     let mut writer = stream.try_clone()?;

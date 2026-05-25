@@ -110,23 +110,50 @@ pub fn init_winit(
                     // scaling would change this.
                     let scale_int = state.config.general.output_scale.ceil().max(1.0) as u32;
                     state.refresh_cursor_buffer(scale_int);
+                    let locked = state.is_locked();
+                    // Cursor only when unlocked; the lock surface owns the
+                    // visible content while locked.
                     let cursor_elements: Vec<crate::drawing::PointerRenderElement<GlesRenderer>> =
-                        if let Some((pe, location, hotspot)) = state.cursor_render_snapshot() {
+                        if !locked {
+                            if let Some((pe, location, hotspot)) = state.cursor_render_snapshot() {
+                                let scale: smithay::utils::Scale<f64> =
+                                    output.current_scale().fractional_scale().into();
+                                let physical_location: smithay::utils::Point<
+                                    i32,
+                                    smithay::utils::Physical,
+                                > = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
+                                    (location.x - hotspot.0 as f64) * scale.x,
+                                    (location.y - hotspot.1 as f64) * scale.y,
+                                ))
+                                .to_i32_round();
+                                use smithay::backend::renderer::element::AsRenderElements;
+                                pe.render_elements(renderer, physical_location, scale, 1.0)
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            // Surface elements for the lock surface (if any)
+                            // ride the same custom_elements slot — they
+                            // accept WaylandSurfaceRenderElement via the
+                            // Surface variant of PointerRenderElement.
                             let scale: smithay::utils::Scale<f64> =
                                 output.current_scale().fractional_scale().into();
-                            let physical_location: smithay::utils::Point<
-                                i32,
-                                smithay::utils::Physical,
-                            > = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-                                (location.x - hotspot.0 as f64) * scale.x,
-                                (location.y - hotspot.1 as f64) * scale.y,
-                            ))
-                            .to_i32_round();
-                            use smithay::backend::renderer::element::AsRenderElements;
-                            pe.render_elements(renderer, physical_location, scale, 1.0)
-                        } else {
-                            Vec::new()
+                            let lock_surface = state.lock_surface_for(&output);
+                            crate::handlers::session_lock::lock_render_elements(
+                                lock_surface.as_ref(),
+                                renderer,
+                                scale,
+                            )
                         };
+                    // Empty space while locked so no client content leaks.
+                    let empty_space =
+                        smithay::desktop::Space::<smithay::desktop::Window>::default();
+                    let render_space = if locked { &empty_space } else { &state.space };
+                    let clear = if locked {
+                        [0.0, 0.0, 0.0, 1.0]
+                    } else {
+                        [0.1, 0.1, 0.1, 1.0]
+                    };
 
                     // Fulfil any pending wlr-screencopy captures for this
                     // output first. The helper binds an offscreen GLES
@@ -153,10 +180,10 @@ pub fn init_winit(
                         &mut framebuffer,
                         1.0,
                         0,
-                        [&state.space],
+                        [render_space],
                         &cursor_elements,
                         &mut damage_tracker,
-                        [0.1, 0.1, 0.1, 1.0],
+                        clear,
                     )
                     .unwrap();
                 }

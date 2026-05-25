@@ -299,6 +299,11 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::Lock => {
+                state.spawn_lock();
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
             Request::InjectClick { button, x, y } => {
                 let xy = match (x, y) {
                     (Some(x), Some(y)) => Some((x, y)),

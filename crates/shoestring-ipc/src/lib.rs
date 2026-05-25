@@ -75,6 +75,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         y: Option<f64>,
     },
+    /// Lock the session. Spawns the WM's configured lock binary
+    /// (`general.lock_command`); the binary itself drives the
+    /// `ext-session-lock-v1` handshake. Returns immediately with
+    /// [`Response::Ok`] — no wait for the lock to confirm.
+    Lock,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

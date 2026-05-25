@@ -54,6 +54,9 @@ impl CompositorHandler for ShoestringWm {
         layer_shell::handle_commit(self, surface);
         xdg_shell::handle_commit(&mut self.popups, &self.space, surface);
         grabs::resize_handle_commit(&mut self.space, surface);
+        // Lock surfaces commit a buffer once they've acked our configure;
+        // that's our signal to confirm the lock to the client.
+        self.maybe_confirm_lock();
     }
 }
 
