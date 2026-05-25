@@ -145,7 +145,11 @@ fn main() -> Result<()> {
         "shoestring-wm ready",
     );
 
-    if let Some(cmd) = cli.command.as_deref().or(Some("weston-terminal")) {
+    for entry in &state.config.general.autostart {
+        spawn_client(entry);
+    }
+
+    if let Some(cmd) = cli.command.as_deref() {
         spawn_client(cmd);
     }
 

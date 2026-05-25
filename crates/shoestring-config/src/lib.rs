@@ -47,6 +47,13 @@ pub struct General {
     /// to substitute e.g. `swaylock` or a custom locker.
     #[serde(default = "default_lock_command")]
     pub lock_command: String,
+    /// Commands spawned once at WM startup, after the wayland socket is
+    /// listening but before user interaction. Each entry is split on
+    /// whitespace (first token = executable, rest = args), same as
+    /// `lock_command`. Failures log a warning and don't block startup.
+    /// Default: `["shoestring-bar"]` so a fresh user gets the status bar.
+    #[serde(default = "default_autostart")]
+    pub autostart: Vec<String>,
 }
 
 fn default_repeat_delay() -> i32 {
@@ -61,6 +68,9 @@ fn default_output_scale() -> f64 {
 fn default_lock_command() -> String {
     "shoestring-lock".into()
 }
+fn default_autostart() -> Vec<String> {
+    vec!["shoestring-bar".into()]
+}
 
 impl Default for General {
     fn default() -> Self {
@@ -70,6 +80,7 @@ impl Default for General {
             repeat_rate: default_repeat_rate(),
             output_scale: default_output_scale(),
             lock_command: default_lock_command(),
+            autostart: default_autostart(),
         }
     }
 }
@@ -387,6 +398,19 @@ mod tests {
         assert_eq!(parsed.bindings.len(), original.bindings.len());
         assert_eq!(parsed.general.output_scale, original.general.output_scale);
         assert_eq!(parsed.general.focus_mode, original.general.focus_mode);
+    }
+
+    #[test]
+    fn autostart_defaults_include_bar() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.general.autostart, vec!["shoestring-bar".to_string()]);
+    }
+
+    #[test]
+    fn autostart_user_override_replaces_default() {
+        let cfg: Config =
+            toml::from_str("[general]\nautostart = [\"foo\", \"bar --baz\"]\n").unwrap();
+        assert_eq!(cfg.general.autostart, vec!["foo", "bar --baz"]);
     }
 
     #[test]
