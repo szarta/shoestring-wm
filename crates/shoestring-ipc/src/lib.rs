@@ -89,6 +89,36 @@ pub enum Request {
     /// Read the current automation gate state without changing it. Reply
     /// is [`Response::Automation`].
     AutomationStatus,
+    /// Capture a PNG screenshot via the WM's wlr-screencopy server. The
+    /// WM spawns `shoestring-screenshot` on the user's behalf and replies
+    /// with the resulting [`Response::Screenshot`] once the file is
+    /// written.
+    ///
+    /// - `output: None` → first advertised output (full-screen).
+    /// - `output: Some(name)` → capture that output. Required when
+    ///   `region` is set, since region coordinates are output-relative.
+    /// - `region: Some(...)` → capture only that rectangle in the named
+    ///   output's logical coords.
+    ///
+    /// Gated by `set_automation`: returns [`Response::Error`] when the
+    /// runtime automation gate is off.
+    Screenshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<ScreenshotRegion>,
+    },
+}
+
+/// Rectangle for [`Request::Screenshot`], in the target output's logical
+/// pixel coords. All fields are positive; `w` and `h` must be > 0.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenshotRegion {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +143,11 @@ pub enum Response {
     /// [`Request::SetAutomation`] and [`Request::AutomationStatus`].
     Automation {
         enabled: bool,
+    },
+    /// Path of the PNG written by [`Request::Screenshot`]. Absolute,
+    /// usually under `$XDG_PICTURES_DIR`.
+    Screenshot {
+        path: String,
     },
     /// Server-side error; the client should print and exit non-zero.
     Error {
@@ -266,6 +301,45 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"type":"automation_changed","enabled":true}"#
+        );
+    }
+
+    #[test]
+    fn screenshot_request_shapes() {
+        let bare = Request::Screenshot {
+            output: None,
+            region: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"type":"screenshot"}"#
+        );
+        let with_region = Request::Screenshot {
+            output: Some("eDP-1".into()),
+            region: Some(ScreenshotRegion {
+                x: 10,
+                y: 20,
+                w: 800,
+                h: 600,
+            }),
+        };
+        let s = serde_json::to_string(&with_region).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Request::Screenshot {
+                output: Some(ref n),
+                region: Some(ScreenshotRegion {
+                    x: 10, y: 20, w: 800, h: 600,
+                }),
+            } if n == "eDP-1"
+        ));
+        let resp = Response::Screenshot {
+            path: "/tmp/foo.png".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"screenshot","path":"/tmp/foo.png"}"#
         );
     }
 

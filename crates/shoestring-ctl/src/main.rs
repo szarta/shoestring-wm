@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use shoestring_ipc::{client_socket_path, Event, Request, Response};
+use shoestring_ipc::{client_socket_path, Event, Request, Response, ScreenshotRegion};
 
 #[derive(Debug, Parser)]
 #[command(name = "shoestring-ctl", version, about)]
@@ -78,6 +78,19 @@ enum Command {
         #[command(subcommand)]
         action: AutomationAction,
     },
+    /// Capture a PNG screenshot via the WM and print the resulting
+    /// path. Requires the automation gate to be on. Path is
+    /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
+    Screenshot {
+        /// Output name (e.g. `eDP-1`). Defaults to the first output the
+        /// compositor advertises. Required when `--region` is set.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Capture only this rectangle in the named output's logical
+        /// coords. Format: `X,Y,W,H`. Implies `--output` is required.
+        #[arg(long, value_name = "X,Y,W,H", requires = "output")]
+        region: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -120,6 +133,10 @@ fn main() -> Result<()> {
             AutomationAction::Off => Request::SetAutomation { enabled: false },
             AutomationAction::Status => Request::AutomationStatus,
         },
+        Command::Screenshot { output, region } => {
+            let region = region.as_deref().map(parse_region).transpose()?;
+            Request::Screenshot { output, region }
+        }
     };
 
     let mut writer = stream.try_clone()?;
@@ -165,6 +182,25 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_region(s: &str) -> Result<ScreenshotRegion> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        anyhow::bail!("--region expected X,Y,W,H (got {s:?})");
+    }
+    let mut nums = [0i32; 4];
+    for (i, p) in parts.iter().enumerate() {
+        nums[i] = p
+            .trim()
+            .parse()
+            .with_context(|| format!("--region field {} not an int: {p:?}", i + 1))?;
+    }
+    let [x, y, w, h] = nums;
+    if w <= 0 || h <= 0 {
+        anyhow::bail!("--region size must be positive (got {w}x{h})");
+    }
+    Ok(ScreenshotRegion { x, y, w, h })
 }
 
 fn print_value<T: serde::Serialize>(value: &T, pretty: bool) -> Result<()> {

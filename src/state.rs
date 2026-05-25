@@ -84,6 +84,12 @@ pub struct ShoestringWm {
     /// truth at next start.
     pub automation_enabled: bool,
 
+    /// In-flight `Request::Screenshot` subprocesses, keyed by an
+    /// opaque counter. Entries are removed once the child has exited
+    /// and the deferred IPC response has been written.
+    pub pending_screenshots: HashMap<u64, crate::remote_screenshot::Pending>,
+    pub next_screenshot_id: u64,
+
     pub cursor: crate::cursor::Cursor,
     pub cursor_status: CursorImageStatus,
     pub pointer_element: crate::drawing::PointerElement,
@@ -174,6 +180,8 @@ impl ShoestringWm {
             seat,
             ipc: None,
             automation_enabled,
+            pending_screenshots: HashMap::new(),
+            next_screenshot_id: 0,
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),

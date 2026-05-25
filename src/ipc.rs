@@ -67,7 +67,7 @@ struct ClientEntry {
     token: RegistrationToken,
 }
 
-struct Client {
+pub(crate) struct Client {
     stream: UnixStream,
     /// Buffered partial line(s) we haven't seen a `\n` for yet.
     read_buf: Vec<u8>,
@@ -331,6 +331,48 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 );
                 return true;
             }
+            Request::Screenshot { output, region } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                if region.is_some() && output.is_none() {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "screenshot: region requires output (coordinates are \
+                                      output-relative)"
+                                .into(),
+                        },
+                    );
+                    return true;
+                }
+                // Mark spent so any further bytes from this client are
+                // dropped — the response is deferred until the subprocess
+                // exits, but we've already accepted the request.
+                client.borrow_mut().spent = true;
+                match state.spawn_remote_screenshot(
+                    id,
+                    Rc::clone(client),
+                    output.as_deref(),
+                    region,
+                ) {
+                    Ok(_path) => {
+                        // Hold the connection open; finalize_remote_screenshot
+                        // will write the response and drop_ipc_client.
+                        return false;
+                    }
+                    Err(e) => {
+                        let _ = write_response(
+                            client,
+                            &Response::Error {
+                                message: format!("screenshot spawn failed: {e}"),
+                            },
+                        );
+                        return true;
+                    }
+                }
+            }
             Request::InjectClick { button, x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -374,7 +416,7 @@ fn automation_off_error() -> Response {
     }
 }
 
-fn write_response(client: &Rc<RefCell<Client>>, resp: &Response) -> std::io::Result<()> {
+pub(crate) fn write_response(client: &Rc<RefCell<Client>>, resp: &Response) -> std::io::Result<()> {
     let line = serde_json::to_string(resp).expect("Response must serialize");
     let mut c = client.borrow_mut();
     c.stream.write_all(line.as_bytes())?;

@@ -62,8 +62,17 @@ struct Cli {
     /// capture only that region via `capture_output_region`. The picker
     /// path is `$SHOESTRING_REGION_BIN`, else `shoestring-region` on
     /// $PATH.
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, conflicts_with = "region_rect")]
     region: bool,
+
+    /// Capture an explicit rectangle without spawning the picker.
+    /// Format: `X,Y,W,H` in the named output's logical pixel coords.
+    /// Requires `--output` so the region's coordinate space is
+    /// unambiguous. Intended for IPC-driven captures
+    /// (`shoestring-ctl screenshot --region …`) where coordinates are
+    /// already known.
+    #[arg(long, value_name = "X,Y,W,H", requires = "output")]
+    region_rect: Option<String>,
 }
 
 /// One rectangle on a named output, in that output's logical coords.
@@ -94,7 +103,12 @@ fn run() -> Result<PathBuf> {
     // Region picker runs *before* we touch wayland. The picker has its own
     // connection and exits when the user releases the mouse (or hits
     // Escape — we treat that as a clean cancel, not a hard error).
-    let region = if cli.region {
+    // --region-rect skips the picker — the caller already knows the rect.
+    let region = if let Some(rect) = cli.region_rect.as_deref() {
+        // clap's `requires = "output"` guarantees output is Some.
+        let output = cli.output.clone().expect("--region-rect requires --output");
+        Some(parse_region_rect(&output, rect)?)
+    } else if cli.region {
         Some(run_region_picker()?)
     } else {
         None
@@ -263,6 +277,34 @@ fn run_region_picker() -> Result<Region> {
         .trim()
         .to_string();
     parse_region_line(&line)
+}
+
+/// Parse the `X,Y,W,H` string accepted by `--region-rect`. The output
+/// name comes from `--output` rather than the rect itself (unlike the
+/// picker's stdout, which carries the output name with the coords).
+fn parse_region_rect(output: &str, s: &str) -> Result<Region> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        anyhow::bail!("--region-rect expected X,Y,W,H (got {s:?})");
+    }
+    let mut nums = [0i32; 4];
+    for (i, p) in parts.iter().enumerate() {
+        nums[i] = p
+            .trim()
+            .parse::<i32>()
+            .with_context(|| format!("--region-rect field {} not an int: {p:?}", i + 1))?;
+    }
+    let [x, y, w, h] = nums;
+    if w <= 0 || h <= 0 {
+        anyhow::bail!("--region-rect size must be positive (got {w}x{h})");
+    }
+    Ok(Region {
+        output: output.to_string(),
+        x,
+        y,
+        w,
+        h,
+    })
 }
 
 fn parse_region_line(line: &str) -> Result<Region> {
@@ -623,6 +665,25 @@ mod tests {
     fn parse_region_line_rejects_zero_size() {
         assert!(parse_region_line("eDP-1 0 0 0 0").is_err());
         assert!(parse_region_line("eDP-1 0 0 10 0").is_err());
+    }
+
+    #[test]
+    fn parse_region_rect_basic() {
+        let r = parse_region_rect("eDP-1", "10,20,800,600").unwrap();
+        assert_eq!(r.output, "eDP-1");
+        assert_eq!((r.x, r.y, r.w, r.h), (10, 20, 800, 600));
+    }
+
+    #[test]
+    fn parse_region_rect_rejects_wrong_field_count() {
+        assert!(parse_region_rect("o", "1,2,3").is_err());
+        assert!(parse_region_rect("o", "1,2,3,4,5").is_err());
+    }
+
+    #[test]
+    fn parse_region_rect_rejects_non_positive_size() {
+        assert!(parse_region_rect("o", "0,0,0,10").is_err());
+        assert!(parse_region_rect("o", "0,0,10,-1").is_err());
     }
 
     #[test]
