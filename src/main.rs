@@ -9,18 +9,21 @@
 // in positional form — wrapping them in a struct buys nothing readable.
 #![allow(clippy::too_many_arguments)]
 
+mod config;
 mod ipc_client;
 
 use std::{
     collections::HashMap,
+    ffi::CString,
     fs,
     io::Write,
     os::fd::{AsFd, AsRawFd},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use config::{default_config_path, default_config_toml, Config, Position};
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use shoestring_ipc::Event as IpcEvent;
@@ -49,19 +52,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
 };
 
-/// Bar height in logical pixels. Eventually configurable via TOML.
-const BAR_HEIGHT: u32 = 24;
-/// Background fill, ARGB8888.
-const BG: u32 = 0xFF_22_22_22;
-/// Foreground (text) color.
-const FG: u32 = 0xFF_FF_FF_FF;
 /// Dim color for inactive workspace boxes and unfocused entry backgrounds.
+/// Not currently user-configurable (the M24 config spec only exposes bg/fg).
 const DIM: u32 = 0xFF_55_55_55;
 /// Accent: focused workspace box and focused window's highlight backdrop.
+/// Not currently user-configurable.
 const ACCENT: u32 = 0xFF_55_77_BB;
-/// Font size in pixels. Picked to leave a couple of px of padding inside
-/// a 24px bar; revisit when DPI/scale handling lands.
-const FONT_PX: f32 = 14.0;
 /// Horizontal text inset from the bar edges.
 const PADDING_X: i32 = 8;
 
@@ -95,6 +91,7 @@ const FONT_CANDIDATES: &[&str] = &[
 ];
 
 struct State {
+    cfg: Config,
     compositor: WlCompositor,
     shm: WlShm,
     layer_shell: ZwlrLayerShellV1,
@@ -121,8 +118,10 @@ struct State {
     /// (toplevel arrival/departure, clock tick, etc). Cleared after the
     /// next paint.
     dirty: bool,
-    /// Minute-of-epoch when we last painted; used to detect clock ticks.
-    last_minute: u32,
+    /// Last rendered clock string; we re-paint when this changes, which
+    /// makes sub-minute formats (e.g. `iso` → seconds) work without any
+    /// extra config plumbing.
+    last_clock: String,
     running: bool,
 }
 
@@ -136,13 +135,37 @@ struct Toplevel {
 }
 
 fn main() -> Result<()> {
+    let cli = parse_cli().context("parsing CLI arguments")?;
+    match cli {
+        CliAction::Run => {}
+        CliAction::Help => {
+            print!("{}", help_text());
+            return Ok(());
+        }
+        CliAction::Version => {
+            println!("shoestring-bar {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        CliAction::WriteDefaultConfig { force } => {
+            return write_default_config_to_disk(force);
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    let font = load_font().context("could not load any system font")?;
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, "config load failed; using defaults");
+            Config::default()
+        }
+    };
+
+    let font = load_font(cfg.font.as_deref()).context("could not load any system font")?;
 
     let conn =
         Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
@@ -176,6 +199,7 @@ fn main() -> Result<()> {
     });
 
     let mut state = State {
+        cfg,
         compositor,
         shm,
         layer_shell,
@@ -188,7 +212,7 @@ fn main() -> Result<()> {
         workspace_count,
         focused_id: None,
         dirty: false,
-        last_minute: 0,
+        last_clock: String::new(),
         running: true,
     };
 
@@ -201,9 +225,13 @@ fn main() -> Result<()> {
         &qh,
         (),
     );
-    layer_surface.set_size(0, BAR_HEIGHT);
-    layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
-    layer_surface.set_exclusive_zone(BAR_HEIGHT as i32);
+    let edge_anchor = match state.cfg.position {
+        Position::Bottom => Anchor::Bottom,
+        Position::Top => Anchor::Top,
+    };
+    layer_surface.set_size(0, state.cfg.height);
+    layer_surface.set_anchor(edge_anchor | Anchor::Left | Anchor::Right);
+    layer_surface.set_exclusive_zone(state.cfg.height as i32);
     surface.commit();
 
     state.surface = Some(surface);
@@ -225,6 +253,83 @@ fn main() -> Result<()> {
     event_loop(conn, &mut queue, &qh, &mut state, event_stream.as_mut())
 }
 
+// ---- CLI -----------------------------------------------------------------
+
+enum CliAction {
+    Run,
+    Help,
+    Version,
+    WriteDefaultConfig { force: bool },
+}
+
+/// Hand-parses argv. Avoids pulling clap for two flags + help/version —
+/// staying lean is one of the project's stated goals (see
+/// [[project-shoestring-wm-dependencies]] in author memory).
+fn parse_cli() -> Result<CliAction> {
+    let mut write_config = false;
+    let mut force = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--write-default-config" => write_config = true,
+            "--force" => force = true,
+            "-h" | "--help" => return Ok(CliAction::Help),
+            "-V" | "--version" => return Ok(CliAction::Version),
+            other => bail!("unknown argument: {other:?} (try --help)"),
+        }
+    }
+    if force && !write_config {
+        bail!("--force only makes sense with --write-default-config");
+    }
+    if write_config {
+        Ok(CliAction::WriteDefaultConfig { force })
+    } else {
+        Ok(CliAction::Run)
+    }
+}
+
+fn help_text() -> String {
+    format!(
+        "shoestring-bar {ver} — lightweight Wayland status bar.
+
+Usage: shoestring-bar [OPTIONS]
+
+Options:
+      --write-default-config   Write the bundled default config to the
+                               user's config path and exit. Refuses to
+                               overwrite unless --force is also passed.
+      --force                  Allow --write-default-config to overwrite.
+  -h, --help                   Print this help and exit.
+  -V, --version                Print version and exit.
+
+Config file: $XDG_CONFIG_HOME/shoestring-bar/config.toml (defaults to
+~/.config/shoestring-bar/config.toml). Run without flags to start the bar.
+
+Environment: WAYLAND_DISPLAY (required), SHOESTRING_WM_SOCKET (optional,
+enables live workspace/focus updates), SHOESTRING_BAR_FONT (font path
+override), RUST_LOG (tracing filter).
+",
+        ver = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn write_default_config_to_disk(force: bool) -> Result<()> {
+    let target = default_config_path()
+        .ok_or_else(|| anyhow!("no config path resolvable: set $HOME or $XDG_CONFIG_HOME"))?;
+    if target.exists() && !force {
+        bail!(
+            "{} already exists; pass --force to overwrite",
+            target.display()
+        );
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(&target, default_config_toml())
+        .with_context(|| format!("writing {}", target.display()))?;
+    println!("wrote default config to {}", target.display());
+    Ok(())
+}
+
 /// Hand-rolled event loop: wake on wayland fd readability OR a 1-second
 /// poll timeout (whichever first), then dispatch + repaint if needed.
 /// Using poll(2) keeps the bar's dep count at zero added crates for
@@ -238,12 +343,15 @@ fn event_loop(
     mut event_stream: Option<&mut ipc_client::EventStream>,
 ) -> Result<()> {
     while state.running {
-        // 1. Repaint if the clock minute has rolled over since the last
-        //    paint. Toplevel events already set state.dirty in their
-        //    handlers, so we just need to add the time signal here.
-        let now_minute = current_minute_id();
-        if state.last_minute != now_minute {
-            state.last_minute = now_minute;
+        // 1. Repaint if the clock string has changed since the last paint.
+        //    Comparing the rendered string (rather than a minute counter)
+        //    means sub-minute formats like `iso` redraw every second
+        //    without any extra plumbing, while minute formats stay cheap
+        //    (string equality is fast, and we still only allocate one
+        //    String per tick).
+        let now_clock = format_clock_now(&state.cfg.clock_format);
+        if state.last_clock != now_clock {
+            state.last_clock = now_clock;
             state.dirty = true;
         }
         if state.dirty {
@@ -361,18 +469,16 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
     }
 }
 
-/// A monotonically-ish increasing identifier for the current minute,
-/// derived from UNIX epoch seconds / 60. Wraps every ~136 years.
-fn current_minute_id() -> u32 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| (d.as_secs() / 60) as u32)
-        .unwrap_or(0)
-}
-
-/// Try each candidate path in order; return the first that loads.
-fn load_font() -> Result<Font> {
-    // Allow an explicit override via env var — handy for testing.
+/// Resolve a font in priority order: explicit config path, then
+/// $SHOESTRING_BAR_FONT, then the built-in candidate list. Returning the
+/// first one that successfully loads.
+fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
+    if let Some(p) = cfg_path {
+        let bytes =
+            fs::read(p).with_context(|| format!("bar.font: cannot read {}", p.display()))?;
+        return Font::from_bytes(bytes, FontSettings::default())
+            .map_err(|e| anyhow::anyhow!("font parse: {e}"));
+    }
     if let Some(path) = std::env::var_os("SHOESTRING_BAR_FONT") {
         let bytes = fs::read(&path).context("$SHOESTRING_BAR_FONT unreadable")?;
         return Font::from_bytes(bytes, FontSettings::default())
@@ -399,11 +505,15 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     let stride = w as i32 * 4;
     let size = (stride as usize) * h as usize;
 
+    let bg = state.cfg.background;
+    let fg = state.cfg.foreground;
+    let font_px = state.cfg.font_size;
+
     let mut tmp = tempfile::tempfile()?;
     tmp.set_len(size as u64)?;
     // Pre-fill the file so the wl_shm buffer is valid even if the compositor
     // peeks at it before our mmap stamp.
-    let row_bytes = BG.to_ne_bytes().repeat(w as usize);
+    let row_bytes = bg.to_ne_bytes().repeat(w as usize);
     for _ in 0..h {
         tmp.write_all(&row_bytes)?;
     }
@@ -412,14 +522,14 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
 
     // We re-fill via the mmap (faster than seek+write) so subsequent draws
     // can mutate in place. Background first, then text on top.
-    fill_bg(&mut mmap, w, h, BG);
+    fill_bg(&mut mmap, w, h, bg);
 
     // Right: clock. Drawn first so we know how much horizontal space
     // remains for the (truncatable) window list in the middle.
-    let clock = format_clock_now();
-    let clock_w = measure_text(&state.font, FONT_PX, &clock);
+    let clock = format_clock_now(&state.cfg.clock_format);
+    let clock_w = measure_text(&state.font, font_px, &clock);
     let clock_x = w as i32 - PADDING_X - clock_w;
-    draw_text(&mut mmap, w, h, &state.font, FONT_PX, clock_x, &clock, FG);
+    draw_text(&mut mmap, w, h, &state.font, font_px, clock_x, &clock, fg);
 
     // Far left: workspace cluster. 16 small boxes; active one in accent
     // color, the rest dimmed.
@@ -444,19 +554,28 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     let list_budget = (list_end_x - list_start_x).max(0);
     if state.toplevels.is_empty() {
         let placeholder = format!("shoestring-bar v{}", env!("CARGO_PKG_VERSION"));
-        let label = truncate_to_fit(&placeholder, &state.font, FONT_PX, list_budget);
+        let label = truncate_to_fit(&placeholder, &state.font, font_px, list_budget);
         draw_text(
             &mut mmap,
             w,
             h,
             &state.font,
-            FONT_PX,
+            font_px,
             list_start_x,
             &label,
-            FG,
+            fg,
         );
     } else {
-        draw_window_list(&mut mmap, w, h, state, list_start_x, list_budget);
+        draw_window_list(
+            &mut mmap,
+            w,
+            h,
+            state,
+            list_start_x,
+            list_budget,
+            font_px,
+            fg,
+        );
     }
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
@@ -509,10 +628,11 @@ fn truncate_to_fit(text: &str, font: &Font, size_px: f32, budget_px: i32) -> Str
     ellipsis.to_string()
 }
 
-/// Local-time clock formatted as `Day Mon DD  HH:MM`. Uses libc to avoid
-/// pulling in chrono/time — already in our tree via tempfile, so this is
-/// zero added deps.
-fn format_clock_now() -> String {
+/// Local-time clock formatted via `libc::strftime`. `format` is a
+/// strftime(3) pattern (aliases like `iso` / `24h-short` are pre-expanded
+/// at config-load time). Uses libc to avoid pulling in chrono/time —
+/// already in our tree via tempfile, so this is zero added deps.
+fn format_clock_now(format: &str) -> String {
     let secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as libc::time_t)
@@ -521,18 +641,25 @@ fn format_clock_now() -> String {
     // localtime_r is thread-safe and reentrant; the version of glibc we
     // care about supports it unconditionally.
     unsafe { libc::localtime_r(&secs, &mut tm) };
-    const WDAY: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MON: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    format!(
-        "{} {} {:02}  {:02}:{:02}",
-        WDAY.get(tm.tm_wday as usize).copied().unwrap_or("???"),
-        MON.get(tm.tm_mon as usize).copied().unwrap_or("???"),
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-    )
+    // strftime needs a NUL-terminated format. An embedded NUL in the
+    // user's config is a config bug; surface a recognizable placeholder
+    // rather than panicking out of the render loop.
+    let Ok(fmt) = CString::new(format) else {
+        return "[bad clock format]".into();
+    };
+    let mut buf = [0u8; 256];
+    let n = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            fmt.as_ptr(),
+            &tm,
+        )
+    };
+    // n == 0 means either the result was empty (legitimate, e.g. empty
+    // format string) OR the buffer was too small. 256 bytes is plenty for
+    // any reasonable clock format, so we treat both cases the same.
+    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 /// Draw the window list entries, painting an accent backdrop behind the
@@ -546,6 +673,8 @@ fn draw_window_list(
     state: &State,
     start_x: i32,
     budget_px: i32,
+    font_px: f32,
+    fg: u32,
 ) {
     let font = &state.font;
     let mut entries: Vec<&Toplevel> = state.toplevels.values().collect();
@@ -566,7 +695,7 @@ fn draw_window_list(
     let mut used = 0;
     for t in &entries {
         let label = label_of(t);
-        let lw = measure_text(font, FONT_PX, &label);
+        let lw = measure_text(font, font_px, &label);
         let needed = if visible.is_empty() {
             lw
         } else {
@@ -574,7 +703,7 @@ fn draw_window_list(
         };
         if used + needed > budget_px {
             // Out of room; signal truncation with a trailing ".." if it fits.
-            let ellipsis_w = measure_text(font, FONT_PX, "..");
+            let ellipsis_w = measure_text(font, font_px, "..");
             let ellipsis_needed = if visible.is_empty() {
                 ellipsis_w
             } else {
@@ -601,7 +730,7 @@ fn draw_window_list(
             let pad = 4;
             fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, ACCENT);
         }
-        draw_text(mmap, w, h, font, FONT_PX, x, label, FG);
+        draw_text(mmap, w, h, font, font_px, x, label, fg);
         x += lw;
     }
 }
@@ -769,7 +898,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
             } => {
                 layer_surface.ack_configure(serial);
                 let w = if width == 0 { 1 } else { width };
-                let h = if height == 0 { BAR_HEIGHT } else { height };
+                let h = if height == 0 {
+                    state.cfg.height
+                } else {
+                    height
+                };
                 state.size = Some((w, h));
                 state.dirty = true;
             }
@@ -871,3 +1004,34 @@ noop_dispatch!(
     WlOutput,
     ZwlrLayerShellV1,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strftime_short_24h_produces_hhmm() {
+        let s = format_clock_now("%H:%M");
+        // Five characters, ASCII digits separated by ':'.
+        assert_eq!(s.len(), 5, "expected HH:MM, got {s:?}");
+        let bytes = s.as_bytes();
+        assert!(bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit());
+        assert_eq!(bytes[2], b':');
+        assert!(bytes[3].is_ascii_digit() && bytes[4].is_ascii_digit());
+    }
+
+    #[test]
+    fn strftime_iso_includes_dashes_and_colons() {
+        let s = format_clock_now("%Y-%m-%d %H:%M:%S");
+        assert_eq!(s.len(), 19, "expected YYYY-MM-DD HH:MM:SS, got {s:?}");
+        assert_eq!(s.as_bytes()[4], b'-');
+        assert_eq!(s.as_bytes()[7], b'-');
+        assert_eq!(s.as_bytes()[13], b':');
+    }
+
+    #[test]
+    fn strftime_handles_embedded_nul_without_panicking() {
+        let s = format_clock_now("%H\0:%M");
+        assert_eq!(s, "[bad clock format]");
+    }
+}

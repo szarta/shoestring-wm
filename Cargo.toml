@@ -38,7 +38,9 @@ libc = "0.2"
 # across repo roots is deliberate: the two projects live side-by-side in
 # ~/data and ship as a pair.
 shoestring-ipc = { path = "../shoestring-wm/crates/shoestring-ipc" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 # Structured logs (env-filterable). Match shoestring-wm so RUST_LOG works
 # the same way.
