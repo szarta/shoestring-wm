@@ -55,6 +55,26 @@ pub enum Request {
     /// Switch the connection into streaming mode: server sends one
     /// [`Response::Ok`] then a stream of [`Event`]s, one per line, forever.
     EventStream,
+    /// Synthesize a single keypress (press + release) targeting whichever
+    /// surface currently holds keyboard focus. `keysym` is an X keysym
+    /// name as understood by `xkb_keysym_from_name` (e.g. `"Return"`,
+    /// `"F5"`, `"q"`, `"BackSpace"`).
+    InjectKey { keysym: String },
+    /// Synthesize a sequence of keypresses that types `text`. v1 supports
+    /// ASCII letters, digits, and space; other codepoints fall back to a
+    /// server-side error so the caller knows to break the input up.
+    InjectText { text: String },
+    /// Synthesize a single mouse click. `button` is one of `"left"`,
+    /// `"right"`, `"middle"`, or a numeric Linux `BTN_*` code as a string
+    /// (`"272"` etc). Optional `x` / `y` move the pointer to the given
+    /// compositor-space coordinates first (both must be present together).
+    InjectClick {
+        button: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +177,47 @@ mod tests {
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(s, r#"{"type":"workspaces","active":3,"count":16}"#);
+    }
+
+    #[test]
+    fn inject_request_shapes() {
+        let key = Request::InjectKey {
+            keysym: "Return".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&key).unwrap(),
+            r#"{"type":"inject_key","keysym":"Return"}"#
+        );
+        let typ = Request::InjectText { text: "hi".into() };
+        assert_eq!(
+            serde_json::to_string(&typ).unwrap(),
+            r#"{"type":"inject_text","text":"hi"}"#
+        );
+        let click_no_xy = Request::InjectClick {
+            button: "left".into(),
+            x: None,
+            y: None,
+        };
+        // x/y are skipped when None so simple cases stay terse.
+        assert_eq!(
+            serde_json::to_string(&click_no_xy).unwrap(),
+            r#"{"type":"inject_click","button":"left"}"#
+        );
+        let click_xy = Request::InjectClick {
+            button: "right".into(),
+            x: Some(100.5),
+            y: Some(200.0),
+        };
+        let s = serde_json::to_string(&click_xy).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Request::InjectClick {
+                ref button,
+                x: Some(_),
+                y: Some(_)
+            } if button == "right"
+        ));
     }
 
     #[test]

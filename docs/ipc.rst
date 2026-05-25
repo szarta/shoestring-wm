@@ -44,6 +44,25 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "event_stream"}``
      - Switch into streaming mode. Server replies once with ``Ok`` then
        pushes events.
+   * - ``{"type": "inject_key", "keysym": "Return"}``
+     - Synthesize a single keypress (press + release) targeting the
+       focused surface. ``keysym`` is any X keysym name understood by
+       ``xkb_keysym_from_name`` (e.g. ``"Return"``, ``"F5"``,
+       ``"BackSpace"``, ``"q"``).
+   * - ``{"type": "inject_text", "text": "hello"}``
+     - Type a literal string into the focused surface. v1 supports ASCII
+       letters, digits, and space; other codepoints return an ``error``
+       so the caller knows to break the string up.
+   * - ``{"type": "inject_click", "button": "left"}``
+     - Synthesize a single mouse click. ``button`` is one of ``"left"`` /
+       ``"right"`` / ``"middle"``, or a numeric Linux ``BTN_*`` code as a
+       string. Pass ``"x"`` and ``"y"`` (both, as numbers) to move the
+       pointer to those compositor-space coordinates first.
+
+Injected key and click events bypass the WM's binding table — a scripted
+``Super+q`` will NOT trigger the ``Quit`` binding. Use the relevant typed
+request (or, for now, the WM's existing keybind config) when you want a
+WM-level action.
 
 Responses
 ---------
@@ -141,6 +160,11 @@ subcommand maps to one request:
     {"type":"workspace_changed","active":4}
     {"type":"window_focused","id":"abcd-1234"}
     ...
+
+    $ shoestring-ctl key Return         # synthesize a single Enter press
+    $ shoestring-ctl type "hello 123"   # type ASCII into focused surface
+    $ shoestring-ctl click left         # click at the current pointer
+    $ shoestring-ctl click left --x 200 --y 400
 
 Flags:
 

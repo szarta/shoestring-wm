@@ -279,6 +279,49 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 tracing::debug!(?id, "ipc client subscribed to events");
                 return false;
             }
+            Request::InjectKey { keysym } => {
+                let resp = match state.inject_key(&keysym) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::InjectText { text } => {
+                let resp = match state.inject_text(&text) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::InjectClick { button, x, y } => {
+                let xy = match (x, y) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    (None, None) => None,
+                    _ => {
+                        let _ = write_response(
+                            client,
+                            &Response::Error {
+                                message: "inject_click: x and y must be passed together".into(),
+                            },
+                        );
+                        return true;
+                    }
+                };
+                let resp = match state.inject_click(&button, xy) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
         }
     }
 }

@@ -163,6 +163,37 @@ Each action type and its fields:
     the TTY backend; logged as a no-op under winit. Default binds map
     ``Ctrl+Alt+F1..F12`` to ``change-vt`` for the matching VT.
 
+``inject-key``
+    Synthesize a single keypress (press + release) targeting the focused
+    surface. ``keysym`` is an X keysym name. Injected events bypass the
+    WM's binding table by design — they go straight to the client.
+
+    ::
+
+        action = { type = "inject-key", keysym = "Return" }
+
+``inject-text``
+    Synthesize a sequence of keypresses that types ``text``. v1 supports
+    ASCII letters, digits, and space. Useful for snippet-style bindings.
+
+    ::
+
+        action = { type = "inject-text", text = "user@host" }
+
+``inject-click``
+    Synthesize a single mouse click at the current pointer location.
+    ``button`` is ``"left"`` / ``"right"`` / ``"middle"`` or a numeric
+    ``BTN_*`` code as a string.
+
+    ::
+
+        action = { type = "inject-click", button = "middle" }
+
+These three actions are also exposed over IPC as ``inject_key`` /
+``inject_text`` / ``inject_click`` requests; see :doc:`ipc`. The
+``shoestring-ctl key`` / ``type`` / ``click`` subcommands are the
+xdotool-equivalent CLI built on top.
+
 Pointer bindings
 ----------------
 

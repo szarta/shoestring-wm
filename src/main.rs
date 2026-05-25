@@ -6,6 +6,7 @@ mod cursor;
 mod drawing;
 mod grabs;
 mod handlers;
+mod inject;
 mod input;
 mod ipc;
 mod layout;

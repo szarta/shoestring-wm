@@ -112,6 +112,21 @@ impl ShoestringWm {
                 self.focus_workspace_id(target); // follow the window
             }
             Action::ChangeVt { vt } => self.change_vt(vt),
+            Action::InjectKey { keysym } => {
+                if let Err(e) = self.inject_key(&keysym) {
+                    tracing::warn!(keysym, error = %e, "inject_key failed");
+                }
+            }
+            Action::InjectText { text } => {
+                if let Err(e) = self.inject_text(&text) {
+                    tracing::warn!(text, error = %e, "inject_text failed");
+                }
+            }
+            Action::InjectClick { button } => {
+                if let Err(e) = self.inject_click(&button, None) {
+                    tracing::warn!(button, error = %e, "inject_click failed");
+                }
+            }
         }
     }
 

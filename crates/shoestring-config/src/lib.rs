@@ -123,6 +123,17 @@ pub enum Action {
     /// Switch to Linux virtual terminal `vt` (1..=12). Only effective when
     /// running on the TTY backend; no-op with a warning under winit.
     ChangeVt { vt: u8 },
+    /// Synthesize a single keypress (press + release) targeting whichever
+    /// surface holds keyboard focus. `keysym` is an X keysym name (e.g.
+    /// `"Return"`, `"F5"`, `"q"`).
+    InjectKey { keysym: String },
+    /// Synthesize a sequence of keypresses that types `text`. ASCII letters,
+    /// digits, and space only (v1).
+    InjectText { text: String },
+    /// Synthesize a single mouse click at the current pointer location.
+    /// `button` is `"left"` / `"right"` / `"middle"` or a numeric BTN_*
+    /// code (e.g. `"272"`).
+    InjectClick { button: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,7 +156,8 @@ pub fn default_config_toml() -> String {
 #
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
 # minimize, unminimize, close, focus-workspace, focus-workspace-relative,
-# move-window-to-workspace, move-window-to-workspace-relative, change-vt.
+# move-window-to-workspace, move-window-to-workspace-relative, change-vt,
+# inject-key, inject-text, inject-click.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
