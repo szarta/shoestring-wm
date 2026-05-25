@@ -33,11 +33,6 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
-/// xkb keycodes start at 8 (per xkb convention: 0..=7 are reserved). The
-/// evdev / libinput keycode is `xkb_keycode - 8`, which is what
-/// `KeyboardHandle::input` expects.
-const XKB_KEYCODE_OFFSET: u32 = 8;
-
 #[derive(Debug, thiserror::Error)]
 pub enum InjectError {
     #[error("unknown keysym name: {0:?}")]
@@ -56,10 +51,11 @@ impl ShoestringWm {
         let key = self
             .resolve_keysym(sym)
             .ok_or_else(|| InjectError::KeysymNotInKeymap(keysym_name.to_string()))?;
+        tracing::debug!(keysym_name, keycode = key.keycode, "inject_key dispatch");
         // For a bare `inject_key`, ignore the modifier requirement — the
         // caller asked for a keysym, not for a chord. Anything that needs
         // an explicit modifier should compose key injections.
-        self.tap_key(key.libinput_code);
+        self.tap_key(key.keycode);
         Ok(())
     }
 
@@ -70,9 +66,7 @@ impl ShoestringWm {
                 return Err(InjectError::UnsupportedChar(ch));
             }
         }
-        let shift_keycode = self
-            .resolve_keysym(Keysym::Shift_L)
-            .map(|k| k.libinput_code);
+        let shift_keycode = self.resolve_keysym(Keysym::Shift_L).map(|k| k.keycode);
         for ch in text.chars() {
             let sym = Keysym::from_char(ch);
             let Some(key) = self.resolve_keysym(sym) else {
@@ -82,12 +76,13 @@ impl ShoestringWm {
                 return Err(InjectError::UnsupportedChar(ch));
             };
             let needs_shift = key.shifted;
+            tracing::trace!(ch = %ch, keycode = key.keycode, needs_shift, "inject_text char");
             if needs_shift {
                 if let Some(kc) = shift_keycode {
                     self.press_key(kc);
                 }
             }
-            self.tap_key(key.libinput_code);
+            self.tap_key(key.keycode);
             if needs_shift {
                 if let Some(kc) = shift_keycode {
                     self.release_key(kc);
@@ -148,20 +143,23 @@ impl ShoestringWm {
         Ok(())
     }
 
-    fn tap_key(&mut self, libinput_keycode: u32) {
-        self.press_key(libinput_keycode);
-        self.release_key(libinput_keycode);
+    fn tap_key(&mut self, keycode: u32) {
+        self.press_key(keycode);
+        self.release_key(keycode);
     }
 
-    fn press_key(&mut self, libinput_keycode: u32) {
-        self.dispatch_key(libinput_keycode, KeyState::Pressed);
+    fn press_key(&mut self, keycode: u32) {
+        self.dispatch_key(keycode, KeyState::Pressed);
     }
 
-    fn release_key(&mut self, libinput_keycode: u32) {
-        self.dispatch_key(libinput_keycode, KeyState::Released);
+    fn release_key(&mut self, keycode: u32) {
+        self.dispatch_key(keycode, KeyState::Released);
     }
 
-    fn dispatch_key(&mut self, libinput_keycode: u32, state: KeyState) {
+    /// `keycode` is the X-style keycode (evdev + 8) — same numbering xkb
+    /// uses, and what `KeyboardHandle::input` expects (see smithay's
+    /// libinput backend, which does `key() + 8` before calling in).
+    fn dispatch_key(&mut self, keycode: u32, state: KeyState) {
         let serial = SERIAL_COUNTER.next_serial();
         let time = monotonic_msec();
         let keyboard = self.seat.get_keyboard().expect("seat must have keyboard");
@@ -169,7 +167,7 @@ impl ShoestringWm {
         // WM's binding table by design (see module docs).
         keyboard.input::<(), _>(
             self,
-            libinput_keycode.into(),
+            keycode.into(),
             state,
             serial,
             time,
@@ -178,8 +176,9 @@ impl ShoestringWm {
     }
 
     /// Walk the active xkb keymap looking for any (keycode, layout, level)
-    /// that produces `target`. Returns the libinput keycode and a flag
-    /// for whether the level requires shift (level > 0).
+    /// that produces `target`. Returns the X-style keycode (matches
+    /// `KeyboardHandle::input`'s expectation) and a flag for whether the
+    /// level requires shift (level > 0).
     fn resolve_keysym(&mut self, target: Keysym) -> Option<ResolvedKey> {
         let keyboard = self.seat.get_keyboard().expect("seat must have keyboard");
         keyboard.with_xkb_state(self, |context| {
@@ -192,6 +191,12 @@ impl ShoestringWm {
             let max = keymap.max_keycode().raw();
             for kc in min..=max {
                 let keycode = xkb::Keycode::new(kc);
+                // Skip keycodes the keymap doesn't actually define — they
+                // have 0 layouts and asking for levels would be wasted work.
+                // Matches the `xkbcommon/how-to-type` example's filter.
+                if keymap.key_get_name(keycode).is_none() {
+                    continue;
+                }
                 let num_layouts = keymap.num_layouts_for_key(keycode);
                 for layout in 0..num_layouts {
                     let num_levels = keymap.num_levels_for_key(keycode, layout);
@@ -199,7 +204,7 @@ impl ShoestringWm {
                         let syms = keymap.key_get_syms_by_level(keycode, layout, level);
                         if syms.len() == 1 && syms[0] == target {
                             return Some(ResolvedKey {
-                                libinput_code: kc.saturating_sub(XKB_KEYCODE_OFFSET),
+                                keycode: kc,
                                 shifted: level > 0,
                             });
                         }
@@ -213,7 +218,9 @@ impl ShoestringWm {
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedKey {
-    libinput_code: u32,
+    /// X-style keycode (evdev + 8). Pass straight to
+    /// `KeyboardHandle::input` — it speaks the same numbering.
+    keycode: u32,
     shifted: bool,
 }
 
