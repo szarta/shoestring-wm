@@ -115,6 +115,18 @@ impl ShoestringWm {
             pointer.frame(self);
         }
 
+        // Mirror the WM's normal click-to-focus behavior — without this,
+        // an injected click only delivers the button event to whatever
+        // surface had pointer focus last, and doesn't update keyboard
+        // focus the way a real click does. The Super+drag carve-out is
+        // omitted intentionally: an injected click has no modifier state.
+        let pos = self.seat.get_pointer().unwrap().current_location();
+        let target = self.space.element_under(pos).map(|(w, _)| w.clone());
+        match target {
+            Some(window) => self.focus_window(&window),
+            None => self.clear_focus(),
+        }
+
         let press_serial = SERIAL_COUNTER.next_serial();
         let pointer = self.seat.get_pointer().unwrap();
         pointer.button(
