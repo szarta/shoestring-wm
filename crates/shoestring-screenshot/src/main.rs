@@ -48,7 +48,8 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 )]
 struct Cli {
     /// Pick a specific output by name (e.g. `eDP-1`, `HDMI-A-1`, `winit`).
-    /// Defaults to the first output the compositor advertises.
+    /// Defaults to the first output the compositor advertises. Ignored when
+    /// `--region` is set (the picker chooses the output).
     #[arg(short, long)]
     output: Option<String>,
 
@@ -56,6 +57,22 @@ struct Cli {
     /// `$XDG_PICTURES_DIR/Screenshot-YYYYMMDD-HHMMSS.png`.
     #[arg(short = 'f', long)]
     file: Option<PathBuf>,
+
+    /// Run `shoestring-region` first to drag-select a rectangle, then
+    /// capture only that region via `capture_output_region`. The picker
+    /// path is `$SHOESTRING_REGION_BIN`, else `shoestring-region` on
+    /// $PATH.
+    #[arg(short = 'r', long)]
+    region: bool,
+}
+
+/// One rectangle on a named output, in that output's logical coords.
+struct Region {
+    output: String,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
 }
 
 fn main() -> ExitCode {
@@ -73,6 +90,15 @@ fn main() -> ExitCode {
 
 fn run() -> Result<PathBuf> {
     let cli = Cli::parse();
+
+    // Region picker runs *before* we touch wayland. The picker has its own
+    // connection and exits when the user releases the mouse (or hits
+    // Escape — we treat that as a clean cancel, not a hard error).
+    let region = if cli.region {
+        Some(run_region_picker()?)
+    } else {
+        None
+    };
 
     let conn =
         Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
@@ -117,12 +143,20 @@ fn run() -> Result<PathBuf> {
         .roundtrip(&mut state)
         .context("output info roundtrip")?;
 
-    let target = pick_output(&state.outputs, cli.output.as_deref())?;
+    // When --region was passed, the picker has already chosen the output.
+    // Otherwise honor --output / first-available.
+    let target = match &region {
+        Some(r) => pick_output(&state.outputs, Some(&r.output))?,
+        None => pick_output(&state.outputs, cli.output.as_deref())?,
+    };
 
     // Kick off the capture. cursor=1 because our WM always composites the
     // cursor anyway; passing 0 wouldn't actually exclude it (documented
     // limitation).
-    let frame = manager.capture_output(1, &target, &qh, ());
+    let frame = match &region {
+        Some(r) => manager.capture_output_region(1, &target, r.x, r.y, r.w, r.h, &qh, ()),
+        None => manager.capture_output(1, &target, &qh, ()),
+    };
 
     // Drive the queue until we either have buffer params or a failure.
     let (format, width, height, stride) = loop {
@@ -200,6 +234,58 @@ fn run() -> Result<PathBuf> {
     drop(queue);
 
     Ok(path)
+}
+
+// ---------------- Region picker ----------------
+
+/// Spawn the picker binary, parse its single output line. Picker contract:
+/// stdout = `NAME X Y W H\n`, exit 0 on success. Any non-zero exit is
+/// treated as a user cancel — we propagate it as an error so the calling
+/// shell sees a failure (so e.g. a hotkey doesn't silently fall through).
+fn run_region_picker() -> Result<Region> {
+    let bin = std::env::var_os("SHOESTRING_REGION_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("shoestring-region"));
+    let out = std::process::Command::new(&bin)
+        // Inherit stderr so the picker's diagnostics show up where the
+        // user invoked us. Stdin is irrelevant; we just want stdout.
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .with_context(|| format!("spawning region picker {:?}", bin))?;
+    if !out.status.success() {
+        // Code 1 from the picker == Escape or degenerate drag. Surface
+        // as a tidy error message rather than a confusing nonzero status
+        // with no stdout to parse.
+        anyhow::bail!("region selection cancelled");
+    }
+    let line = String::from_utf8(out.stdout)
+        .context("region picker stdout was not utf-8")?
+        .trim()
+        .to_string();
+    parse_region_line(&line)
+}
+
+fn parse_region_line(line: &str) -> Result<Region> {
+    let mut parts = line.split_ascii_whitespace();
+    let output = parts
+        .next()
+        .ok_or_else(|| anyhow!("picker line missing output name: {line:?}"))?
+        .to_string();
+    let mut next_int = |field: &str| -> Result<i32> {
+        let s = parts
+            .next()
+            .ok_or_else(|| anyhow!("picker line missing {field}: {line:?}"))?;
+        s.parse::<i32>()
+            .with_context(|| format!("picker {field} not an int: {s:?}"))
+    };
+    let x = next_int("x")?;
+    let y = next_int("y")?;
+    let w = next_int("w")?;
+    let h = next_int("h")?;
+    if w <= 0 || h <= 0 {
+        anyhow::bail!("picker returned non-positive size: {w}x{h}");
+    }
+    Ok(Region { output, x, y, w, h })
 }
 
 // ---------------- Output selection ----------------
@@ -514,3 +600,34 @@ fn parse_flags(f: WEnum<Flags>) -> Flags {
 // Suppress unused warnings on EventQueue helper.
 #[allow(dead_code)]
 fn _types(_: &EventQueue<State>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_region_line_basic() {
+        let r = parse_region_line("eDP-1 100 200 800 600").unwrap();
+        assert_eq!(r.output, "eDP-1");
+        assert_eq!((r.x, r.y, r.w, r.h), (100, 200, 800, 600));
+    }
+
+    #[test]
+    fn parse_region_line_extra_whitespace() {
+        let r = parse_region_line("  HDMI-A-1   0  0   1920  1080  ").unwrap();
+        assert_eq!(r.output, "HDMI-A-1");
+        assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn parse_region_line_rejects_zero_size() {
+        assert!(parse_region_line("eDP-1 0 0 0 0").is_err());
+        assert!(parse_region_line("eDP-1 0 0 10 0").is_err());
+    }
+
+    #[test]
+    fn parse_region_line_rejects_truncated() {
+        assert!(parse_region_line("eDP-1 0 0 10").is_err());
+        assert!(parse_region_line("").is_err());
+    }
+}

@@ -409,7 +409,16 @@ impl ShoestringWm {
 
                     match target {
                         Some((window, _loc)) => self.focus_window(&window),
-                        None => self.clear_focus(),
+                        None => {
+                            // Only clear keyboard focus if nothing at all is
+                            // under the pointer. A layer-shell surface (e.g.
+                            // shoestring-region picker, menu) owns its own
+                            // focus via the layer_shell commit handler;
+                            // clicking it must not yank that focus away.
+                            if self.surface_under(pos).is_none() {
+                                self.clear_focus();
+                            }
+                        }
                     }
                 }
 

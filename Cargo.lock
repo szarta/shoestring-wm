@@ -1804,6 +1804,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoestring-region"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "memmap2",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "xkbcommon",
+]
+
+[[package]]
 name = "shoestring-screenshot"
 version = "0.1.0"
 dependencies = [

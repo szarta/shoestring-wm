@@ -2,7 +2,7 @@ use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Instant};
 
 use shoestring_config::Config;
 use smithay::{
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{layer_map_for_output, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatState},
     reexports::{
         calloop::{
@@ -212,13 +212,61 @@ impl ShoestringWm {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space
+        use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
+
+        // Z-order: Overlay > Top > toplevel windows > Bottom > Background.
+        // We have to consult layer-shell surfaces explicitly because
+        // `space.element_under` only walks the toplevel window stack;
+        // without this an Overlay layer surface (e.g. shoestring-region's
+        // picker) covering the screen would be invisible to pointer input.
+        let output_geo = self.space.outputs().find_map(|o| {
+            self.space
+                .output_geometry(o)
+                .filter(|g| g.to_f64().contains(pos))
+                .map(|g| (o.clone(), g))
+        });
+
+        if let Some((output, geo)) = output_geo.as_ref() {
+            let local = pos - geo.loc.to_f64();
+            let map = layer_map_for_output(output);
+            for layer in [WlrLayer::Overlay, WlrLayer::Top] {
+                if let Some(ls) = map.layer_under(layer, local) {
+                    let layer_loc = map.layer_geometry(ls).map(|g| g.loc).unwrap_or_default();
+                    let inner = local - layer_loc.to_f64();
+                    if let Some((surface, sp)) = ls.surface_under(inner, WindowSurfaceType::ALL) {
+                        return Some((surface, (sp + layer_loc).to_f64() + geo.loc.to_f64()));
+                    }
+                }
+            }
+        }
+
+        if let Some((surface, p)) = self
+            .space
             .element_under(pos)
             .and_then(|(window, location)| {
                 window
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(s, p)| (s, (p + location).to_f64()))
             })
+        {
+            return Some((surface, p));
+        }
+
+        if let Some((output, geo)) = output_geo {
+            let local = pos - geo.loc.to_f64();
+            let map = layer_map_for_output(&output);
+            for layer in [WlrLayer::Bottom, WlrLayer::Background] {
+                if let Some(ls) = map.layer_under(layer, local) {
+                    let layer_loc = map.layer_geometry(ls).map(|g| g.loc).unwrap_or_default();
+                    let inner = local - layer_loc.to_f64();
+                    if let Some((surface, sp)) = ls.surface_under(inner, WindowSurfaceType::ALL) {
+                        return Some((surface, (sp + layer_loc).to_f64() + geo.loc.to_f64()));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// The window whose toplevel surface currently holds keyboard focus.

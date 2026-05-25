@@ -5,6 +5,7 @@ members = [
     "crates/shoestring-config",
     "crates/shoestring-ctl",
     "crates/shoestring-lock",
+    "crates/shoestring-region",
     "crates/shoestring-screenshot",
 ]
 
