@@ -71,6 +71,24 @@ enum Command {
     /// (`general.lock_command` in the WM config, default
     /// `shoestring-lock`).
     Lock,
+    /// Read or toggle the runtime automation gate. Affects future
+    /// inject_* / remote-automation IPC calls. Not persisted to disk;
+    /// the WM's config file is the source of truth at next start.
+    Automation {
+        #[command(subcommand)]
+        action: AutomationAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutomationAction {
+    /// Turn the gate ON. Inject_* IPC and future remote-automation
+    /// methods will be allowed.
+    On,
+    /// Turn the gate OFF.
+    Off,
+    /// Print the current state.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -97,6 +115,11 @@ fn main() -> Result<()> {
         Command::Type { text } => Request::InjectText { text },
         Command::Click { button, x, y } => Request::InjectClick { button, x, y },
         Command::Lock => Request::Lock,
+        Command::Automation { action } => match action {
+            AutomationAction::On => Request::SetAutomation { enabled: true },
+            AutomationAction::Off => Request::SetAutomation { enabled: false },
+            AutomationAction::Status => Request::AutomationStatus,
+        },
     };
 
     let mut writer = stream.try_clone()?;

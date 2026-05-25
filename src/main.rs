@@ -55,6 +55,15 @@ struct Cli {
     /// Allow `--write-default-config` to overwrite an existing file.
     #[arg(long)]
     force: bool,
+
+    /// Force the runtime automation gate ON at startup, overriding
+    /// `general.automation_enabled` from the config. Off by default so
+    /// remote-automation IPC methods (key/text/click injection, future
+    /// remote screenshot + command exec) refuse to fire. The flag only
+    /// forces ON; `set_automation` IPC can still flip the gate at
+    /// runtime.
+    #[arg(long)]
+    enable_automation: bool,
 }
 
 /// Initialise tracing. Writes to stderr by default; if `SHOESTRING_WM_LOG`
@@ -101,6 +110,11 @@ fn main() -> Result<()> {
     let display: Display<ShoestringWm> = Display::new()?;
 
     let mut state = ShoestringWm::new(&mut event_loop, display, config, config_path);
+
+    if cli.enable_automation && !state.automation_enabled {
+        state.automation_enabled = true;
+        tracing::info!("automation gate forced on by --enable-automation");
+    }
 
     let backend = cli.backend.unwrap_or_else(|| {
         let in_session =

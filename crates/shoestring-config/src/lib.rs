@@ -54,6 +54,14 @@ pub struct General {
     /// Default: `["shoestring-bar"]` so a fresh user gets the status bar.
     #[serde(default = "default_autostart")]
     pub autostart: Vec<String>,
+    /// Foundational gate for remote-automation IPC methods (key/text/click
+    /// injection, future remote screenshot + command exec). Off by default
+    /// so an attacker who only has socket access cannot drive the session.
+    /// The CLI flag `--enable-automation` and the runtime IPC
+    /// `set_automation` request both override this without writing back to
+    /// disk — the config file stays the source of truth at next start.
+    #[serde(default)]
+    pub automation_enabled: bool,
 }
 
 fn default_repeat_delay() -> i32 {
@@ -81,6 +89,7 @@ impl Default for General {
             output_scale: default_output_scale(),
             lock_command: default_lock_command(),
             autostart: default_autostart(),
+            automation_enabled: false,
         }
     }
 }
@@ -411,6 +420,18 @@ mod tests {
         let cfg: Config =
             toml::from_str("[general]\nautostart = [\"foo\", \"bar --baz\"]\n").unwrap();
         assert_eq!(cfg.general.autostart, vec!["foo", "bar --baz"]);
+    }
+
+    #[test]
+    fn automation_defaults_off() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.general.automation_enabled);
+    }
+
+    #[test]
+    fn automation_enabled_user_override() {
+        let cfg: Config = toml::from_str("[general]\nautomation_enabled = true\n").unwrap();
+        assert!(cfg.general.automation_enabled);
     }
 
     #[test]

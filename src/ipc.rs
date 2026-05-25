@@ -280,6 +280,10 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 return false;
             }
             Request::InjectKey { keysym } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
                 let resp = match state.inject_key(&keysym) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
@@ -290,6 +294,10 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 return true;
             }
             Request::InjectText { text } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
                 let resp = match state.inject_text(&text) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
@@ -304,7 +312,30 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::SetAutomation { enabled } => {
+                let changed = state.automation_enabled != enabled;
+                state.automation_enabled = enabled;
+                let _ = write_response(client, &Response::Automation { enabled });
+                if changed {
+                    tracing::info!(enabled, "automation gate changed via ipc");
+                    state.emit_ipc(Event::AutomationChanged { enabled });
+                }
+                return true;
+            }
+            Request::AutomationStatus => {
+                let _ = write_response(
+                    client,
+                    &Response::Automation {
+                        enabled: state.automation_enabled,
+                    },
+                );
+                return true;
+            }
             Request::InjectClick { button, x, y } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
                 let xy = match (x, y) {
                     (Some(x), Some(y)) => Some((x, y)),
                     (None, None) => None,
@@ -328,6 +359,18 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 return true;
             }
         }
+    }
+}
+
+/// Structured rejection for IPC methods gated behind
+/// `automation_enabled`. The message is stable enough that callers (and
+/// the bar's status indicator) can scrape on the prefix; we keep it
+/// human-readable rather than introducing a typed error variant.
+fn automation_off_error() -> Response {
+    Response::Error {
+        message: "automation disabled: enable with `shoestring-ctl automation on` \
+                  or restart the WM with --enable-automation"
+            .into(),
     }
 }
 

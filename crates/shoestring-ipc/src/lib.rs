@@ -80,6 +80,15 @@ pub enum Request {
     /// `ext-session-lock-v1` handshake. Returns immediately with
     /// [`Response::Ok`] — no wait for the lock to confirm.
     Lock,
+    /// Toggle the runtime automation gate (see
+    /// `general.automation_enabled`). Reply is [`Response::Automation`]
+    /// with the new state; an [`Event::AutomationChanged`] is broadcast
+    /// to subscribers when the value actually flips. Not persisted to
+    /// disk — the config file is the source of truth at next start.
+    SetAutomation { enabled: bool },
+    /// Read the current automation gate state without changing it. Reply
+    /// is [`Response::Automation`].
+    AutomationStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +108,11 @@ pub enum Response {
     },
     Outputs {
         outputs: Vec<OutputSummary>,
+    },
+    /// Current state of the automation gate. Returned for both
+    /// [`Request::SetAutomation`] and [`Request::AutomationStatus`].
+    Automation {
+        enabled: bool,
     },
     /// Server-side error; the client should print and exit non-zero.
     Error {
@@ -158,6 +172,12 @@ pub enum Event {
     OutputAdded(OutputSummary),
     OutputRemoved {
         name: String,
+    },
+    /// Fired when the runtime automation gate flips. Subscribers can use
+    /// this to surface a status indicator (e.g. bar widget) without
+    /// polling.
+    AutomationChanged {
+        enabled: bool,
     },
 }
 
@@ -223,6 +243,30 @@ mod tests {
                 y: Some(_)
             } if button == "right"
         ));
+    }
+
+    #[test]
+    fn automation_request_response_event_shapes() {
+        let set = Request::SetAutomation { enabled: true };
+        assert_eq!(
+            serde_json::to_string(&set).unwrap(),
+            r#"{"type":"set_automation","enabled":true}"#
+        );
+        let status = Request::AutomationStatus;
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            r#"{"type":"automation_status"}"#
+        );
+        let resp = Response::Automation { enabled: false };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"automation","enabled":false}"#
+        );
+        let ev = Event::AutomationChanged { enabled: true };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"automation_changed","enabled":true}"#
+        );
     }
 
     #[test]

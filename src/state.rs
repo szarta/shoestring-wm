@@ -76,6 +76,13 @@ pub struct ShoestringWm {
     pub seat: Seat<Self>,
 
     pub ipc: Option<crate::ipc::Server>,
+    /// Runtime gate for remote-automation IPC methods (inject_key/text/click,
+    /// future remote screenshot + command exec). Initialised from
+    /// `general.automation_enabled` and overridable at runtime via
+    /// `Request::SetAutomation` and at startup via `--enable-automation`.
+    /// Never written back to disk; the config file stays the source of
+    /// truth at next start.
+    pub automation_enabled: bool,
 
     pub cursor: crate::cursor::Cursor,
     pub cursor_status: CursorImageStatus,
@@ -128,6 +135,8 @@ impl ShoestringWm {
         .unwrap();
         seat.add_pointer();
 
+        let automation_enabled = config.general.automation_enabled;
+
         let space = Space::default();
         let popups = PopupManager::default();
 
@@ -164,6 +173,7 @@ impl ShoestringWm {
             lock_session: None,
             seat,
             ipc: None,
+            automation_enabled,
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),
