@@ -2,6 +2,7 @@
 
 mod backend;
 mod binds;
+mod config_watcher;
 mod cursor;
 mod drawing;
 mod grabs;
@@ -155,6 +156,9 @@ fn main() -> Result<()> {
     // IPC socket goes up after WAYLAND_DISPLAY is exported so
     // default_socket_path() can resolve it.
     state.start_ipc();
+
+    // Config hot-reload watcher. No-op when launched without a config file.
+    state.start_config_watcher();
 
     tracing::info!(
         socket = ?state.socket_name,

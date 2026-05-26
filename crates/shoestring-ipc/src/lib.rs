@@ -250,6 +250,13 @@ pub enum Event {
     AutomationChanged {
         enabled: bool,
     },
+    /// Fired after the WM re-reads its TOML config from disk — either via
+    /// the [`Action::ReloadConfig`] keybind path or the file-watcher
+    /// triggered on a successful edit. Subscribers can use this to
+    /// re-render anything derived from the config (e.g. a bar widget that
+    /// mirrors the active keybind set). The event carries no payload; a
+    /// subscriber that wants the new state should re-query.
+    ConfigReloaded,
 }
 
 #[cfg(test)]
@@ -412,6 +419,13 @@ mod tests {
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"command_result","exit_code":0,"stdout":"hi\n","stderr":"","truncated":false}"#
         );
+    }
+
+    #[test]
+    fn event_config_reloaded_shape() {
+        let e = Event::ConfigReloaded;
+        let s = serde_json::to_string(&e).unwrap();
+        assert_eq!(s, r#"{"type":"config_reloaded"}"#);
     }
 
     #[test]

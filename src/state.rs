@@ -49,6 +49,14 @@ pub struct ShoestringWm {
     pub config: Config,
     pub config_path: Option<std::path::PathBuf>,
     pub bindings: crate::binds::BindingTable,
+    /// `Some` once [`Self::start_config_watcher`] succeeds. Held purely
+    /// for its `Drop` — the calloop source forwarding filesystem events
+    /// is registered separately and is what actually drives reload.
+    pub config_watcher: Option<crate::config_watcher::ConfigWatcher>,
+    /// Token for an in-flight debounce `Timer`. Removed and re-inserted
+    /// on every filesystem event so a continuous edit burst defers the
+    /// reload to the trailing edge.
+    pub pending_reload_token: Option<smithay::reexports::calloop::RegistrationToken>,
 
     pub space: Space<Window>,
     pub popups: PopupManager,
@@ -174,6 +182,8 @@ impl ShoestringWm {
             config,
             config_path,
             bindings,
+            config_watcher: None,
+            pending_reload_token: None,
             space,
             popups,
             layout: crate::layout::LayoutManager::default(),

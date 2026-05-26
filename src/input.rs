@@ -45,24 +45,7 @@ impl ShoestringWm {
                 tracing::info!("Quit action received; stopping event loop");
                 self.loop_signal.stop();
             }
-            Action::ReloadConfig => {
-                let Some(path) = self.config_path.clone() else {
-                    tracing::warn!("ReloadConfig requested but no config file is loaded");
-                    return;
-                };
-                match shoestring_config::load_from(&path) {
-                    Ok(cfg) => {
-                        let (table, warnings) = crate::binds::BindingTable::compile(&cfg);
-                        for w in warnings {
-                            tracing::warn!(target: "shoestring_wm::config", "{w}");
-                        }
-                        self.config = cfg;
-                        self.bindings = table;
-                        tracing::info!(path = %path.display(), "config reloaded");
-                    }
-                    Err(e) => tracing::warn!(path = %path.display(), error = %e, "reload failed"),
-                }
-            }
+            Action::ReloadConfig => self.reload_config_from_disk(),
             Action::TileLeft => self.window_layout_action(LayoutState::TiledLeft),
             Action::TileRight => self.window_layout_action(LayoutState::TiledRight),
             Action::Maximize => self.window_layout_action(LayoutState::Maximized),
