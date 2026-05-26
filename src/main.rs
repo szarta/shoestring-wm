@@ -637,40 +637,21 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
 
     // Middle: window list, drawn per-entry so we can paint a background
     // accent behind the focused entry. Entries are deterministically
-    // ordered by FT identifier (stable across renders).
+    // ordered by FT identifier (stable across renders). When no window
+    // exists on the active workspace the slot stays empty — `--version`
+    // is the supported channel for reading the build version.
     let list_end_x = auto_chip_left.unwrap_or(clock_x) - PADDING_X;
     let list_budget = (list_end_x - list_start_x).max(0);
-    // "Empty" for the window-list pane means "no window on the active
-    // workspace", not "no windows anywhere" — other workspaces might
-    // still have windows, but we're filtered to one.
-    let any_on_active = state.toplevels.values().any(|t| {
-        state.window_workspaces.get(&t.identifier).copied() == Some(state.active_workspace)
-    });
-    if !any_on_active {
-        let placeholder = format!("shoestring-bar v{}", env!("CARGO_PKG_VERSION"));
-        let label = truncate_to_fit(&placeholder, &state.font, font_px, list_budget);
-        draw_text(
-            &mut mmap,
-            w,
-            h,
-            &state.font,
-            font_px,
-            list_start_x,
-            &label,
-            fg,
-        );
-    } else {
-        draw_window_list(
-            &mut mmap,
-            w,
-            h,
-            state,
-            list_start_x,
-            list_budget,
-            font_px,
-            fg,
-        );
-    }
+    draw_window_list(
+        &mut mmap,
+        w,
+        h,
+        state,
+        list_start_x,
+        list_budget,
+        font_px,
+        fg,
+    );
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer =
@@ -694,32 +675,6 @@ fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
         w += font.metrics(ch, size_px).advance_width;
     }
     w.ceil() as i32
-}
-
-/// If `text` fits in `budget_px`, return it. Otherwise drop characters
-/// from the right and append ".." until what's left fits. Returns at
-/// minimum ".." (or "" if even that doesn't fit).
-fn truncate_to_fit(text: &str, font: &Font, size_px: f32, budget_px: i32) -> String {
-    if budget_px <= 0 {
-        return String::new();
-    }
-    if measure_text(font, size_px, text) <= budget_px {
-        return text.to_string();
-    }
-    let ellipsis = "..";
-    let ellipsis_w = measure_text(font, size_px, ellipsis);
-    if ellipsis_w > budget_px {
-        return String::new();
-    }
-    let mut chars: Vec<char> = text.chars().collect();
-    while !chars.is_empty() {
-        chars.pop();
-        let candidate: String = chars.iter().collect::<String>() + ellipsis;
-        if measure_text(font, size_px, &candidate) <= budget_px {
-            return candidate;
-        }
-    }
-    ellipsis.to_string()
 }
 
 /// Local-time clock formatted via `libc::strftime`. `format` is a
