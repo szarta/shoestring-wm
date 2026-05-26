@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Bump screen brightness up 5%.
+set -euo pipefail
+brightnessctl set 5%+

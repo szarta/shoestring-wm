@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Bump default audio sink volume down 5%.
+set -euo pipefail
+wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-

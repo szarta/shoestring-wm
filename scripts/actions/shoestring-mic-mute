@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Toggle mute on the default audio source (microphone).
+set -euo pipefail
+wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle

@@ -148,6 +148,16 @@ mod tests {
     }
 
     #[test]
+    fn default_config_compiles_with_no_warnings() {
+        // Catches typos in default keysym names — particularly the
+        // XF86Audio* / XF86MonBrightness* media keys, which are easy
+        // to misspell and only error at runtime otherwise.
+        let cfg = Config::with_default_bindings();
+        let (_table, warnings) = BindingTable::compile(&cfg);
+        assert!(warnings.is_empty(), "default bindings warned: {warnings:?}");
+    }
+
+    #[test]
     fn unknown_modifier_or_key_warns() {
         let cfg = cfg_with(vec![
             Binding {

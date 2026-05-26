@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Bump default audio sink volume up 5%, capped at 100%. Unmutes first
+# so a stale toggle-mute doesn't leave audio silent after a level change.
+set -euo pipefail
+wpctl set-mute @DEFAULT_AUDIO_SINK@ 0
+wpctl set-volume --limit 1.0 @DEFAULT_AUDIO_SINK@ 5%+

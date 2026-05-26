@@ -417,6 +417,27 @@ impl Config {
                 action: Action::ChangeVt { vt: n },
             });
         }
+        // XF86 media keys → action scripts under scripts/actions/.
+        // Spawning fails silently with a log warning if the user hasn't
+        // installed the scripts on $PATH — the bind still resolves, so
+        // putting them on $PATH later "just works" without a config edit.
+        for (key, command) in [
+            ("XF86AudioRaiseVolume", "shoestring-volume-up"),
+            ("XF86AudioLowerVolume", "shoestring-volume-down"),
+            ("XF86AudioMute", "shoestring-volume-mute"),
+            ("XF86AudioMicMute", "shoestring-mic-mute"),
+            ("XF86MonBrightnessUp", "shoestring-brightness-up"),
+            ("XF86MonBrightnessDown", "shoestring-brightness-down"),
+        ] {
+            bindings.push(Binding {
+                mods: Vec::new(),
+                key: key.into(),
+                action: Action::Spawn {
+                    command: command.into(),
+                    args: Vec::new(),
+                },
+            });
+        }
         Self {
             general: General::default(),
             bindings,

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Bump screen brightness down 5%. brightnessctl's default --min-value=1
+# already prevents a fully-black screen.
+set -euo pipefail
+brightnessctl set 5%-
