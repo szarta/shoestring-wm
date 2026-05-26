@@ -122,8 +122,11 @@ impl ShoestringWm {
                 }
             }
             Action::Quit => {
-                tracing::info!("Quit action received; stopping event loop");
-                self.loop_signal.stop();
+                tracing::debug!("Quit action received; prompting for confirmation");
+                self.confirm_action("Exit shoestring-wm?", |state| {
+                    tracing::info!("Quit confirmed; stopping event loop");
+                    state.loop_signal.stop();
+                });
             }
             Action::ReloadConfig => {
                 let _ = self.reload_config_from_disk();

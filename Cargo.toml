@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/shoestring-ipc",
     "crates/shoestring-config",
+    "crates/shoestring-confirm",
     "crates/shoestring-ctl",
     "crates/shoestring-kill",
     "crates/shoestring-lock",

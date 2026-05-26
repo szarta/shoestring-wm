@@ -120,6 +120,11 @@ pub struct ShoestringWm {
     /// input — see [`crate::picker`] and [`crate::input`].
     pub pending_picker: Option<crate::picker::PendingPicker>,
 
+    /// `Some` while a `shoestring-confirm` modal dialog is on screen
+    /// awaiting Enter/Esc. Cleared in `finalize_confirm` once the helper
+    /// exits. Only one confirm runs at a time — see [`crate::confirm`].
+    pub pending_confirm: Option<crate::confirm::PendingConfirm>,
+
     /// Window currently being dragged via a Super+drag move grab.
     /// Cleared when the grab ends. The edge-drag repeat timer reads
     /// this to keep shifting the dragged window while the pointer is
@@ -248,6 +253,7 @@ impl ShoestringWm {
             pending_commands: HashMap::new(),
             next_command_id: 0,
             pending_picker: None,
+            pending_confirm: None,
             edge_drag_window: None,
             edge_drag_repeat_token: None,
             key_repeat: None,

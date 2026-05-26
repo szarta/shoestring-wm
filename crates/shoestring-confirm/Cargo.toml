@@ -1,0 +1,28 @@
+[package]
+name = "shoestring-confirm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Modal yes/no confirm dialog for shoestring-wm (Enter = confirm, Esc = cancel)."
+
+[[bin]]
+name = "shoestring-confirm"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# Software font rasterizer. Pure Rust, matches shoestring-bar's pick.
+fontdue = "0.9"
+
+# SHM pool: mmap an anon tempfile, hand the fd to the compositor.
+memmap2 = "0.9"
+tempfile = "3"
+libc = "0.2"
+
+xkbcommon = { version = "0.9", features = ["wayland"] }
+
+anyhow = "1"

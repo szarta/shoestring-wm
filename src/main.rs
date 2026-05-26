@@ -3,6 +3,7 @@
 mod backend;
 mod binds;
 mod config_watcher;
+mod confirm;
 mod cursor;
 mod drawing;
 mod grabs;
