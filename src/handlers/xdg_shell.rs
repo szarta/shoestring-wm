@@ -1,9 +1,10 @@
 use smithay::{
     desktop::{
-        find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager, Space, Window,
+        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, PopupKind,
+        PopupManager, Space, Window,
     },
     reexports::wayland_server::protocol::{wl_seat, wl_surface::WlSurface},
-    utils::Serial,
+    utils::{Logical, Serial, Size},
     wayland::{
         compositor::with_states,
         shell::xdg::{
@@ -22,6 +23,16 @@ impl XdgShellHandler for ShoestringWm {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
+        // Hint the available area to the client before the initial configure
+        // so first-launch apps (e.g. firefox cold start) pick a sensible size
+        // instead of falling back to their own hardcoded default. Mirrors
+        // anvil's place_new_window. Uses the layer-shell non-exclusive zone
+        // so a top bar / dock is excluded from the hint.
+        if let Some(bounds) = usable_size_for_new_window(&self.space) {
+            window.toplevel().unwrap().with_pending_state(|state| {
+                state.bounds = Some(bounds);
+            });
+        }
         let location = center_for_new_window(&self.space, &window);
         let active_ws = self.workspaces.active();
         tracing::info!(
@@ -31,6 +42,11 @@ impl XdgShellHandler for ShoestringWm {
         );
         self.space.map_element(window.clone(), location, false);
         self.workspaces.assign(window.clone(), active_ws, location);
+        // `location` here is a placeholder — the client hasn't picked a
+        // size yet so we can't center properly. Mark for re-centering on
+        // the first commit (see try_recenter_pending). Window rules that
+        // set an explicit position will clear this flag.
+        self.pending_initial_center.insert(window.clone());
         // Register with ext-foreign-toplevel-list so bars see this window.
         // Title/app_id arrive on later commits; sync_foreign_toplevel pushes
         // them when they change.
@@ -64,6 +80,7 @@ impl XdgShellHandler for ShoestringWm {
         self.layout.forget(&window);
         self.workspaces.forget(&window);
         self.rules_applied.remove(&window);
+        self.pending_initial_center.remove(&window);
         // Drop on our Arc clone is NOT enough: smithay's `new_toplevel`
         // hands each bound client (the bar, etc.) its own Arc clone via
         // the resource user-data, so `closed` is only sent once the LAST
@@ -107,6 +124,14 @@ impl XdgShellHandler for ShoestringWm {
     ) {
     }
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+}
+
+/// Size of the usable (non-exclusive) area on the output a freshly-mapped
+/// window will land on. Used to populate `xdg_toplevel.bounds` before the
+/// initial configure.
+fn usable_size_for_new_window(space: &Space<Window>) -> Option<Size<i32, Logical>> {
+    let output = space.outputs().next()?;
+    Some(layer_map_for_output(output).non_exclusive_zone().size)
 }
 
 /// Center a freshly-mapped window on the first available output. The window's

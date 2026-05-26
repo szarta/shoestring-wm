@@ -96,6 +96,9 @@ impl ShoestringWm {
             // to the rule-specified spot rather than the auto-centered
             // location captured at map time.
             self.workspaces.record_location(window, pos);
+            // Rule won the placement fight — skip the post-commit
+            // recentering pass that would otherwise overwrite it.
+            self.pending_initial_center.remove(window);
         }
 
         if let Some([w, h]) = rule.actions.size {

@@ -50,6 +50,11 @@ impl CompositorHandler for ShoestringWm {
                 sync_foreign_toplevel(self, &window);
                 // Per-app rules run once, on the first commit after map.
                 self.try_apply_window_rules(&window);
+                // First commit with real geometry — place the window
+                // centered now that we know its actual size. Rules that
+                // set an explicit position will have already cleared
+                // the pending flag.
+                self.try_recenter_pending(&window);
             }
         }
 

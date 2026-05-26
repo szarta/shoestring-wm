@@ -113,6 +113,13 @@ pub struct ShoestringWm {
     /// map. Entries are removed in `toplevel_destroyed`.
     pub rules_applied: HashSet<Window>,
 
+    /// Windows awaiting an initial centering pass. At `new_toplevel` the
+    /// client hasn't picked a size yet (geometry is 0×0), so we can't
+    /// center properly; the first commit with a non-zero size triggers
+    /// the actual placement. Entries are removed when re-centered, when
+    /// a window-rule overrides position, or when the toplevel dies.
+    pub pending_initial_center: HashSet<Window>,
+
     pub cursor: crate::cursor::Cursor,
     pub cursor_status: CursorImageStatus,
     pub pointer_element: crate::drawing::PointerElement,
@@ -210,6 +217,7 @@ impl ShoestringWm {
             pending_commands: HashMap::new(),
             next_command_id: 0,
             rules_applied: HashSet::new(),
+            pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),
@@ -604,6 +612,55 @@ impl ShoestringWm {
             Some(w) => self.focus_window(&w),
             None => self.clear_focus(),
         }
+    }
+
+    /// If `window` is awaiting its initial centering pass and now has a
+    /// real geometry, recenter it on the non-exclusive zone of the
+    /// output it currently sits on. Called from the commit handler so
+    /// the very first frame the client paints lands in the correct
+    /// spot. No-op once the window is no longer pending.
+    pub fn try_recenter_pending(&mut self, window: &Window) {
+        if !self.pending_initial_center.contains(window) {
+            return;
+        }
+        let size = window.geometry().size;
+        if size.w <= 0 || size.h <= 0 {
+            return;
+        }
+        let cur = self.space.element_location(window);
+        let output = cur
+            .and_then(|loc| {
+                self.space
+                    .outputs()
+                    .find(|o| {
+                        self.space
+                            .output_geometry(o)
+                            .map(|g| {
+                                loc.x >= g.loc.x
+                                    && loc.x < g.loc.x + g.size.w
+                                    && loc.y >= g.loc.y
+                                    && loc.y < g.loc.y + g.size.h
+                            })
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+            })
+            .or_else(|| self.space.outputs().next().cloned());
+        let Some(output) = output else {
+            return;
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return;
+        };
+        let zone = layer_map_for_output(&output).non_exclusive_zone();
+        let usable_loc = output_geo.loc + zone.loc;
+        let x = usable_loc.x + (zone.size.w - size.w).max(0) / 2;
+        let y = usable_loc.y + (zone.size.h - size.h).max(0) / 2;
+        let new_loc: smithay::utils::Point<i32, smithay::utils::Logical> = (x, y).into();
+        tracing::debug!(?new_loc, geo_size = ?size, "initial center pass");
+        self.space.map_element(window.clone(), new_loc, false);
+        self.workspaces.record_location(window, new_loc);
+        self.pending_initial_center.remove(window);
     }
 }
 
