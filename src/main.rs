@@ -36,12 +36,14 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
         wl_output::WlOutput,
+        wl_pointer::{self, ButtonState, WlPointer},
         wl_registry::WlRegistry,
+        wl_seat::{self, Capability, WlSeat},
         wl_shm::{Format, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
@@ -136,6 +138,24 @@ struct State {
     /// makes sub-minute formats (e.g. `iso` → seconds) work without any
     /// extra config plumbing.
     last_clock: String,
+    /// `wl_seat`, kept alive so its `Capabilities` events keep arriving
+    /// and we can hand out a pointer when the compositor advertises one.
+    /// `None` when the compositor doesn't expose a seat at all (e.g.
+    /// headless test rig). Read in the WlSeat dispatch via the proxy
+    /// passed there, so the field is only here for its drop lifetime.
+    #[allow(dead_code)]
+    seat: Option<WlSeat>,
+    /// Bar-side pointer; created when the seat first advertises the
+    /// `pointer` capability and destroyed if it goes away (laptop lid
+    /// closed, etc.).
+    pointer: Option<WlPointer>,
+    /// Surface-local pointer x in pixels. `None` while the pointer is
+    /// not over the bar (we get `enter` / `leave` events).
+    pointer_x: Option<f64>,
+    /// (x_start, width, FT identifier) for each window-list entry from
+    /// the last [`draw_window_list`] pass. Hit-tested by the pointer
+    /// button handler; cleared and rebuilt on every redraw.
+    window_entry_rects: Vec<(i32, i32, String)>,
     running: bool,
 }
 
@@ -204,6 +224,17 @@ fn main() -> Result<()> {
         }
     };
 
+    // Bind wl_seat so we can receive pointer button events. Missing seat
+    // is non-fatal — the bar still renders, the user just can't click
+    // entries. Version range matches what mainstream compositors ship.
+    let seat: Option<WlSeat> = match globals.bind(&qh, 1..=7, ()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(error = ?e, "no wl_seat global; bar will be non-interactive");
+            None
+        }
+    };
+
     // Bootstrap initial workspace from the WM via a one-shot IPC query.
     // Failure is non-fatal — we default to ws=1/count=16 and rely on
     // subsequent event updates.
@@ -251,6 +282,10 @@ fn main() -> Result<()> {
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
+        seat,
+        pointer: None,
+        pointer_x: None,
+        window_entry_rects: Vec::new(),
         running: true,
     };
 
@@ -557,7 +592,7 @@ fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
 
 /// Compose the bar into a freshly-allocated wl_buffer and attach it.
 /// Re-runs on every configure event (and, later, on state changes).
-fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
+fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
     let surface = state.surface.as_ref().expect("surface missing in redraw");
 
     let stride = w as i32 * 4;
@@ -642,6 +677,9 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     // is the supported channel for reading the build version.
     let list_end_x = auto_chip_left.unwrap_or(clock_x) - PADDING_X;
     let list_budget = (list_end_x - list_start_x).max(0);
+    // draw_window_list also fills `entry_rects`, which the pointer
+    // button handler reads on the next click to hit-test entries.
+    let mut entry_rects: Vec<(i32, i32, String)> = Vec::new();
     draw_window_list(
         &mut mmap,
         w,
@@ -651,7 +689,9 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
         list_budget,
         font_px,
         fg,
+        &mut entry_rects,
     );
+    state.window_entry_rects = entry_rects;
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer =
@@ -724,6 +764,7 @@ fn draw_window_list(
     budget_px: i32,
     font_px: f32,
     fg: u32,
+    entry_rects: &mut Vec<(i32, i32, String)>,
 ) {
     let font = &state.font;
     // Filter to windows on the active workspace. Entries without a
@@ -750,8 +791,10 @@ fn draw_window_list(
         }
     };
 
-    // First pass: compute widths and decide which entries fit.
-    let mut visible: Vec<(String, i32, bool)> = Vec::new(); // (label, width, focused)
+    // First pass: compute widths and decide which entries fit. `id` is
+    // `Some` for real entries (clickable) and `None` for the truncation
+    // ".." marker (not clickable, no FT identifier to route a click to).
+    let mut visible: Vec<(String, i32, bool, Option<String>)> = Vec::new();
     let mut used = 0;
     for t in &entries {
         let label = label_of(t);
@@ -770,17 +813,17 @@ fn draw_window_list(
                 ellipsis_w + ENTRY_GAP
             };
             if used + ellipsis_needed <= budget_px {
-                visible.push(("..".into(), ellipsis_w, false));
+                visible.push(("..".into(), ellipsis_w, false, None));
             }
             break;
         }
         let focused = state.focused_id.as_deref() == Some(t.identifier.as_str());
-        visible.push((label, lw, focused));
+        visible.push((label, lw, focused, Some(t.identifier.clone())));
         used += needed;
     }
 
     let mut x = start_x;
-    for (i, (label, lw, focused)) in visible.iter().enumerate() {
+    for (i, (label, lw, focused, id)) in visible.iter().enumerate() {
         if i > 0 {
             x += ENTRY_GAP;
         }
@@ -791,6 +834,9 @@ fn draw_window_list(
             fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, ACCENT);
         }
         draw_text(mmap, w, h, font, font_px, x, label, fg);
+        if let Some(id) = id {
+            entry_rects.push((x, *lw, id.clone()));
+        }
         x += lw;
     }
 }
@@ -1064,6 +1110,88 @@ noop_dispatch!(
     WlOutput,
     ZwlrLayerShellV1,
 );
+
+impl Dispatch<WlSeat, ()> for State {
+    fn event(
+        state: &mut Self,
+        seat: &WlSeat,
+        event: <WlSeat as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+        {
+            let has_pointer = caps.contains(Capability::Pointer);
+            if has_pointer && state.pointer.is_none() {
+                state.pointer = Some(seat.get_pointer(qh, ()));
+                tracing::debug!("seat advertised pointer; bound");
+            } else if !has_pointer {
+                if let Some(p) = state.pointer.take() {
+                    p.release();
+                    state.pointer_x = None;
+                    tracing::debug!("seat dropped pointer capability");
+                }
+            }
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _pointer: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { surface_x, .. } => {
+                state.pointer_x = Some(surface_x);
+            }
+            wl_pointer::Event::Motion { surface_x, .. } => {
+                state.pointer_x = Some(surface_x);
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_x = None;
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(ButtonState::Pressed),
+                ..
+            } => {
+                // BTN_LEFT == 0x110 (Linux input event code). Right /
+                // middle clicks are ignored for now — could be wired to
+                // close / move-to-workspace later.
+                const BTN_LEFT: u32 = 0x110;
+                if button != BTN_LEFT {
+                    return;
+                }
+                let Some(x) = state.pointer_x else {
+                    return;
+                };
+                let xi = x.floor() as i32;
+                // Hit-test against the entry rects captured during the
+                // last redraw. Linear scan — count is small (<20 in
+                // realistic use).
+                let hit = state
+                    .window_entry_rects
+                    .iter()
+                    .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+                    .map(|(_, _, id)| id.clone());
+                if let Some(id) = hit {
+                    if let Err(e) = ipc_client::request_focus_window(&id) {
+                        tracing::warn!(error = ?e, %id, "focus_window ipc failed");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

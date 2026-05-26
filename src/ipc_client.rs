@@ -102,6 +102,22 @@ pub fn query_windows() -> Result<Vec<WindowSummary>> {
     }
 }
 
+/// Fire-and-forget `Request::FocusWindow { id }` on a fresh one-shot
+/// connection. Returns `Ok(())` when the WM acks with `Response::Ok`.
+/// Surfaces server `Error` (e.g. window already gone) as an `Err` so
+/// the caller can log it.
+pub fn request_focus_window(id: &str) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::FocusWindow { id: id.into() })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse focus_window response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Open a streaming subscription. Sends `Request::EventStream`, reads the
 /// initial `Response::Ok`, then flips the socket to non-blocking so the
 /// caller can poll it.
