@@ -120,6 +120,17 @@ pub struct ShoestringWm {
     /// input — see [`crate::picker`] and [`crate::input`].
     pub pending_picker: Option<crate::picker::PendingPicker>,
 
+    /// Window currently being dragged via a Super+drag move grab.
+    /// Cleared when the grab ends. The edge-drag repeat timer reads
+    /// this to keep shifting the dragged window while the pointer is
+    /// pinned to a workspace boundary.
+    pub edge_drag_window: Option<Window>,
+    /// Calloop timer token for the edge-drag repeat tick. Removed and
+    /// re-inserted on every successful edge-cross so a sustained drag
+    /// keeps stepping workspaces without the user having to release
+    /// and re-push the cursor.
+    pub edge_drag_repeat_token: Option<smithay::reexports::calloop::RegistrationToken>,
+
     /// Windows that have already had `[[window_rules]]` evaluated.
     /// Evaluation runs once per window — on the first commit after
     /// map. Entries are removed in `toplevel_destroyed`.
@@ -231,6 +242,8 @@ impl ShoestringWm {
             pending_commands: HashMap::new(),
             next_command_id: 0,
             pending_picker: None,
+            edge_drag_window: None,
+            edge_drag_repeat_token: None,
             rules_applied: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),

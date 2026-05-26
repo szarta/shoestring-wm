@@ -243,6 +243,11 @@ impl ShoestringWm {
         };
 
         if button == BTN_LEFT {
+            // Stash the dragged window so the edge-drag repeat timer
+            // (see [`grabs::move_grab`]) can keep shifting it while
+            // the pointer is pinned to a workspace boundary. Cleared
+            // on grab unset.
+            self.edge_drag_window = Some(window.clone());
             let grab = MoveSurfaceGrab::new(start_data, window.clone(), window_loc);
             pointer.set_grab(self, grab, serial, Focus::Clear);
         } else {

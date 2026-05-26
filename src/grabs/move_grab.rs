@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use smithay::{
     desktop::Window,
     input::pointer::{
@@ -6,8 +8,11 @@ use smithay::{
         GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
         MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point},
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
+    utils::{Logical, Point, Rectangle},
 };
 
 use crate::state::ShoestringWm;
@@ -18,6 +23,12 @@ const BTN_LEFT: u32 = 0x110;
 /// new edge-cross can fire. Keeps the drag from cascading through every
 /// workspace while the cursor is parked against the clamp at the edge.
 const EDGE_REARM_MARGIN: f64 = 16.0;
+
+/// How long to wait at the edge before auto-shifting to the next workspace
+/// during a sustained drag. The first shift fires on the inward → edge
+/// transition (see [`MoveSurfaceGrab::motion`]); subsequent shifts fire
+/// at this interval as long as the cursor stays at the edge.
+const EDGE_REPEAT_INTERVAL: Duration = Duration::from_millis(800);
 
 pub struct MoveSurfaceGrab {
     pub start_data: PointerGrabStartData<ShoestringWm>,
@@ -44,6 +55,94 @@ impl MoveSurfaceGrab {
             initial_window_location,
             last_pointer_x,
             edge_disarmed: false,
+        }
+    }
+}
+
+/// Outer rect that bounds the cursor across every mapped output. Same
+/// shape `input.rs` uses for clamping; duplicated here so the grab can
+/// detect "cursor is pinned at the edge" without re-borrowing the
+/// pointer.
+fn desktop_bounds(state: &ShoestringWm) -> Option<Rectangle<i32, Logical>> {
+    let mut iter = state
+        .space
+        .outputs()
+        .filter_map(|o| state.space.output_geometry(o));
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, r| {
+        let x0 = acc.loc.x.min(r.loc.x);
+        let y0 = acc.loc.y.min(r.loc.y);
+        let x1 = (acc.loc.x + acc.size.w).max(r.loc.x + r.size.w);
+        let y1 = (acc.loc.y + acc.size.h).max(r.loc.y + r.size.h);
+        Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
+    }))
+}
+
+impl ShoestringWm {
+    /// (Re-)schedule the edge-drag repeat timer. Idempotent — any
+    /// existing timer is cancelled first.
+    pub fn arm_edge_repeat_timer(&mut self) {
+        if let Some(t) = self.edge_drag_repeat_token.take() {
+            self.loop_handle.remove(t);
+        }
+        let timer = Timer::from_duration(EDGE_REPEAT_INTERVAL);
+        match self.loop_handle.insert_source(timer, |_, _, state| {
+            state.edge_drag_repeat_token = None;
+            state.try_edge_repeat_shift();
+            TimeoutAction::Drop
+        }) {
+            Ok(token) => self.edge_drag_repeat_token = Some(token),
+            Err(e) => tracing::warn!(error = %e, "insert edge-drag repeat timer failed"),
+        }
+    }
+
+    /// Timer callback: if the drag is still alive and the pointer is
+    /// still pinned to an edge, shift the dragged window onto the next
+    /// workspace and re-arm. If the cursor has moved inward, do
+    /// nothing — the regular inward-motion path will re-arm on the
+    /// next edge crossing.
+    pub fn try_edge_repeat_shift(&mut self) {
+        let Some(window) = self.edge_drag_window.clone() else {
+            return;
+        };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let Some(bounds) = desktop_bounds(self) else {
+            return;
+        };
+        let cursor = pointer.current_location();
+        let left = bounds.loc.x as f64;
+        let right = (bounds.loc.x + bounds.size.w) as f64;
+        let direction = if cursor.x >= right {
+            1
+        } else if cursor.x <= left {
+            -1
+        } else {
+            // Cursor moved off the edge while the timer was queued.
+            // Don't fire and don't reschedule — the grab's motion
+            // handler owns re-arming.
+            return;
+        };
+        let active = self.workspaces.active();
+        let target = active.shifted(direction);
+        if target == active {
+            return;
+        }
+        tracing::debug!(
+            direction,
+            target = target.one_based(),
+            "edge-drag repeat shift"
+        );
+        self.move_window_to_workspace_following(&window, target);
+        self.arm_edge_repeat_timer();
+    }
+
+    /// Tear down the edge-drag tracking when the move grab ends.
+    pub fn end_edge_drag(&mut self) {
+        self.edge_drag_window = None;
+        if let Some(t) = self.edge_drag_repeat_token.take() {
+            self.loop_handle.remove(t);
         }
     }
 }
@@ -118,6 +217,10 @@ impl PointerGrab<ShoestringWm> for MoveSurfaceGrab {
                         }
                         self.start_data.location = event.location;
                         self.edge_disarmed = true;
+                        // Schedule the sustained-edge repeat. If the
+                        // cursor stays pinned at the edge, the timer
+                        // will fire another shift in EDGE_REPEAT_INTERVAL.
+                        data.arm_edge_repeat_timer();
                     }
                 }
             }
@@ -239,5 +342,7 @@ impl PointerGrab<ShoestringWm> for MoveSurfaceGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut ShoestringWm) {}
+    fn unset(&mut self, data: &mut ShoestringWm) {
+        data.end_edge_drag();
+    }
 }
