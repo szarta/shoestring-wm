@@ -1,12 +1,26 @@
 # shoestring-wm
 
 A lightweight, low-dependency Wayland window manager written in Rust on
-top of [Smithay](https://github.com/Smithay/smithay). It is a daily-driver
+top of [Smithay](https://github.com/Smithay/smithay). Daily-driver
 replacement for an Openbox/X11 setup: floating windows, half-tile snaps,
-16 global workspaces, multi-monitor, TOML config, JSON IPC. No
-animations, no decoration polish, no built-in bar.
+configurable global workspaces (default 16), multi-monitor, TOML config,
+JSON IPC. No animations, no decoration polish, no built-in bar.
 
-Sibling projects round out the desktop:
+## In-repo binaries
+
+The workspace ships the WM plus the small helpers it spawns:
+
+| Binary | Purpose |
+|---|---|
+| `shoestring-wm` | The window manager itself (winit + TTY backends). |
+| `shoestring-ctl` | Command-line IPC client (query state, fire actions, subscribe to events). |
+| `shoestring-lock` | Session locker (`ext-session-lock-v1`), PAM-authenticated. |
+| `shoestring-screenshot` | PNG capture via wlr-screencopy; optional region via `shoestring-region`. |
+| `shoestring-region` | Slurp-equivalent rectangle picker. |
+| `shoestring-kill` | xkill-equivalent click-to-close picker. |
+| `shoestring-confirm` | Modal yes/no helper (used by `Quit`, reusable for other destructive actions). |
+
+## Sibling projects
 
 - **[shoestring-bar](https://github.com/szarta/shoestring-bar)** — status
   bar (workspaces, focused window, clock).
@@ -16,28 +30,56 @@ Sibling projects round out the desktop:
 ## Quick start
 
 ```sh
-# Install build deps (Debian/Ubuntu; see docs for other distros)
+# Install build deps (Debian/Ubuntu; see docs/install.rst for others)
 sudo apt install build-essential pkg-config \
     libwayland-dev libxkbcommon-dev \
     libdrm-dev libgbm-dev libegl-dev \
-    libudev-dev libinput-dev libseat-dev libdisplay-info-dev
+    libudev-dev libinput-dev libseat-dev libdisplay-info-dev \
+    libpam0g-dev
 
-# Build & install
-cargo install --path .
+# Build (release; all workspace binaries land in target/release/)
+cargo build --release
 
-# Bootstrap a config
+# Drop them on $PATH — the WM and every helper it spawns
+install -Dm755 -t ~/.local/bin/ \
+  target/release/shoestring-{wm,ctl,lock,screenshot,region,kill,confirm}
+
+# Bootstrap a config at ~/.config/shoestring-wm/config.toml
 shoestring-wm --write-default-config
 
-# Try it inside your current session (winit backend)
+# Try it nested inside your current session (backend auto-detects winit
+# when WAYLAND_DISPLAY/DISPLAY is set)
 shoestring-wm --command alacritty
 
 # Or run natively from a TTY
 shoestring-wm
 ```
 
-Defaults: `Super+E/W` half-tile, `Super+M` maximize, `Super+D` minimize,
-`Super+1..9` workspaces, `Super+Return` terminal, `Super+P` launcher,
-`Super+Shift+Q` quit.
+Winit-only dev build (skips DRM / udev / libinput / libseat):
+
+```sh
+cargo build --release --no-default-features --features winit
+```
+
+## Default bindings
+
+| Bind | Action |
+|---|---|
+| `Super+Return` | Spawn terminal |
+| `Super+P` / `Super+B` | Command launcher / bookmarks (shoestring-menu) |
+| `Super+E` / `Super+W` | Tile focused window left / right half |
+| `Super+M` | Maximize |
+| `Super+D` / `Super+Shift+D` | Minimize / unminimize last |
+| `Super+X` | Close focused window |
+| `Super+H` / `Super+L` | Previous / next workspace (auto-repeat on hold) |
+| `Super+Ctrl+H` / `Super+Ctrl+L` | Move focused window to previous / next workspace |
+| `Super+1..9` | Focus workspace N |
+| `Super+Shift+1..9` | Move focused window to workspace N |
+| `Super+Shift+L` | Lock session |
+| `Super+Shift+Q` | Quit (confirmation dialog) |
+| `Ctrl+Alt+F1..F12` | Switch VT (TTY backend) |
+| `XF86Audio*` / `XF86MonBrightness*` | Action scripts under `scripts/actions/` |
+| `Super+drag` | Move window; drag across screen edge to shift workspaces |
 
 ## Documentation
 
@@ -49,31 +91,49 @@ cd docs && make man       # _build/man/shoestring-wm.{1,5}, etc.
 ```
 
 - [Overview](docs/overview.rst) — what it is and why.
-- [Install](docs/install.rst) — per-distro deps for Debian, Fedora,
-  Arch, Alpine, FreeBSD, NixOS.
+- [Install](docs/install.rst) — per-distro deps (Debian, Fedora, Arch,
+  Alpine, FreeBSD, NixOS).
 - [Running](docs/running.rst) — winit vs. TTY backend, env vars, autostart.
 - [Configuration](docs/configuration.rst) — every `[general]` field and
   every action type.
-- [Default bindings](docs/bindings.rst) — the keymap shipped by
-  `--write-default-config`.
+- [Default bindings](docs/bindings.rst) — full keymap reference.
 - [IPC](docs/ipc.rst) — protocol, types, and example clients.
 - [Architecture](docs/architecture.md) — source-level design notes.
+- [Portability](docs/PORTABILITY.md) — Linux-ism audit + FreeBSD status.
 
 ## Status
 
-Implemented today (v1):
+Working today:
 
 - Winit backend (nested dev) and native DRM/KMS + libinput + libseat backend.
-- 16 global workspaces; multi-monitor with hotplug; HiDPI / fractional scale.
+- Configurable workspace count (default 16) with sparse per-slot names.
+- Multi-monitor with hotplug; HiDPI / fractional scale.
 - TileLeft / TileRight / Maximize / Minimize with floating-rect restore.
-- Layer-shell + foreign-toplevel-list (bar/menu enablement).
-- xcursor sprite rendering; Super+drag move/resize.
-- IPC server with query + event-stream subscriptions.
-- `--write-default-config` for a turnkey starter config.
+- Super+drag move; sustained edge-drag shifts the window across workspaces.
+- Layer-shell + foreign-toplevel-list (bar/menu/lock/notification enablement).
+- xcursor sprite rendering.
+- Per-app window rules (app\_id / title → workspace, position, size).
+- Config hot-reload via `notify` watcher (and `shoestring-ctl reload-config`).
+- Configurable autostart list.
+- `ext-session-lock-v1` + PAM unlock via `shoestring-lock`.
+- wlr-screencopy + region picker + IPC `screenshot` request.
+- IPC server: queries, event stream, `inject_key`/`text`/`click`,
+  `focus_window`, `pick_window` + `close_window`, `run_command`,
+  `set_automation` gate, hot-reload trigger.
+- Modal confirm dialog primitive (`shoestring-confirm`); wraps `Quit` today.
+- Action helper scripts (volume, brightness, logout) wired to XF86 keys.
 
-Roadmap items live in `todo.sqlite` and include per-app window rules,
-config hot-reload, focus-follows-mouse, XWayland integration, and a
-configurable autostart list.
+## Roadmap
+
+Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
+
+- `DispatchAction` IPC (drive any keybinding without xdotool).
+- Notification daemon (`shoestring-notify`, `org.freedesktop.Notifications`).
+- Focus-follows-mouse / sloppy focus modes.
+- XWayland integration.
+- Workspace switch indicator popup.
+- Server-side decoration rendering (border + optional titlebar).
+- FreeBSD smoke-test of the winit build.
 
 ## License
 
