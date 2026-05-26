@@ -146,28 +146,40 @@ impl ShoestringWm {
             Action::Close => self.close_focused(),
             Action::FocusWorkspace { index } => {
                 tracing::debug!(index, "FocusWorkspace");
-                if let Some(ws) = crate::workspace::WorkspaceId::from_one_based(index) {
+                if let Some(ws) = self.workspaces.from_one_based(index) {
                     self.focus_workspace_id(ws);
                 } else {
-                    tracing::warn!(index, "FocusWorkspace index out of range 1..=16");
+                    tracing::warn!(
+                        index,
+                        count = self.workspaces.count(),
+                        "FocusWorkspace index out of range"
+                    );
                 }
             }
             Action::FocusWorkspaceRelative { delta } => {
-                let target = self.workspaces.active().shifted(delta as i32);
+                let target = self
+                    .workspaces
+                    .shifted(self.workspaces.active(), delta as i32);
                 tracing::debug!(delta, target = target.one_based(), "FocusWorkspaceRelative");
                 self.focus_workspace_id(target);
             }
             Action::MoveWindowToWorkspace { index } => {
                 tracing::debug!(index, "MoveWindowToWorkspace");
-                if let Some(ws) = crate::workspace::WorkspaceId::from_one_based(index) {
+                if let Some(ws) = self.workspaces.from_one_based(index) {
                     self.move_focused_to_workspace(ws);
                     self.focus_workspace_id(ws); // follow the window
                 } else {
-                    tracing::warn!(index, "MoveWindowToWorkspace index out of range 1..=16");
+                    tracing::warn!(
+                        index,
+                        count = self.workspaces.count(),
+                        "MoveWindowToWorkspace index out of range"
+                    );
                 }
             }
             Action::MoveWindowToWorkspaceRelative { delta } => {
-                let target = self.workspaces.active().shifted(delta as i32);
+                let target = self
+                    .workspaces
+                    .shifted(self.workspaces.active(), delta as i32);
                 tracing::debug!(
                     delta,
                     target = target.one_based(),

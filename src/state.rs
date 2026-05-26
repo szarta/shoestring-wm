@@ -204,6 +204,7 @@ impl ShoestringWm {
 
         let space = Space::default();
         let popups = PopupManager::default();
+        let workspaces = build_workspace_manager(&config.workspaces);
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
         let loop_signal = event_loop.get_signal();
@@ -223,7 +224,7 @@ impl ShoestringWm {
             space,
             popups,
             layout: crate::layout::LayoutManager::default(),
-            workspaces: crate::workspace::WorkspaceManager::default(),
+            workspaces,
             #[cfg(feature = "tty")]
             udev: None,
             compositor_state,
@@ -732,6 +733,44 @@ impl ShoestringWm {
         self.clear_focus();
         self.focus_workspace_id(target);
     }
+}
+
+/// Build the runtime [`WorkspaceManager`] from the `[workspaces]`
+/// config section. Clamps count to `1..=MAX_WORKSPACE_COUNT`, warns
+/// on values outside that range, and discards name entries whose key
+/// doesn't parse to a valid 1-based index for the resolved count.
+fn build_workspace_manager(
+    cfg: &shoestring_config::Workspaces,
+) -> crate::workspace::WorkspaceManager {
+    use shoestring_config::MAX_WORKSPACE_COUNT;
+    let raw = cfg.count;
+    let count = raw.clamp(1, MAX_WORKSPACE_COUNT);
+    if raw != count {
+        tracing::warn!(
+            requested = raw,
+            clamped = count,
+            "[workspaces].count out of range; clamped"
+        );
+    }
+    let mut names = vec![String::new(); count as usize];
+    for (key, name) in &cfg.names {
+        match key.parse::<u8>() {
+            Ok(idx) if (1..=count).contains(&idx) => {
+                names[idx as usize - 1] = name.clone();
+            }
+            Ok(idx) => tracing::warn!(
+                index = idx,
+                count,
+                name = %name,
+                "[workspaces.names] index out of range; ignored"
+            ),
+            Err(_) => tracing::warn!(
+                key = %key,
+                "[workspaces.names] non-numeric key; ignored"
+            ),
+        }
+    }
+    crate::workspace::WorkspaceManager::new(count, names)
 }
 
 #[derive(Default)]

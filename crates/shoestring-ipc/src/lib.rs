@@ -189,8 +189,16 @@ pub enum Response {
     Workspaces {
         /// 1-based index of the active workspace.
         active: u8,
-        /// Total workspace count (always 16 in current builds).
+        /// Total workspace count. Sourced from `[workspaces].count`
+        /// in the WM config; default 16. Range 1..=`MAX_WORKSPACE_COUNT`.
         count: u8,
+        /// Display name per workspace in 1-based order, length =
+        /// `count`. Empty strings mean "no name set, render the
+        /// number". Added in a later build so older clients that
+        /// pre-dated names still deserialize; new field, no
+        /// `deny_unknown_fields`.
+        #[serde(default)]
+        names: Vec<String>,
     },
     Windows {
         windows: Vec<WindowSummary>,
@@ -324,9 +332,32 @@ mod tests {
         let r = Response::Workspaces {
             active: 3,
             count: 16,
+            names: vec![String::new(); 16],
         };
         let s = serde_json::to_string(&r).unwrap();
-        assert_eq!(s, r#"{"type":"workspaces","active":3,"count":16}"#);
+        // names defaults to empty Vec on older clients; we emit it
+        // unconditionally so the wire shape is unambiguous on the WM side.
+        assert!(s.starts_with(r#"{"type":"workspaces","active":3,"count":16,"names":["#));
+    }
+
+    #[test]
+    fn response_workspaces_deserializes_without_names() {
+        // Older WM builds didn't emit `names`. The field's `#[serde(default)]`
+        // means new client code can read a legacy payload without erroring.
+        let legacy = r#"{"type":"workspaces","active":1,"count":8}"#;
+        let r: Response = serde_json::from_str(legacy).unwrap();
+        match r {
+            Response::Workspaces {
+                active,
+                count,
+                names,
+            } => {
+                assert_eq!(active, 1);
+                assert_eq!(count, 8);
+                assert!(names.is_empty());
+            }
+            _ => panic!("expected Workspaces"),
+        }
     }
 
     #[test]

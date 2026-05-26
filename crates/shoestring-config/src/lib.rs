@@ -5,6 +5,7 @@
 //! at startup.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -18,12 +19,52 @@ pub struct Config {
     #[serde(default)]
     pub general: General,
     #[serde(default)]
+    pub workspaces: Workspaces,
+    #[serde(default)]
     pub bindings: Vec<Binding>,
     /// Per-app rules evaluated once when a window's `app_id` / `title`
     /// first becomes available after map. The first rule whose matcher
     /// fields all match wins; rules are evaluated in declaration order.
     #[serde(default, rename = "window_rules")]
     pub window_rules: Vec<WindowRule>,
+}
+
+/// Workspace layout. `count` controls how many workspaces exist (and
+/// the number of boxes a status bar renders). `names` is a sparse
+/// 1-based map of optional human labels; slots without an entry fall
+/// back to their number.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workspaces {
+    /// Number of workspaces, 1..=32. Defaults to 16. Out-of-range
+    /// values get clamped at load time with a warning.
+    #[serde(default = "default_workspace_count")]
+    pub count: u8,
+    /// `1`-based map of `index → display name`. TOML keys are strings
+    /// (TOML has no integer keys), parsed back to `u8` at WM startup;
+    /// entries with non-numeric or out-of-range keys are dropped with
+    /// a warning. Use `BTreeMap` so the serialized order is stable
+    /// across `--write-default-config`.
+    #[serde(default)]
+    pub names: BTreeMap<String, String>,
+}
+
+fn default_workspace_count() -> u8 {
+    16
+}
+
+/// Hard ceiling on `[workspaces].count`. Beyond this, MRU stacks and
+/// the bar's workspace cluster start to crowd a 1080p display; if a
+/// real user needs more we'll raise it then.
+pub const MAX_WORKSPACE_COUNT: u8 = 32;
+
+impl Default for Workspaces {
+    fn default() -> Self {
+        Self {
+            count: default_workspace_count(),
+            names: BTreeMap::new(),
+        }
+    }
 }
 
 /// A single window-rule entry. Both the matcher and the action set can
@@ -437,6 +478,7 @@ impl Config {
         }
         Self {
             general: General::default(),
+            workspaces: Workspaces::default(),
             bindings,
             window_rules: Vec::new(),
         }
@@ -585,5 +627,35 @@ mod tests {
     fn output_scale_parses_fractional() {
         let cfg: Config = toml::from_str("[general]\noutput_scale = 1.5\n").unwrap();
         assert_eq!(cfg.general.output_scale, 1.5);
+    }
+
+    #[test]
+    fn workspaces_defaults_to_sixteen_unnamed() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.workspaces.count, 16);
+        assert!(cfg.workspaces.names.is_empty());
+    }
+
+    #[test]
+    fn workspaces_parses_count_and_sparse_names() {
+        let toml_src = r#"
+[workspaces]
+count = 8
+
+[workspaces.names]
+1 = "web"
+3 = "chat"
+"#;
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.workspaces.count, 8);
+        assert_eq!(
+            cfg.workspaces.names.get("1").map(String::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            cfg.workspaces.names.get("3").map(String::as_str),
+            Some("chat")
+        );
+        assert!(cfg.workspaces.names.get("2").is_none());
     }
 }

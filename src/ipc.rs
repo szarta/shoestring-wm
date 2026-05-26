@@ -255,7 +255,8 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             Request::Workspaces => {
                 let resp = Response::Workspaces {
                     active: state.workspaces.active().one_based(),
-                    count: crate::workspace::NUM_WORKSPACES,
+                    count: state.workspaces.count(),
+                    names: state.workspaces.name_list(),
                 };
                 let _ = write_response(client, &resp);
                 return true;

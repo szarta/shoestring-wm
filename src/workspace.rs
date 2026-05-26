@@ -1,9 +1,13 @@
-//! 16 shared/global workspaces. All outputs swap together when the active
+//! Shared/global workspaces. All outputs swap together when the active
 //! workspace changes; per-window monitor assignment is preserved separately.
 //!
 //! Off-workspace windows are unmapped from the [`Space`] but kept in the
 //! manager's tracking so we can restore them at their saved position when
 //! their workspace becomes active again.
+//!
+//! Count and optional names come from `[workspaces]` in the WM config
+//! (see [`shoestring_config::Workspaces`]). Reading the count or a
+//! display name goes through [`WorkspaceManager`].
 
 use std::collections::HashMap;
 
@@ -13,19 +17,11 @@ use smithay::{
     wayland::shell::xdg::ToplevelSurface,
 };
 
-pub const NUM_WORKSPACES: u8 = 16;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WorkspaceId(u8);
 
 impl WorkspaceId {
     pub const FIRST: Self = Self(0);
-
-    /// Build from a 1-based config index (the user-facing numbering).
-    /// Returns `None` for 0 or anything past `NUM_WORKSPACES`.
-    pub fn from_one_based(idx: u8) -> Option<Self> {
-        (1..=NUM_WORKSPACES).contains(&idx).then(|| Self(idx - 1))
-    }
 
     pub fn zero_based(self) -> u8 {
         self.0
@@ -33,12 +29,6 @@ impl WorkspaceId {
 
     pub fn one_based(self) -> u8 {
         self.0 + 1
-    }
-
-    /// Apply a signed offset, clamping to [0, NUM_WORKSPACES-1]. No wrap.
-    pub fn shifted(self, delta: i32) -> Self {
-        let new = (self.0 as i32 + delta).clamp(0, NUM_WORKSPACES as i32 - 1);
-        Self(new as u8)
     }
 }
 
@@ -55,19 +45,64 @@ pub struct WorkspaceManager {
     windows: HashMap<Window, WindowInfo>,
     /// Per-workspace MRU focus stack; most-recently-focused window at the end.
     focus_history: Vec<Vec<Window>>,
-}
-
-impl Default for WorkspaceManager {
-    fn default() -> Self {
-        Self {
-            active: WorkspaceId::FIRST,
-            windows: HashMap::new(),
-            focus_history: (0..NUM_WORKSPACES).map(|_| Vec::new()).collect(),
-        }
-    }
+    /// Total workspace count, 1..=`MAX_WORKSPACE_COUNT` from
+    /// `[workspaces].count`. Drives `shifted` clamping, `from_one_based`
+    /// validation, and the IPC `Workspaces` response.
+    count: u8,
+    /// Display name per workspace, length == `count`. Empty string for
+    /// slots the user didn't name (callers should render the 1-based
+    /// number in that case).
+    names: Vec<String>,
 }
 
 impl WorkspaceManager {
+    /// Construct with `count` workspaces. Each focus history starts
+    /// empty. `names` length is grown to `count` with empty strings;
+    /// extra entries are dropped.
+    pub fn new(count: u8, names: Vec<String>) -> Self {
+        let count = count.max(1);
+        let mut names = names;
+        names.resize(count as usize, String::new());
+        Self {
+            active: WorkspaceId::FIRST,
+            windows: HashMap::new(),
+            focus_history: (0..count).map(|_| Vec::new()).collect(),
+            count,
+            names,
+        }
+    }
+
+    /// Number of workspaces this manager was constructed with.
+    pub fn count(&self) -> u8 {
+        self.count
+    }
+
+    /// Snapshot of every workspace name in 1-based order. Length
+    /// equals [`Self::count`]. Used by the IPC `Workspaces` reply.
+    pub fn name_list(&self) -> Vec<String> {
+        self.names.clone()
+    }
+
+    /// Build a [`WorkspaceId`] from a 1-based config index. Returns
+    /// `None` for 0 or anything past `self.count`. Named with the
+    /// `from_` prefix to match the convention used by the rest of the
+    /// codebase for index-conversion helpers; clippy's
+    /// `wrong-self-convention` lint is intentionally suppressed here
+    /// (renaming to `parse_one_based` would be misleading — we're not
+    /// parsing, we're validating against runtime state).
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_one_based(&self, idx: u8) -> Option<WorkspaceId> {
+        (1..=self.count)
+            .contains(&idx)
+            .then(|| WorkspaceId(idx - 1))
+    }
+
+    /// Apply a signed offset to `ws`, clamping to `[0, count - 1]`. No wrap.
+    pub fn shifted(&self, ws: WorkspaceId, delta: i32) -> WorkspaceId {
+        let new = (ws.0 as i32 + delta).clamp(0, self.count as i32 - 1);
+        WorkspaceId(new as u8)
+    }
+
     pub fn active(&self) -> WorkspaceId {
         self.active
     }

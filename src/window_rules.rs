@@ -72,9 +72,13 @@ impl ShoestringWm {
         );
 
         if let Some(idx) = rule.actions.workspace {
-            match crate::workspace::WorkspaceId::from_one_based(idx) {
+            match self.workspaces.from_one_based(idx) {
                 Some(target) => self.move_window_to_workspace(window, target),
-                None => tracing::warn!(idx, "window rule: workspace index out of range 1..=16"),
+                None => tracing::warn!(
+                    idx,
+                    count = self.workspaces.count(),
+                    "window rule: workspace index out of range"
+                ),
             }
         }
 

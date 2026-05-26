@@ -122,6 +122,7 @@ mod tests {
     fn cfg_with(binds: Vec<Binding>) -> Config {
         Config {
             general: Default::default(),
+            workspaces: Default::default(),
             bindings: binds,
             window_rules: Vec::new(),
         }

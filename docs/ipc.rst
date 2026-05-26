@@ -91,7 +91,12 @@ The server replies with a single JSON object tagged by ``type``:
     before the event stream starts.
 
 ``workspaces``
-    ``{"type": "workspaces", "active": <1..16>, "count": <int>}``
+    ``{"type": "workspaces", "active": <1..count>, "count": <int>, "names": [<str>, ...]}``.
+    ``count`` follows ``[workspaces].count`` in the WM config (default
+    16). ``names`` is a length-``count`` array of display strings; empty
+    string means "use the number". The field is omitted (or empty) on
+    older WM builds that pre-dated workspace naming; clients with
+    ``#[serde(default)]`` deserialize either shape.
 
 ``windows``
     ``{"type": "windows", "windows": [WindowSummary, ...]}``

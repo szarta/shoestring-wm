@@ -125,7 +125,7 @@ impl ShoestringWm {
             return;
         };
         let active = self.workspaces.active();
-        let target = active.shifted(direction);
+        let target = self.workspaces.shifted(active, direction);
         if target == active {
             return;
         }
@@ -205,7 +205,7 @@ impl PointerGrab<ShoestringWm> for MoveSurfaceGrab {
                 };
                 if let Some(d) = direction {
                     let active = data.workspaces.active();
-                    let target = active.shifted(d);
+                    let target = data.workspaces.shifted(active, d);
                     if target != active {
                         let window = self.window.clone();
                         data.move_window_to_workspace_following(&window, target);
