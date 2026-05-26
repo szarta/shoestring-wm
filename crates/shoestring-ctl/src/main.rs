@@ -93,6 +93,12 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         argv: Vec<String>,
     },
+    /// Re-read the WM's config file, recompile binds, and broadcast a
+    /// `config_reloaded` event. Equivalent to the `reload-config`
+    /// keybind. Useful in scripts and as a manual trigger when the
+    /// filesystem watcher's auto-reload isn't enough (e.g. the WM was
+    /// launched without --config and a file was placed later).
+    ReloadConfig,
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -153,6 +159,7 @@ fn main() -> Result<()> {
             Request::Screenshot { output, region }
         }
         Command::RunCommand { argv, timeout_ms } => Request::RunCommand { argv, timeout_ms },
+        Command::ReloadConfig => Request::ReloadConfig,
     };
 
     let mut writer = stream.try_clone()?;

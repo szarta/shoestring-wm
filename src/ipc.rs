@@ -404,6 +404,16 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     }
                 }
             }
+            Request::ReloadConfig => {
+                let resp = match state.reload_config_from_disk() {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: format!("reload_config: {e}"),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::InjectClick { button, x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());

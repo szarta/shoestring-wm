@@ -129,6 +129,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u32>,
     },
+    /// Re-read the TOML config file the WM was launched with, recompile
+    /// the binding table, and swap both. Equivalent to the
+    /// `Action::ReloadConfig` keybind path and the filesystem watcher's
+    /// trigger; broadcasts [`Event::ConfigReloaded`] on success. Reply
+    /// is [`Response::Ok`] or [`Response::Error`] (no config loaded /
+    /// parse failure / I/O failure).
+    ReloadConfig,
 }
 
 /// Per-stream byte cap for [`Request::RunCommand`]. Keeps IPC frames
@@ -419,6 +426,15 @@ mod tests {
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"command_result","exit_code":0,"stdout":"hi\n","stderr":"","truncated":false}"#
         );
+    }
+
+    #[test]
+    fn reload_config_request_shape() {
+        let r = Request::ReloadConfig;
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(s, r#"{"type":"reload_config"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::ReloadConfig));
     }
 
     #[test]

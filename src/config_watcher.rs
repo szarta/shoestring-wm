@@ -66,12 +66,15 @@ impl ShoestringWm {
 
     /// Re-read the config from `self.config_path`, recompile the binding
     /// table, and swap both. Emits [`Event::ConfigReloaded`] on success.
-    /// Shared by the [`Action::ReloadConfig`] keybind path and the
-    /// file-watcher's debounce timer.
-    pub fn reload_config_from_disk(&mut self) {
+    /// Shared by the [`Action::ReloadConfig`] keybind path, the
+    /// file-watcher's debounce timer, and `Request::ReloadConfig` from
+    /// IPC. Internal logging happens here so non-IPC callers don't need
+    /// to handle the result; the returned `Err` lets the IPC handler
+    /// surface failure to the caller as `Response::Error`.
+    pub fn reload_config_from_disk(&mut self) -> anyhow::Result<()> {
         let Some(path) = self.config_path.clone() else {
             tracing::warn!("config reload requested but no config file is in use");
-            return;
+            anyhow::bail!("no config file is in use (WM was launched without --config)");
         };
         match shoestring_config::load_from(&path) {
             Ok(cfg) => {
@@ -83,8 +86,12 @@ impl ShoestringWm {
                 self.bindings = table;
                 tracing::info!(path = %path.display(), "config reloaded");
                 self.emit_ipc(shoestring_ipc::Event::ConfigReloaded);
+                Ok(())
             }
-            Err(e) => tracing::warn!(path = %path.display(), error = %e, "config reload failed"),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "config reload failed");
+                Err(anyhow::anyhow!("{}: {e}", path.display()))
+            }
         }
     }
 
@@ -98,7 +105,7 @@ impl ShoestringWm {
         let timer = Timer::from_duration(DEBOUNCE);
         match self.loop_handle.insert_source(timer, |_, _, state| {
             state.pending_reload_token = None;
-            state.reload_config_from_disk();
+            let _ = state.reload_config_from_disk();
             TimeoutAction::Drop
         }) {
             Ok(token) => self.pending_reload_token = Some(token),

@@ -45,7 +45,9 @@ impl ShoestringWm {
                 tracing::info!("Quit action received; stopping event loop");
                 self.loop_signal.stop();
             }
-            Action::ReloadConfig => self.reload_config_from_disk(),
+            Action::ReloadConfig => {
+                let _ = self.reload_config_from_disk();
+            }
             Action::TileLeft => self.window_layout_action(LayoutState::TiledLeft),
             Action::TileRight => self.window_layout_action(LayoutState::TiledRight),
             Action::Maximize => self.window_layout_action(LayoutState::Maximized),
