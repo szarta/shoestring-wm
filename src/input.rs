@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use shoestring_config::Action;
 use smithay::{
     backend::input::{
@@ -12,6 +14,10 @@ use smithay::{
             RelativeMotionEvent,
         },
     },
+    reexports::calloop::{
+        timer::{TimeoutAction, Timer},
+        RegistrationToken,
+    },
     utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
 };
 
@@ -23,9 +29,83 @@ use crate::{
 };
 
 const BTN_LEFT: u32 = 0x110;
+
+/// How long a repeatable keybind must be held before auto-repeat
+/// begins. Matches the typical OS key-repeat delay so the gesture
+/// feels native.
+const KEY_REPEAT_DELAY: Duration = Duration::from_millis(600);
+/// Interval between repeat firings once the initial delay has
+/// elapsed. Tuned for workspace navigation (Super+H/L) — fast enough
+/// to walk through 16 workspaces without feeling pokey, slow enough
+/// that the user can stop on the right one.
+const KEY_REPEAT_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Currently-held repeatable keybind. At most one is tracked at a
+/// time — pressing a different bound key replaces it, releasing the
+/// tracked keycode clears it.
+pub struct KeyRepeat {
+    /// Physical keycode (as delivered by libinput / winit). Used to
+    /// match the release event that ends the repeat.
+    pub keycode: u32,
+    /// Action to re-dispatch on each tick. Cloned per fire so the
+    /// dispatch path can take it by value.
+    pub action: Action,
+    /// Calloop timer token; removed when the repeat ends.
+    pub token: RegistrationToken,
+}
+
+/// Actions worth auto-repeating while held. Spawning a terminal 10x
+/// because the user hesitated would be hostile; relative workspace
+/// navigation is the canonical "I want to keep going" gesture.
+fn is_repeatable(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::FocusWorkspaceRelative { .. } | Action::MoveWindowToWorkspaceRelative { .. }
+    )
+}
 const BTN_RIGHT: u32 = 0x111;
 
 impl ShoestringWm {
+    /// Replace any current key-repeat with a fresh one for `keycode` /
+    /// `action`. Cancels any existing repeat first — at most one
+    /// keybind repeats at a time.
+    pub fn start_key_repeat(&mut self, keycode: u32, action: Action) {
+        self.cancel_key_repeat();
+        let timer = Timer::from_duration(KEY_REPEAT_DELAY);
+        let action_for_timer = action.clone();
+        match self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.tick_key_repeat();
+            TimeoutAction::ToDuration(KEY_REPEAT_INTERVAL)
+        }) {
+            Ok(token) => {
+                self.key_repeat = Some(KeyRepeat {
+                    keycode,
+                    action: action_for_timer,
+                    token,
+                });
+            }
+            Err(e) => tracing::warn!(error = %e, "insert key-repeat timer failed"),
+        }
+    }
+
+    /// Re-dispatch the held action. Called on every repeat tick after
+    /// the initial delay. Re-clones the action so the dispatch path
+    /// can take it by value; the clone is cheap (workspace deltas are
+    /// `Copy`-sized).
+    fn tick_key_repeat(&mut self) {
+        let Some(action) = self.key_repeat.as_ref().map(|kr| kr.action.clone()) else {
+            return;
+        };
+        self.dispatch_action(action);
+    }
+
+    /// Tear down the current key-repeat. Idempotent.
+    pub fn cancel_key_repeat(&mut self) {
+        if let Some(kr) = self.key_repeat.take() {
+            self.loop_handle.remove(kr.token);
+        }
+    }
+
     pub fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Spawn { command, args } => {
@@ -265,6 +345,18 @@ impl ShoestringWm {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
                 let key_state = event.state();
+                let keycode: u32 = event.key_code().into();
+                // Releasing the held repeat keycode stops the repeat.
+                // Done before the bind lookup so a chord that resolves
+                // to the same key (unusual but possible) still ends
+                // the prior repeat cleanly.
+                if key_state == KeyState::Released {
+                    if let Some(kr) = self.key_repeat.as_ref() {
+                        if kr.keycode == keycode {
+                            self.cancel_key_repeat();
+                        }
+                    }
+                }
                 // Picker mode: intercept everything before it reaches the
                 // focused surface. Escape cancels; every other key is
                 // swallowed so the user can't accidentally type into the
@@ -333,7 +425,17 @@ impl ShoestringWm {
                     },
                 );
                 if let Some(a) = action {
-                    self.dispatch_action(a);
+                    let repeatable = is_repeatable(&a);
+                    self.dispatch_action(a.clone());
+                    if repeatable {
+                        self.start_key_repeat(keycode, a);
+                    } else {
+                        // A non-repeatable bind cancels any prior
+                        // held repeat — e.g. Super+H is repeating, the
+                        // user mashes Super+Q. The Quit fires once and
+                        // the workspace walk stops.
+                        self.cancel_key_repeat();
+                    }
                 }
             }
             InputEvent::PointerMotion { event, .. } => {

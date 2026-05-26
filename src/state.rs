@@ -131,6 +131,11 @@ pub struct ShoestringWm {
     /// and re-push the cursor.
     pub edge_drag_repeat_token: Option<smithay::reexports::calloop::RegistrationToken>,
 
+    /// `Some` while the user is holding a repeatable keybind (currently
+    /// just relative-workspace navigation). Replaced wholesale on a new
+    /// press; cleared on the matching release. See [`crate::input`].
+    pub key_repeat: Option<crate::input::KeyRepeat>,
+
     /// Windows that have already had `[[window_rules]]` evaluated.
     /// Evaluation runs once per window — on the first commit after
     /// map. Entries are removed in `toplevel_destroyed`.
@@ -244,6 +249,7 @@ impl ShoestringWm {
             pending_picker: None,
             edge_drag_window: None,
             edge_drag_repeat_token: None,
+            key_repeat: None,
             rules_applied: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),
