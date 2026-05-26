@@ -90,6 +90,11 @@ pub struct ShoestringWm {
     pub pending_screenshots: HashMap<u64, crate::remote_screenshot::Pending>,
     pub next_screenshot_id: u64,
 
+    /// In-flight `Request::RunCommand` subprocesses; same lifecycle as
+    /// `pending_screenshots` but with optional timer-based SIGKILL.
+    pub pending_commands: HashMap<u64, crate::remote_command::Pending>,
+    pub next_command_id: u64,
+
     pub cursor: crate::cursor::Cursor,
     pub cursor_status: CursorImageStatus,
     pub pointer_element: crate::drawing::PointerElement,
@@ -182,6 +187,8 @@ impl ShoestringWm {
             automation_enabled,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
+            pending_commands: HashMap::new(),
+            next_command_id: 0,
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),

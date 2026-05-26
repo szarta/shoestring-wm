@@ -108,7 +108,33 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<ScreenshotRegion>,
     },
+    /// Spawn a child process under the WM's environment (inherits
+    /// `WAYLAND_DISPLAY`, `SHOESTRING_WM_SOCKET`, etc.) and return its
+    /// captured output once it exits. `argv[0]` is the executable; the
+    /// remainder are arguments. `argv` must be non-empty.
+    ///
+    /// `timeout_ms`: if set, the child is sent `SIGKILL` after this many
+    /// milliseconds. The reply still includes whatever output was
+    /// captured up to that point.
+    ///
+    /// Output is capped at [`RUN_COMMAND_OUTPUT_CAP`] bytes per stream;
+    /// further bytes are drained from the pipe (so the child does not
+    /// block on a full pipe buffer) but discarded, and the response's
+    /// `truncated` field is set.
+    ///
+    /// Gated by `set_automation`: returns [`Response::Error`] when the
+    /// runtime automation gate is off.
+    RunCommand {
+        argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u32>,
+    },
 }
+
+/// Per-stream byte cap for [`Request::RunCommand`]. Keeps IPC frames
+/// bounded — pathological commands (`yes`, accidentally tailed logs)
+/// can't OOM the WM or wedge it on JSON serialisation.
+pub const RUN_COMMAND_OUTPUT_CAP: usize = 64 * 1024;
 
 /// Rectangle for [`Request::Screenshot`], in the target output's logical
 /// pixel coords. All fields are positive; `w` and `h` must be > 0.
@@ -148,6 +174,16 @@ pub enum Response {
     /// usually under `$XDG_PICTURES_DIR`.
     Screenshot {
         path: String,
+    },
+    /// Result of [`Request::RunCommand`]. `exit_code` is the child's
+    /// real exit code; `-1` means killed by a signal (typically
+    /// `SIGKILL` from the timeout path). `truncated` is true if either
+    /// stdout or stderr exceeded [`RUN_COMMAND_OUTPUT_CAP`].
+    CommandResult {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
     },
     /// Server-side error; the client should print and exit non-zero.
     Error {
@@ -340,6 +376,41 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"screenshot","path":"/tmp/foo.png"}"#
+        );
+    }
+
+    #[test]
+    fn run_command_request_response_shapes() {
+        let bare = Request::RunCommand {
+            argv: vec!["echo".into(), "hi".into()],
+            timeout_ms: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"type":"run_command","argv":["echo","hi"]}"#
+        );
+        let with_timeout = Request::RunCommand {
+            argv: vec!["sleep".into(), "5".into()],
+            timeout_ms: Some(250),
+        };
+        let s = serde_json::to_string(&with_timeout).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Request::RunCommand {
+                ref argv,
+                timeout_ms: Some(250),
+            } if argv == &["sleep", "5"]
+        ));
+        let resp = Response::CommandResult {
+            exit_code: 0,
+            stdout: "hi\n".into(),
+            stderr: String::new(),
+            truncated: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"command_result","exit_code":0,"stdout":"hi\n","stderr":"","truncated":false}"#
         );
     }
 

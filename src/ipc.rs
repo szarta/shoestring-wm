@@ -373,6 +373,37 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     }
                 }
             }
+            Request::RunCommand { argv, timeout_ms } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                if argv.is_empty() {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "run_command: argv must be non-empty".into(),
+                        },
+                    );
+                    return true;
+                }
+                // Hold the connection open across the deferred reply,
+                // same as Screenshot. Mark spent so a misbehaving
+                // client can't slip in a second request.
+                client.borrow_mut().spent = true;
+                match state.spawn_remote_command(id, Rc::clone(client), &argv, timeout_ms) {
+                    Ok(()) => return false,
+                    Err(e) => {
+                        let _ = write_response(
+                            client,
+                            &Response::Error {
+                                message: format!("run_command spawn failed: {e}"),
+                            },
+                        );
+                        return true;
+                    }
+                }
+            }
             Request::InjectClick { button, x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());

@@ -78,6 +78,21 @@ enum Command {
         #[command(subcommand)]
         action: AutomationAction,
     },
+    /// Run a command under the WM's environment (inherits
+    /// WAYLAND_DISPLAY, SHOESTRING_WM_SOCKET, etc.) and print the
+    /// captured stdout/stderr + exit code as JSON. Requires the
+    /// automation gate to be on. Pass argv after `--`, e.g.
+    /// `shoestring-ctl run-command -- alacritty --version`.
+    RunCommand {
+        /// Kill the child with SIGKILL after this many milliseconds.
+        /// The reply still includes any output captured before the
+        /// kill.
+        #[arg(long, value_name = "MS")]
+        timeout_ms: Option<u32>,
+        /// Command and arguments. The first value is the executable.
+        #[arg(required = true, trailing_var_arg = true)]
+        argv: Vec<String>,
+    },
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -137,6 +152,7 @@ fn main() -> Result<()> {
             let region = region.as_deref().map(parse_region).transpose()?;
             Request::Screenshot { output, region }
         }
+        Command::RunCommand { argv, timeout_ms } => Request::RunCommand { argv, timeout_ms },
     };
 
     let mut writer = stream.try_clone()?;
