@@ -63,6 +63,15 @@ impl LayoutManager {
         self.minimized.iter().any(|(mw, _)| mw == w)
     }
 
+    /// Remove `w` from the minimized stack (if present) and return the
+    /// rect it was minimized at. Used when a specific window is being
+    /// restored by name (e.g. a bar click on its entry) rather than by
+    /// LIFO order.
+    pub fn take_minimized(&mut self, w: &Window) -> Option<Rectangle<i32, Logical>> {
+        let pos = self.minimized.iter().position(|(mw, _)| mw == w)?;
+        Some(self.minimized.remove(pos).1)
+    }
+
     /// Pop the next still-alive minimized window. Drops any dead entries
     /// encountered on the way (the client exited while minimized).
     pub fn pop_live_minimized(&mut self) -> Option<(Window, Rectangle<i32, Logical>)> {

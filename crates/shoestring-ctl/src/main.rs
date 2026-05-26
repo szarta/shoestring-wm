@@ -112,6 +112,12 @@ enum Command {
         /// FT identifier of the window to close.
         id: String,
     },
+    /// Focus a window by its `ext-foreign-toplevel-list-v1` identifier.
+    /// Unminimizes if needed, switches workspaces if needed.
+    FocusWindow {
+        /// FT identifier of the window to focus.
+        id: String,
+    },
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -175,6 +181,7 @@ fn main() -> Result<()> {
         Command::ReloadConfig => Request::ReloadConfig,
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
+        Command::FocusWindow { id } => Request::FocusWindow { id },
     };
 
     let mut writer = stream.try_clone()?;

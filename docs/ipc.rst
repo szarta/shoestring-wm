@@ -70,6 +70,11 @@ Each request is a JSON object with a ``type`` discriminator:
        ``ext-foreign-toplevel-list-v1`` identifier. The client may
        still surface a save-prompt rather than exiting immediately.
        Returns ``error`` if no window matches.
+   * - ``{"type": "focus_window", "id": "..."}``
+     - Focus the window with the given identifier. Unminimizes it if
+       needed and switches to its workspace if it lives elsewhere,
+       then raises + activates it the same way a click does. Returns
+       ``error`` if no window matches.
 
 Injected key and click events bypass the WM's binding table — a scripted
 ``Super+q`` will NOT trigger the ``Quit`` binding. Use the relevant typed

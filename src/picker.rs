@@ -159,6 +159,43 @@ impl ShoestringWm {
         }
         Err(format!("no window with id {id:?}"))
     }
+
+    /// Focus the toplevel whose FT identifier matches `id`. Restores it
+    /// from the minimized stack if needed, switches to its workspace
+    /// if it lives elsewhere, then runs the same focus/raise/activate
+    /// path as a click.
+    pub fn focus_window_by_id(&mut self, id: &str) -> Result<(), String> {
+        let window = self
+            .foreign_toplevels
+            .iter()
+            .find(|(_, h)| h.identifier() == id)
+            .map(|(w, _)| w.clone())
+            .ok_or_else(|| format!("no window with id {id:?}"))?;
+
+        // Minimized → re-map at its saved rect on the active workspace
+        // before doing anything else, so the workspace-switch and
+        // focus paths see it as a live element.
+        if let Some(rect) = self.layout.take_minimized(&window) {
+            let active = self.workspaces.active();
+            self.space.map_element(window.clone(), rect.loc, true);
+            self.workspaces.assign(window.clone(), active, rect.loc);
+        }
+
+        // If the window lives on another workspace, switch first.
+        let target_ws = self
+            .workspaces
+            .windows_on_any()
+            .find(|(w, _)| w == &window)
+            .map(|(_, ws)| ws);
+        if let Some(ws) = target_ws {
+            if ws != self.workspaces.active() {
+                self.focus_workspace_id(ws);
+            }
+        }
+
+        self.focus_window(&window);
+        Ok(())
+    }
 }
 
 fn read_title_app_id(
