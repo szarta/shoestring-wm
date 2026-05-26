@@ -59,6 +59,7 @@ background  = "#222222"  # #RGB, #RRGGBB, or #AARRGGBB
 foreground  = "#ffffff"
 font        = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"  # optional
 font_size   = 14.0
+show_workspaces = true   # set false to hide the box cluster + active name
 
 [clock]
 format = "%a %b %d  %H:%M"   # strftime(3) pattern

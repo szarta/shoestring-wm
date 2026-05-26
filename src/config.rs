@@ -28,6 +28,7 @@ pub struct BarSection {
     pub foreground: Option<String>,
     pub font: Option<String>,
     pub font_size: Option<f32>,
+    pub show_workspaces: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -51,6 +52,10 @@ pub struct Config {
     pub font: Option<PathBuf>,
     pub font_size: f32,
     pub clock_format: String,
+    /// When `false`, the workspace box cluster + active-workspace name are
+    /// suppressed and the window list slides to the left edge. Pairs with
+    /// shoestring-wsindicator for users who prefer a popup-on-switch.
+    pub show_workspaces: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +74,7 @@ impl Default for Config {
             font: None,
             font_size: 14.0,
             clock_format: "%a %b %d  %H:%M".to_string(),
+            show_workspaces: true,
         }
     }
 }
@@ -128,6 +134,9 @@ impl Config {
         }
         if let Some(fmt) = raw.clock.format {
             cfg.clock_format = expand_clock_alias(&fmt);
+        }
+        if let Some(b) = raw.bar.show_workspaces {
+            cfg.show_workspaces = b;
         }
         Ok(cfg)
     }
@@ -194,6 +203,12 @@ foreground  = \"#ffffff\"
 # a 24px bar.
 font_size   = 14.0
 
+# Whether to render the workspace indicator (box cluster + active name)
+# on the far left. Set to false if you prefer a popup-on-switch UX
+# (e.g. shoestring-wsindicator) and want the window list to start flush
+# against the left edge.
+show_workspaces = true
+
 [clock]
 # strftime(3) pattern. The two named aliases below are convenience
 # shortcuts; anything else is passed straight to libc::strftime.
@@ -251,6 +266,13 @@ mod tests {
         assert_eq!(c.font_size, 14.0);
         assert_eq!(c.position, Position::Bottom);
         assert_eq!(c.clock_format, "%a %b %d  %H:%M");
+        assert!(c.show_workspaces);
+    }
+
+    #[test]
+    fn show_workspaces_toggle() {
+        let raw: RawConfig = toml::from_str(r#"bar = { show_workspaces = false }"#).unwrap();
+        assert!(!Config::from_raw(raw).unwrap().show_workspaces);
     }
 
     #[test]

@@ -663,46 +663,51 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     };
 
     // Far left: workspace cluster. Active box in accent color, the rest
-    // dimmed.
-    let ws_cluster_w =
-        state.workspace_count as i32 * WS_BOX_W + (state.workspace_count as i32 - 1) * WS_GAP;
-    let ws_y = (h as i32 - WS_BOX_H) / 2;
-    for i in 0..state.workspace_count {
-        let bx = PADDING_X + i as i32 * (WS_BOX_W + WS_GAP);
-        let color = if i + 1 == state.active_workspace {
-            ACCENT
-        } else {
-            DIM
-        };
-        fill_rect(&mut mmap, w, h, bx, ws_y, WS_BOX_W, WS_BOX_H, color);
-    }
-    // Active workspace's display name, drawn immediately right of the
-    // box cluster. Skipped when the user hasn't named the active slot
-    // — boxes alone are enough in that case. WS_LIST_GAP separates
-    // the name from the window list.
-    let mut after_ws_x = PADDING_X + ws_cluster_w;
-    let active_name = state
-        .workspace_names
-        .get(state.active_workspace.saturating_sub(1) as usize)
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    if !active_name.is_empty() {
-        const NAME_GAP: i32 = 8;
-        let name_x = after_ws_x + NAME_GAP;
-        let name_w = measure_text(&state.font, font_px, active_name);
-        draw_text(
-            &mut mmap,
-            w,
-            h,
-            &state.font,
-            font_px,
-            name_x,
-            active_name,
-            fg,
-        );
-        after_ws_x = name_x + name_w;
-    }
-    let list_start_x = after_ws_x + WS_LIST_GAP;
+    // dimmed. Suppressed entirely when `cfg.show_workspaces` is false,
+    // in which case the window list slides to the left edge.
+    let list_start_x = if state.cfg.show_workspaces {
+        let ws_cluster_w =
+            state.workspace_count as i32 * WS_BOX_W + (state.workspace_count as i32 - 1) * WS_GAP;
+        let ws_y = (h as i32 - WS_BOX_H) / 2;
+        for i in 0..state.workspace_count {
+            let bx = PADDING_X + i as i32 * (WS_BOX_W + WS_GAP);
+            let color = if i + 1 == state.active_workspace {
+                ACCENT
+            } else {
+                DIM
+            };
+            fill_rect(&mut mmap, w, h, bx, ws_y, WS_BOX_W, WS_BOX_H, color);
+        }
+        // Active workspace's display name, drawn immediately right of
+        // the box cluster. Skipped when the user hasn't named the
+        // active slot — boxes alone are enough in that case.
+        // WS_LIST_GAP separates the name from the window list.
+        let mut after_ws_x = PADDING_X + ws_cluster_w;
+        let active_name = state
+            .workspace_names
+            .get(state.active_workspace.saturating_sub(1) as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if !active_name.is_empty() {
+            const NAME_GAP: i32 = 8;
+            let name_x = after_ws_x + NAME_GAP;
+            let name_w = measure_text(&state.font, font_px, active_name);
+            draw_text(
+                &mut mmap,
+                w,
+                h,
+                &state.font,
+                font_px,
+                name_x,
+                active_name,
+                fg,
+            );
+            after_ws_x = name_x + name_w;
+        }
+        after_ws_x + WS_LIST_GAP
+    } else {
+        PADDING_X
+    };
 
     // Middle: window list, drawn per-entry so we can paint a background
     // accent behind the focused entry. Entries are deterministically
