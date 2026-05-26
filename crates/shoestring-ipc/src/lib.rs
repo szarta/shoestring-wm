@@ -247,6 +247,14 @@ pub enum Event {
         title: String,
         app_id: String,
     },
+    /// Window was reassigned to a different workspace (via the
+    /// move-to-workspace keybinds or a `[[window_rules]]` workspace
+    /// action). Fires regardless of whether the user's view follows.
+    /// `workspace` is 1-based.
+    WindowMovedToWorkspace {
+        id: String,
+        workspace: u8,
+    },
     OutputAdded(OutputSummary),
     OutputRemoved {
         name: String,
@@ -425,6 +433,19 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"command_result","exit_code":0,"stdout":"hi\n","stderr":"","truncated":false}"#
+        );
+    }
+
+    #[test]
+    fn event_window_moved_to_workspace_shape() {
+        let e = Event::WindowMovedToWorkspace {
+            id: "abc".into(),
+            workspace: 4,
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"window_moved_to_workspace","id":"abc","workspace":4}"#
         );
     }
 

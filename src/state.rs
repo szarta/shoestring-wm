@@ -580,6 +580,13 @@ impl ShoestringWm {
         self.workspaces.remove_from_active_focus(active, window);
         self.space.unmap_elem(window);
 
+        if let Some(handle) = self.foreign_toplevels.get(window) {
+            self.emit_ipc(shoestring_ipc::Event::WindowMovedToWorkspace {
+                id: handle.identifier(),
+                workspace: target.one_based(),
+            });
+        }
+
         if !was_focused {
             // Nothing to refocus — keybind / pointer focus stays put.
             return;
