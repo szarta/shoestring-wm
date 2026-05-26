@@ -662,6 +662,42 @@ impl ShoestringWm {
         self.workspaces.record_location(window, new_loc);
         self.pending_initial_center.remove(window);
     }
+
+    /// Reassign `window` to `target` workspace and switch the active
+    /// workspace to `target`, taking the window along. Used by the
+    /// edge-drag gesture in [`MoveSurfaceGrab`] so a Super+drag that
+    /// crosses an output edge follows the window into the new workspace
+    /// without breaking the pointer grab.
+    pub fn move_window_to_workspace_following(
+        &mut self,
+        window: &smithay::desktop::Window,
+        target: crate::workspace::WorkspaceId,
+    ) {
+        let active = self.workspaces.active();
+        if target == active {
+            return;
+        }
+        if let Some(loc) = self.space.element_location(window) {
+            self.workspaces.record_location(window, loc);
+        }
+        self.workspaces.reassign(window, target);
+        // Surface the dragged window as the target's MRU top so it
+        // remains focused after the switch.
+        self.workspaces.record_focus(target, window);
+        self.workspaces.remove_from_active_focus(active, window);
+
+        if let Some(handle) = self.foreign_toplevels.get(window) {
+            self.emit_ipc(shoestring_ipc::Event::WindowMovedToWorkspace {
+                id: handle.identifier(),
+                workspace: target.one_based(),
+            });
+        }
+
+        // Drop keyboard focus first so focus_workspace_id doesn't
+        // record the now-moved window into the LEAVING workspace's MRU.
+        self.clear_focus();
+        self.focus_workspace_id(target);
+    }
 }
 
 #[derive(Default)]

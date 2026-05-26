@@ -243,11 +243,7 @@ impl ShoestringWm {
         };
 
         if button == BTN_LEFT {
-            let grab = MoveSurfaceGrab {
-                start_data,
-                window: window.clone(),
-                initial_window_location: window_loc,
-            };
+            let grab = MoveSurfaceGrab::new(start_data, window.clone(), window_loc);
             pointer.set_grab(self, grab, serial, Focus::Clear);
         } else {
             let geometry = window.geometry();
