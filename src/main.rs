@@ -112,6 +112,12 @@ struct State {
     active_workspace: u8,
     /// Total workspace count (cached from the same startup query).
     workspace_count: u8,
+    /// Display name per workspace (1-based positionally). Length ==
+    /// `workspace_count` once seeded from the IPC `Workspaces`
+    /// response; entries are empty strings for unnamed slots. The
+    /// active workspace's non-empty name is rendered to the right of
+    /// the box cluster.
+    workspace_names: Vec<String>,
     /// `ext-foreign-toplevel-list` identifier of the currently focused
     /// window, sourced from `window_focused` events. `None` means no
     /// window holds keyboard focus.
@@ -238,10 +244,11 @@ fn main() -> Result<()> {
     // Bootstrap initial workspace from the WM via a one-shot IPC query.
     // Failure is non-fatal — we default to ws=1/count=16 and rely on
     // subsequent event updates.
-    let (active_workspace, workspace_count) = ipc_client::query_workspaces().unwrap_or_else(|e| {
-        tracing::warn!(error = ?e, "ipc workspace query failed; using defaults");
-        (1, 16)
-    });
+    let (active_workspace, workspace_count, workspace_names) = ipc_client::query_workspaces()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = ?e, "ipc workspace query failed; using defaults");
+            (1, 16, Vec::new())
+        });
 
     // Bootstrap per-window workspace mappings. ext-FT will replay every
     // pre-existing toplevel to us, but the WM's `window_opened` IPC
@@ -277,6 +284,7 @@ fn main() -> Result<()> {
         toplevels: HashMap::new(),
         active_workspace,
         workspace_count,
+        workspace_names,
         focused_id: None,
         automation_enabled,
         window_workspaces,
@@ -654,8 +662,8 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         None
     };
 
-    // Far left: workspace cluster. 16 small boxes; active one in accent
-    // color, the rest dimmed.
+    // Far left: workspace cluster. Active box in accent color, the rest
+    // dimmed.
     let ws_cluster_w =
         state.workspace_count as i32 * WS_BOX_W + (state.workspace_count as i32 - 1) * WS_GAP;
     let ws_y = (h as i32 - WS_BOX_H) / 2;
@@ -668,7 +676,33 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         };
         fill_rect(&mut mmap, w, h, bx, ws_y, WS_BOX_W, WS_BOX_H, color);
     }
-    let list_start_x = PADDING_X + ws_cluster_w + WS_LIST_GAP;
+    // Active workspace's display name, drawn immediately right of the
+    // box cluster. Skipped when the user hasn't named the active slot
+    // — boxes alone are enough in that case. WS_LIST_GAP separates
+    // the name from the window list.
+    let mut after_ws_x = PADDING_X + ws_cluster_w;
+    let active_name = state
+        .workspace_names
+        .get(state.active_workspace.saturating_sub(1) as usize)
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    if !active_name.is_empty() {
+        const NAME_GAP: i32 = 8;
+        let name_x = after_ws_x + NAME_GAP;
+        let name_w = measure_text(&state.font, font_px, active_name);
+        draw_text(
+            &mut mmap,
+            w,
+            h,
+            &state.font,
+            font_px,
+            name_x,
+            active_name,
+            fg,
+        );
+        after_ws_x = name_x + name_w;
+    }
+    let list_start_x = after_ws_x + WS_LIST_GAP;
 
     // Middle: window list, drawn per-entry so we can paint a background
     // accent behind the focused entry. Entries are deterministically

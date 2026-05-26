@@ -56,16 +56,22 @@ fn read_line(stream: &mut UnixStream) -> Result<Option<String>> {
     }
 }
 
-/// Send `Request::Workspaces`, parse the response, return `(active, count)`
-/// (both 1-based-friendly: `count` is the total). Connection is closed
-/// when the function returns.
-pub fn query_workspaces() -> Result<(u8, u8)> {
+/// Send `Request::Workspaces`, parse the response, return
+/// `(active, count, names)`. `names` is length `count` (or empty when
+/// talking to a pre-naming WM build); empty strings mean "no name set,
+/// render the 1-based number instead". Connection is closed when the
+/// function returns.
+pub fn query_workspaces() -> Result<(u8, u8, Vec<String>)> {
     let mut stream = connect()?;
     write_request(&mut stream, &Request::Workspaces)?;
     let line = read_line(&mut stream)?.context("server closed before responding")?;
     let resp: Response = serde_json::from_str(&line).context("parse workspaces response")?;
     match resp {
-        Response::Workspaces { active, count } => Ok((active, count)),
+        Response::Workspaces {
+            active,
+            count,
+            names,
+        } => Ok((active, count, names)),
         Response::Error { message } => anyhow::bail!("server error: {message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }
