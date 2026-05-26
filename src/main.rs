@@ -114,6 +114,14 @@ struct State {
     /// window, sourced from `window_focused` events. `None` means no
     /// window holds keyboard focus.
     focused_id: Option<String>,
+    /// 1-based workspace for each window, keyed by ext-FT identifier.
+    /// Populated from `window_opened` and updated by
+    /// `window_moved_to_workspace`; ext-FT itself does not expose
+    /// workspace info. Entries without a mapping (haven't seen the
+    /// matching IPC event yet) are treated as "unknown" and hidden
+    /// from the bar list — the WM emits `window_opened` synchronously
+    /// with the ext-FT announce so this only matters momentarily.
+    window_workspaces: HashMap<String, u8>,
     /// Set whenever any input that affects the rendered output changes
     /// (toplevel arrival/departure, clock tick, etc). Cleared after the
     /// next paint.
@@ -198,6 +206,20 @@ fn main() -> Result<()> {
         (1, 16)
     });
 
+    // Bootstrap per-window workspace mappings. ext-FT will replay every
+    // pre-existing toplevel to us, but the WM's `window_opened` IPC
+    // events are not replayed on subscribe, so without this the bar
+    // would treat every pre-existing window as "workspace unknown" and
+    // hide it.
+    let initial_windows = ipc_client::query_windows().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc windows query failed; window list will populate as events arrive");
+        Vec::new()
+    });
+    let window_workspaces: HashMap<String, u8> = initial_windows
+        .into_iter()
+        .map(|w| (w.id, w.workspace))
+        .collect();
+
     let mut state = State {
         cfg,
         compositor,
@@ -211,6 +233,7 @@ fn main() -> Result<()> {
         active_workspace,
         workspace_count,
         focused_id: None,
+        window_workspaces,
         dirty: false,
         last_clock: String::new(),
         running: true,
@@ -459,13 +482,28 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
                 state.dirty = true;
             }
         }
-        // Title/app_id changes already arrive via ext-foreign-toplevel-list;
-        // open/closed too. Output add/remove doesn't affect the bar yet.
-        IpcEvent::WindowOpened { .. }
-        | IpcEvent::WindowClosed { .. }
-        | IpcEvent::WindowTitleChanged { .. }
+        // ext-foreign-toplevel-list carries title/app_id and open/close
+        // already, but it does *not* expose workspace. Track that
+        // separately so the visible window list can be filtered to the
+        // active workspace.
+        IpcEvent::WindowOpened { id, workspace, .. } => {
+            state.window_workspaces.insert(id, workspace);
+            state.dirty = true;
+        }
+        IpcEvent::WindowClosed { id } => {
+            state.window_workspaces.remove(&id);
+            // ext-FT's `closed` already pulled the Toplevel entry and
+            // marked dirty; nothing extra to do for the visible list.
+        }
+        IpcEvent::WindowMovedToWorkspace { id, workspace } => {
+            state.window_workspaces.insert(id, workspace);
+            state.dirty = true;
+        }
+        IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::OutputAdded(_)
-        | IpcEvent::OutputRemoved { .. } => {}
+        | IpcEvent::OutputRemoved { .. }
+        | IpcEvent::AutomationChanged { .. }
+        | IpcEvent::ConfigReloaded => {}
     }
 }
 
@@ -552,7 +590,13 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     // ordered by FT identifier (stable across renders).
     let list_end_x = clock_x - PADDING_X;
     let list_budget = (list_end_x - list_start_x).max(0);
-    if state.toplevels.is_empty() {
+    // "Empty" for the window-list pane means "no window on the active
+    // workspace", not "no windows anywhere" — other workspaces might
+    // still have windows, but we're filtered to one.
+    let any_on_active = state.toplevels.values().any(|t| {
+        state.window_workspaces.get(&t.identifier).copied() == Some(state.active_workspace)
+    });
+    if !any_on_active {
         let placeholder = format!("shoestring-bar v{}", env!("CARGO_PKG_VERSION"));
         let label = truncate_to_fit(&placeholder, &state.font, font_px, list_budget);
         draw_text(
@@ -677,7 +721,18 @@ fn draw_window_list(
     fg: u32,
 ) {
     let font = &state.font;
-    let mut entries: Vec<&Toplevel> = state.toplevels.values().collect();
+    // Filter to windows on the active workspace. Entries without a
+    // mapping yet (announced via ext-FT before the matching
+    // `window_opened` IPC arrived) stay hidden until the workspace is
+    // known — the two arrive close enough in practice that the gap
+    // is invisible.
+    let mut entries: Vec<&Toplevel> = state
+        .toplevels
+        .values()
+        .filter(|t| {
+            state.window_workspaces.get(&t.identifier).copied() == Some(state.active_workspace)
+        })
+        .collect();
     entries.sort_by(|a, b| a.identifier.cmp(&b.identifier));
 
     let label_of = |t: &Toplevel| -> String {

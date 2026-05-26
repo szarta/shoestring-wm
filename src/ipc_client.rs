@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use shoestring_ipc::{client_socket_path, Event, Request, Response};
+use shoestring_ipc::{client_socket_path, Event, Request, Response, WindowSummary};
 
 fn connect() -> Result<UnixStream> {
     let path = client_socket_path()
@@ -66,6 +66,22 @@ pub fn query_workspaces() -> Result<(u8, u8)> {
     let resp: Response = serde_json::from_str(&line).context("parse workspaces response")?;
     match resp {
         Response::Workspaces { active, count } => Ok((active, count)),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Send `Request::Windows`, return the summary list. Used at startup to
+/// bootstrap per-window state (currently: workspace assignment) for any
+/// windows that already existed when the bar attached — `window_opened`
+/// events are not replayed on subscribe.
+pub fn query_windows() -> Result<Vec<WindowSummary>> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::Windows)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse windows response")?;
+    match resp {
+        Response::Windows { windows } => Ok(windows),
         Response::Error { message } => anyhow::bail!("server error: {message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }
