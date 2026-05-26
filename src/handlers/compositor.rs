@@ -48,6 +48,8 @@ impl CompositorHandler for ShoestringWm {
                 // Push any title/app_id changes the client just committed
                 // out to ext-foreign-toplevel-list subscribers (bars, etc.).
                 sync_foreign_toplevel(self, &window);
+                // Per-app rules run once, on the first commit after map.
+                self.try_apply_window_rules(&window);
             }
         }
 

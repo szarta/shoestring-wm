@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    sync::Arc,
+    time::Instant,
+};
 
 use shoestring_config::Config;
 use smithay::{
@@ -95,6 +100,11 @@ pub struct ShoestringWm {
     pub pending_commands: HashMap<u64, crate::remote_command::Pending>,
     pub next_command_id: u64,
 
+    /// Windows that have already had `[[window_rules]]` evaluated.
+    /// Evaluation runs once per window — on the first commit after
+    /// map. Entries are removed in `toplevel_destroyed`.
+    pub rules_applied: HashSet<Window>,
+
     pub cursor: crate::cursor::Cursor,
     pub cursor_status: CursorImageStatus,
     pub pointer_element: crate::drawing::PointerElement,
@@ -189,6 +199,7 @@ impl ShoestringWm {
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),
             next_command_id: 0,
+            rules_applied: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),
@@ -522,32 +533,47 @@ impl ShoestringWm {
             tracing::debug!("move_focused: no focused window — nothing to move");
             return;
         };
+        self.move_window_to_workspace(&window, target);
+    }
+
+    /// Move an arbitrary tracked window to `target`. Shared by the
+    /// keybind path ([`Self::move_focused_to_workspace`]) and the
+    /// `[[window_rules]]` path. When the window happens to be focused
+    /// and the move takes it off the active workspace, focus falls
+    /// back to the next MRU-top window.
+    pub fn move_window_to_workspace(
+        &mut self,
+        window: &smithay::desktop::Window,
+        target: crate::workspace::WorkspaceId,
+    ) {
         let active = self.workspaces.active();
         if target == active {
             tracing::debug!(
                 ws = active.one_based(),
-                "move_focused: target == active, skip"
+                "move_window: target == active, skip"
             );
             return;
         }
         tracing::debug!(
             from = active.one_based(),
             to = target.one_based(),
-            "move_focused"
+            "move_window"
         );
-        // Capture position before unmapping so the window comes back at the
-        // same spot when its workspace is activated.
-        if let Some(loc) = self.space.element_location(&window) {
-            self.workspaces.record_location(&window, loc);
+        let was_focused = self.focused_window().as_ref() == Some(window);
+        if let Some(loc) = self.space.element_location(window) {
+            self.workspaces.record_location(window, loc);
         }
-        self.workspaces.reassign(&window, target);
-        // Push the moved window onto the target's MRU so switching there
-        // brings it straight back into focus.
-        self.workspaces.record_focus(target, &window);
-        self.workspaces.remove_from_active_focus(active, &window);
-        self.space.unmap_elem(&window);
+        self.workspaces.reassign(window, target);
+        // Push onto the target's MRU so switching there brings it
+        // straight back into focus.
+        self.workspaces.record_focus(target, window);
+        self.workspaces.remove_from_active_focus(active, window);
+        self.space.unmap_elem(window);
 
-        // Refocus whatever's next on the active workspace.
+        if !was_focused {
+            // Nothing to refocus — keybind / pointer focus stays put.
+            return;
+        }
         let pick = loop {
             let Some(w) = self.workspaces.last_focused(active) else {
                 break None;

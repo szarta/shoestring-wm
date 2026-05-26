@@ -63,6 +63,7 @@ impl XdgShellHandler for ShoestringWm {
         self.space.unmap_elem(&window);
         self.layout.forget(&window);
         self.workspaces.forget(&window);
+        self.rules_applied.remove(&window);
         // FT handle's Drop sends `closed`; just removing the entry suffices.
         let id = self
             .foreign_toplevels

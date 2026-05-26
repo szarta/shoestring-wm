@@ -123,6 +123,7 @@ mod tests {
         Config {
             general: Default::default(),
             bindings: binds,
+            window_rules: Vec::new(),
         }
     }
 

@@ -14,6 +14,7 @@ mod remote_command;
 mod remote_screenshot;
 mod screencopy;
 mod state;
+mod window_rules;
 mod workspace;
 
 use anyhow::Result;

@@ -19,6 +19,65 @@ pub struct Config {
     pub general: General,
     #[serde(default)]
     pub bindings: Vec<Binding>,
+    /// Per-app rules evaluated once when a window's `app_id` / `title`
+    /// first becomes available after map. The first rule whose matcher
+    /// fields all match wins; rules are evaluated in declaration order.
+    #[serde(default, rename = "window_rules")]
+    pub window_rules: Vec<WindowRule>,
+}
+
+/// A single window-rule entry. Both the matcher and the action set can
+/// be sparse — only fields the user filled in are evaluated.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowRule {
+    /// All set fields must match for the rule to apply. An empty matcher
+    /// (no fields set) matches *every* window — almost never what a user
+    /// wants, but legal so a top-of-list default-applies entry is
+    /// possible.
+    #[serde(rename = "match")]
+    pub matcher: WindowMatch,
+    pub actions: WindowActions,
+}
+
+/// Matcher predicates. All set fields are AND-ed.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowMatch {
+    /// Exact-match on the toplevel's `app_id` (xdg-shell). Use this for
+    /// the common case; under Wayland `app_id` is the closest analogue
+    /// to the X11 `WM_CLASS` that older WMs match on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Case-sensitive substring match against the toplevel title.
+    /// (Substring rather than regex to stay zero-dep; regex can be
+    /// added later behind a `regex` feature if a real user hits a case
+    /// substring can't express.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_contains: Option<String>,
+}
+
+/// Actions applied to a matched window. Each is independently optional;
+/// unsupported actions (e.g. `no_decorations` while SSD is not wired)
+/// are deliberately *not* present in the schema so they can't silently
+/// no-op.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowActions {
+    /// 1-based target workspace (1..=16). Window is moved off the
+    /// currently-active workspace if needed; the user's view does not
+    /// follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<u8>,
+    /// Compositor-space position `[x, y]` to map the window at, in
+    /// logical pixels. Overrides the auto-centered spawn location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[i32; 2]>,
+    /// Preferred size `[w, h]` (logical pixels). Sent to the client as
+    /// part of the next configure; the client may negotiate a different
+    /// size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[i32; 2]>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -361,7 +420,26 @@ impl Config {
         Self {
             general: General::default(),
             bindings,
+            window_rules: Vec::new(),
         }
+    }
+}
+
+impl WindowMatch {
+    /// `true` when every set field matches the given window facts. An
+    /// empty matcher matches everything; see [`WindowRule::matcher`].
+    pub fn matches(&self, app_id: &str, title: &str) -> bool {
+        if let Some(want) = &self.app_id {
+            if want != app_id {
+                return false;
+            }
+        }
+        if let Some(needle) = &self.title_contains {
+            if !title.contains(needle.as_str()) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -397,6 +475,57 @@ mod tests {
     fn output_scale_defaults_to_one() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.general.output_scale, 1.0);
+    }
+
+    #[test]
+    fn window_rules_default_empty_and_parse() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.window_rules.is_empty());
+
+        let toml = r#"
+            [[window_rules]]
+            match = { app_id = "firefox" }
+            actions = { workspace = 3 }
+
+            [[window_rules]]
+            match = { title_contains = "Slack" }
+            actions = { position = [100, 50], size = [1200, 800] }
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.window_rules.len(), 2);
+        assert_eq!(
+            cfg.window_rules[0].matcher.app_id.as_deref(),
+            Some("firefox")
+        );
+        assert_eq!(cfg.window_rules[0].actions.workspace, Some(3));
+        assert_eq!(
+            cfg.window_rules[1].matcher.title_contains.as_deref(),
+            Some("Slack")
+        );
+        assert_eq!(cfg.window_rules[1].actions.position, Some([100, 50]));
+        assert_eq!(cfg.window_rules[1].actions.size, Some([1200, 800]));
+    }
+
+    #[test]
+    fn window_match_semantics() {
+        let only_app = WindowMatch {
+            app_id: Some("firefox".into()),
+            title_contains: None,
+        };
+        assert!(only_app.matches("firefox", "anything"));
+        assert!(!only_app.matches("chromium", "Firefox-like"));
+
+        let app_and_title = WindowMatch {
+            app_id: Some("term".into()),
+            title_contains: Some("vim".into()),
+        };
+        assert!(app_and_title.matches("term", "nvim buffer"));
+        assert!(!app_and_title.matches("term", "fish shell"));
+        assert!(!app_and_title.matches("other", "vim"));
+
+        // Empty matcher = wildcard.
+        let empty = WindowMatch::default();
+        assert!(empty.matches("anything", "anything"));
     }
 
     #[test]
