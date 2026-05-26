@@ -2,6 +2,7 @@ mod compositor;
 mod layer_shell;
 mod screencopy;
 pub(crate) mod session_lock;
+mod xdg_decoration;
 mod xdg_shell;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};

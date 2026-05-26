@@ -57,10 +57,7 @@ pub struct WindowMatch {
     pub title_contains: Option<String>,
 }
 
-/// Actions applied to a matched window. Each is independently optional;
-/// unsupported actions (e.g. `no_decorations` while SSD is not wired)
-/// are deliberately *not* present in the schema so they can't silently
-/// no-op.
+/// Actions applied to a matched window. Each is independently optional.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowActions {

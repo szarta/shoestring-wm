@@ -26,7 +26,10 @@ use smithay::{
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
         session_lock::SessionLockManagerState,
-        shell::{wlr_layer::WlrLayerShellState, xdg::XdgShellState},
+        shell::{
+            wlr_layer::WlrLayerShellState,
+            xdg::{decoration::XdgDecorationState, XdgShellState},
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
     },
@@ -68,6 +71,10 @@ pub struct ShoestringWm {
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    /// Held for the global's lifetime. Every toplevel is forced into
+    /// `ServerSide` mode; see [`crate::handlers::xdg_decoration`].
+    #[allow(dead_code)]
+    pub xdg_decoration_state: XdgDecorationState,
     pub layer_shell_state: WlrLayerShellState,
     pub foreign_toplevel_list: ForeignToplevelListState,
     /// FT handle per window. Drop sends `closed`, so removing the entry on
@@ -146,6 +153,7 @@ impl ShoestringWm {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
@@ -199,6 +207,7 @@ impl ShoestringWm {
             udev: None,
             compositor_state,
             xdg_shell_state,
+            xdg_decoration_state,
             layer_shell_state,
             foreign_toplevel_list,
             foreign_toplevels: HashMap::new(),
