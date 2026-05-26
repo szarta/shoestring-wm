@@ -71,6 +71,21 @@ pub fn query_workspaces() -> Result<(u8, u8)> {
     }
 }
 
+/// Send `Request::AutomationStatus`, return the current gate state.
+/// Used at startup so the AUTO indicator reflects reality before any
+/// `automation_changed` event would arrive.
+pub fn query_automation() -> Result<bool> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::AutomationStatus)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse automation response")?;
+    match resp {
+        Response::Automation { enabled } => Ok(enabled),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Send `Request::Windows`, return the summary list. Used at startup to
 /// bootstrap per-window state (currently: workspace assignment) for any
 /// windows that already existed when the bar attached — `window_opened`

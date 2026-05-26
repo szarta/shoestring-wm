@@ -114,6 +114,12 @@ struct State {
     /// window, sourced from `window_focused` events. `None` means no
     /// window holds keyboard focus.
     focused_id: Option<String>,
+    /// Runtime state of the WM's automation gate. Sourced from
+    /// [`ipc_client::query_automation`] at startup and updated by
+    /// `automation_changed` events. When `true` the bar shows an
+    /// "AUTO" chip next to the clock so the user can always tell at
+    /// a glance that injected input / remote commands are allowed.
+    automation_enabled: bool,
     /// 1-based workspace for each window, keyed by ext-FT identifier.
     /// Populated from `window_opened` and updated by
     /// `window_moved_to_workspace`; ext-FT itself does not expose
@@ -220,6 +226,14 @@ fn main() -> Result<()> {
         .map(|w| (w.id, w.workspace))
         .collect();
 
+    // Bootstrap the automation gate state. Non-fatal: defaulting to
+    // `false` matches the WM's default gate position, and any subsequent
+    // `automation_changed` event will correct us if we guessed wrong.
+    let automation_enabled = ipc_client::query_automation().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc automation query failed; assuming off");
+        false
+    });
+
     let mut state = State {
         cfg,
         compositor,
@@ -233,6 +247,7 @@ fn main() -> Result<()> {
         active_workspace,
         workspace_count,
         focused_id: None,
+        automation_enabled,
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
@@ -499,10 +514,15 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
             state.window_workspaces.insert(id, workspace);
             state.dirty = true;
         }
+        IpcEvent::AutomationChanged { enabled } => {
+            if state.automation_enabled != enabled {
+                state.automation_enabled = enabled;
+                state.dirty = true;
+            }
+        }
         IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::OutputAdded(_)
         | IpcEvent::OutputRemoved { .. }
-        | IpcEvent::AutomationChanged { .. }
         | IpcEvent::ConfigReloaded => {}
     }
 }
@@ -569,6 +589,36 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     let clock_x = w as i32 - PADDING_X - clock_w;
     draw_text(&mut mmap, w, h, &state.font, font_px, clock_x, &clock, fg);
 
+    // Automation indicator chip: drawn immediately left of the clock when
+    // the WM's automation gate is ON. Hidden when off — the user should
+    // always be able to tell at a glance that injected input / remote
+    // commands are currently allowed. Same accent-fill + fg-text shape
+    // as the focused-entry highlight in the window list, so the visual
+    // grammar matches across the bar.
+    let auto_chip_left = if state.automation_enabled {
+        const AUTO_LABEL: &str = "AUTO";
+        const AUTO_PAD: i32 = 4;
+        const AUTO_CLOCK_GAP: i32 = 8;
+        let label_w = measure_text(&state.font, font_px, AUTO_LABEL);
+        let chip_w = label_w + AUTO_PAD * 2;
+        let chip_right = clock_x - AUTO_CLOCK_GAP;
+        let chip_left = chip_right - chip_w;
+        fill_rect(&mut mmap, w, h, chip_left, 2, chip_w, h as i32 - 4, ACCENT);
+        draw_text(
+            &mut mmap,
+            w,
+            h,
+            &state.font,
+            font_px,
+            chip_left + AUTO_PAD,
+            AUTO_LABEL,
+            fg,
+        );
+        Some(chip_left)
+    } else {
+        None
+    };
+
     // Far left: workspace cluster. 16 small boxes; active one in accent
     // color, the rest dimmed.
     let ws_cluster_w =
@@ -588,7 +638,7 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     // Middle: window list, drawn per-entry so we can paint a background
     // accent behind the focused entry. Entries are deterministically
     // ordered by FT identifier (stable across renders).
-    let list_end_x = clock_x - PADDING_X;
+    let list_end_x = auto_chip_left.unwrap_or(clock_x) - PADDING_X;
     let list_budget = (list_end_x - list_start_x).max(0);
     // "Empty" for the window-list pane means "no window on the active
     // workspace", not "no windows anywhere" — other workspaces might
