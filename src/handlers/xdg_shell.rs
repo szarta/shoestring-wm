@@ -64,11 +64,17 @@ impl XdgShellHandler for ShoestringWm {
         self.layout.forget(&window);
         self.workspaces.forget(&window);
         self.rules_applied.remove(&window);
-        // FT handle's Drop sends `closed`; just removing the entry suffices.
-        let id = self
-            .foreign_toplevels
-            .remove(&window)
-            .map(|h| h.identifier());
+        // Drop on our Arc clone is NOT enough: smithay's `new_toplevel`
+        // hands each bound client (the bar, etc.) its own Arc clone via
+        // the resource user-data, so `closed` is only sent once the LAST
+        // clone goes away — which never happens until the client itself
+        // disconnects. Explicitly route through `remove_toplevel`, which
+        // calls `send_closed` and prunes the list state's Weak entry.
+        let id = self.foreign_toplevels.remove(&window).map(|h| {
+            let id = h.identifier();
+            self.foreign_toplevel_list.remove_toplevel(&h);
+            id
+        });
         if let Some(id) = id {
             self.emit_ipc(shoestring_ipc::Event::WindowClosed { id });
         }
