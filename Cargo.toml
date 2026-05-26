@@ -4,6 +4,7 @@ members = [
     "crates/shoestring-ipc",
     "crates/shoestring-config",
     "crates/shoestring-ctl",
+    "crates/shoestring-kill",
     "crates/shoestring-lock",
     "crates/shoestring-region",
     "crates/shoestring-screenshot",

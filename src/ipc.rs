@@ -414,6 +414,33 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::PickWindow => {
+                // The reply is deferred until the user clicks (or
+                // cancels). Mark spent so we don't try to read a
+                // follow-up request on this same connection — the
+                // picker resolution will write the response and drop
+                // the client. A disconnect mid-pick cancels via
+                // `cancel_picker_if_owned_by` in `drop_ipc_client`.
+                client.borrow_mut().spent = true;
+                if let Err(msg) = state.start_picker(id, Rc::clone(client)) {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: msg.into(),
+                        },
+                    );
+                    return true;
+                }
+                return false;
+            }
+            Request::CloseWindow { id: window_id } => {
+                let resp = match state.close_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::InjectClick { button, x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -564,6 +591,10 @@ impl ShoestringWm {
     }
 
     pub(crate) fn drop_ipc_client(&mut self, id: ClientId) {
+        // Picker mode is owned by a specific client connection; if that
+        // client disconnects before the user resolves the pick, the
+        // session must end (no one to deliver the reply to).
+        self.cancel_picker_if_owned_by(id);
         let Some(server) = self.ipc.as_mut() else {
             return;
         };

@@ -260,6 +260,34 @@ impl ShoestringWm {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
                 let key_state = event.state();
+                // Picker mode: intercept everything before it reaches the
+                // focused surface. Escape cancels; every other key is
+                // swallowed so the user can't accidentally type into the
+                // window they're about to kill.
+                if self.pending_picker.is_some() {
+                    let cancel = self.seat.get_keyboard().unwrap().input::<bool, _>(
+                        self,
+                        event.key_code(),
+                        key_state,
+                        serial,
+                        time,
+                        |_state, _mods, handle| {
+                            if key_state != KeyState::Pressed {
+                                return FilterResult::Intercept(false);
+                            }
+                            const KEY_ESCAPE: u32 = 0xff1b;
+                            let sym = handle
+                                .raw_latin_sym_or_raw_current_sym()
+                                .map(|s| s.raw())
+                                .unwrap_or(0);
+                            FilterResult::Intercept(sym == KEY_ESCAPE)
+                        },
+                    );
+                    if cancel == Some(true) {
+                        self.finish_picker(None);
+                    }
+                    return;
+                }
                 let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
                     self,
                     event.key_code(),
@@ -369,6 +397,24 @@ impl ShoestringWm {
                 let serial = SERIAL_COUNTER.next_serial();
                 let button = event.button_code();
                 let button_state = event.state();
+
+                // Picker mode: a press resolves (left) or cancels (right /
+                // any other button). Releases are swallowed. The click is
+                // never delivered to the surface beneath, so the window
+                // about to be closed doesn't see a phantom click.
+                if self.pending_picker.is_some() {
+                    if button_state == ButtonState::Pressed {
+                        let pos = pointer.current_location();
+                        let target = if button == BTN_LEFT {
+                            self.space.element_under(pos).map(|(w, _)| w.clone())
+                        } else {
+                            None
+                        };
+                        let summary = target.as_ref().and_then(|w| self.picker_summary(w));
+                        self.finish_picker(summary);
+                    }
+                    return;
+                }
 
                 if ButtonState::Pressed == button_state
                     && !pointer.is_grabbed()

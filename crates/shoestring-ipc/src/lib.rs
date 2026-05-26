@@ -136,6 +136,26 @@ pub enum Request {
     /// is [`Response::Ok`] or [`Response::Error`] (no config loaded /
     /// parse failure / I/O failure).
     ReloadConfig,
+    /// Enter interactive window-picker mode: the WM waits for the user's
+    /// next click and replies with [`Response::PickedWindow`] carrying
+    /// the targeted window (or `None` if the user cancels with Escape
+    /// or right-click, or clicks somewhere that isn't a toplevel).
+    ///
+    /// Only one picker may be active at a time; a concurrent request
+    /// returns [`Response::Error`]. If the client disconnects while
+    /// the picker is up, the picker is cancelled.
+    ///
+    /// Not gated by `set_automation` — the reply is contingent on a
+    /// physical user click, so this is not a remote-control surface.
+    PickWindow,
+    /// Close the toplevel matching `id` (an
+    /// `ext-foreign-toplevel-list-v1` identifier, the same one carried
+    /// by [`WindowSummary::id`]). Sends `xdg_toplevel.close` to the
+    /// client; the client decides whether to honor it (a typical app
+    /// surfaces a save-prompt before exiting). Reply is
+    /// [`Response::Ok`] on a successful send, [`Response::Error`] if
+    /// no window matches.
+    CloseWindow { id: String },
 }
 
 /// Per-stream byte cap for [`Request::RunCommand`]. Keeps IPC frames
@@ -191,6 +211,12 @@ pub enum Response {
         stdout: String,
         stderr: String,
         truncated: bool,
+    },
+    /// Result of [`Request::PickWindow`]. `window` is `Some` when the
+    /// user clicked a toplevel, `None` if they cancelled (Escape /
+    /// right-click) or clicked something that wasn't a toplevel.
+    PickedWindow {
+        window: Option<WindowSummary>,
     },
     /// Server-side error; the client should print and exit non-zero.
     Error {
@@ -470,5 +496,47 @@ mod tests {
         let e = Event::WindowFocused { id: None };
         let s = serde_json::to_string(&e).unwrap();
         assert_eq!(s, r#"{"type":"window_focused","id":null}"#);
+    }
+
+    #[test]
+    fn pick_and_close_window_shapes() {
+        let pick = Request::PickWindow;
+        let s = serde_json::to_string(&pick).unwrap();
+        assert_eq!(s, r#"{"type":"pick_window"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::PickWindow));
+
+        let close = Request::CloseWindow { id: "abc".into() };
+        let s = serde_json::to_string(&close).unwrap();
+        assert_eq!(s, r#"{"type":"close_window","id":"abc"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::CloseWindow { id } if id == "abc"));
+
+        let cancelled = Response::PickedWindow { window: None };
+        assert_eq!(
+            serde_json::to_string(&cancelled).unwrap(),
+            r#"{"type":"picked_window","window":null}"#
+        );
+        let picked = Response::PickedWindow {
+            window: Some(WindowSummary {
+                id: "abc".into(),
+                title: "t".into(),
+                app_id: "a".into(),
+                workspace: 2,
+                focused: true,
+            }),
+        };
+        let s = serde_json::to_string(&picked).unwrap();
+        let back: Response = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Response::PickedWindow {
+                window: Some(WindowSummary {
+                    workspace: 2,
+                    focused: true,
+                    ..
+                })
+            }
+        ));
     }
 }

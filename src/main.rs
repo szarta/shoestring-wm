@@ -11,6 +11,7 @@ mod inject;
 mod input;
 mod ipc;
 mod layout;
+mod picker;
 mod remote_command;
 mod remote_screenshot;
 mod screencopy;

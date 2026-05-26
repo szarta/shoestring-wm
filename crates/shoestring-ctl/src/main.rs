@@ -99,6 +99,19 @@ enum Command {
     /// filesystem watcher's auto-reload isn't enough (e.g. the WM was
     /// launched without --config and a file was placed later).
     ReloadConfig,
+    /// Enter interactive window-picker mode and print the chosen window
+    /// (or `{"window": null}` on cancel). Blocks until the user clicks
+    /// or presses Escape. Useful for scripting custom kill / focus / move
+    /// flows on top of the picker primitive.
+    PickWindow,
+    /// Close a window by its `ext-foreign-toplevel-list-v1` identifier
+    /// (the `id` field of `windows` / `event_stream` records). The WM
+    /// sends `xdg_toplevel.close`; the client may surface a save-prompt
+    /// rather than exiting immediately.
+    CloseWindow {
+        /// FT identifier of the window to close.
+        id: String,
+    },
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -160,6 +173,8 @@ fn main() -> Result<()> {
         }
         Command::RunCommand { argv, timeout_ms } => Request::RunCommand { argv, timeout_ms },
         Command::ReloadConfig => Request::ReloadConfig,
+        Command::PickWindow => Request::PickWindow,
+        Command::CloseWindow { id } => Request::CloseWindow { id },
     };
 
     let mut writer = stream.try_clone()?;

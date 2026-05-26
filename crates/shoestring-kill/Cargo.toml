@@ -1,0 +1,16 @@
+[package]
+name = "shoestring-kill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Click-to-close window picker for shoestring-wm (xkill equivalent)."
+
+[[bin]]
+name = "shoestring-kill"
+path = "src/main.rs"
+
+[dependencies]
+shoestring-ipc = { path = "../shoestring-ipc" }
+serde_json = { workspace = true }
+anyhow = "1"

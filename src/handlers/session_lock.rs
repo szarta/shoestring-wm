@@ -61,6 +61,9 @@ impl SessionLockHandler for ShoestringWm {
             let serial = SERIAL_COUNTER.next_serial();
             kb.set_focus(self, Option::<WlSurface>::None, serial);
         }
+        // An in-flight window picker would otherwise stay armed across
+        // the lock; resolve it as cancelled so the client can move on.
+        self.finish_picker(None);
         self.lock_session = Some(LockState {
             pending: Some(confirmation),
             surfaces: HashMap::new(),

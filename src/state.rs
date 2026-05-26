@@ -115,6 +115,11 @@ pub struct ShoestringWm {
     pub pending_commands: HashMap<u64, crate::remote_command::Pending>,
     pub next_command_id: u64,
 
+    /// `Some` while a [`shoestring_ipc::Request::PickWindow`] is awaiting
+    /// the user's next click. Picker mode intercepts pointer/keyboard
+    /// input — see [`crate::picker`] and [`crate::input`].
+    pub pending_picker: Option<crate::picker::PendingPicker>,
+
     /// Windows that have already had `[[window_rules]]` evaluated.
     /// Evaluation runs once per window — on the first commit after
     /// map. Entries are removed in `toplevel_destroyed`.
@@ -225,6 +230,7 @@ impl ShoestringWm {
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),
             next_command_id: 0,
+            pending_picker: None,
             rules_applied: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),

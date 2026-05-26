@@ -58,6 +58,18 @@ Each request is a JSON object with a ``type`` discriminator:
        ``"right"`` / ``"middle"``, or a numeric Linux ``BTN_*`` code as a
        string. Pass ``"x"`` and ``"y"`` (both, as numbers) to move the
        pointer to those compositor-space coordinates first.
+   * - ``{"type": "pick_window"}``
+     - Enter interactive picker mode: the WM waits for the user's next
+       click and replies with ``picked_window``. Pointer/keyboard input
+       is intercepted while the picker is up — left-click resolves to a
+       toplevel, right-click and Escape cancel, other keys are
+       swallowed. Only one picker may be active at a time. If the
+       client disconnects mid-pick the picker is cancelled.
+   * - ``{"type": "close_window", "id": "..."}``
+     - Send ``xdg_toplevel.close`` to the window with the given
+       ``ext-foreign-toplevel-list-v1`` identifier. The client may
+       still surface a save-prompt rather than exiting immediately.
+       Returns ``error`` if no window matches.
 
 Injected key and click events bypass the WM's binding table — a scripted
 ``Super+q`` will NOT trigger the ``Quit`` binding. Use the relevant typed
@@ -81,6 +93,12 @@ The server replies with a single JSON object tagged by ``type``:
 
 ``outputs``
     ``{"type": "outputs", "outputs": [OutputSummary, ...]}``
+
+``picked_window``
+    ``{"type": "picked_window", "window": WindowSummary | null}``.
+    Returned in reply to ``pick_window`` once the user resolves the
+    picker. ``null`` on cancel or a click that didn't land on a
+    toplevel.
 
 ``error``
     ``{"type": "error", "message": "..."}``. The client should print the
@@ -165,6 +183,15 @@ subcommand maps to one request:
     $ shoestring-ctl type "hello 123"   # type ASCII into focused surface
     $ shoestring-ctl click left         # click at the current pointer
     $ shoestring-ctl click left --x 200 --y 400
+
+    $ shoestring-ctl pick-window        # blocks until user clicks
+    {"type":"picked_window","window":{"id":"...","title":"...", ...}}
+    $ shoestring-ctl close-window <id>  # ask that toplevel to close
+
+A higher-level binary, ``shoestring-kill`` (xkill equivalent), chains
+the two: it sends ``pick_window``, then forwards the resulting ``id``
+to ``close_window`` on success. Bind it via the WM config or invoke it
+from a menu.
 
 Flags:
 
