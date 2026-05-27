@@ -1978,6 +1978,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.11.1",
  "clap",
+ "libc",
  "notify",
  "regex",
  "serde_json",
