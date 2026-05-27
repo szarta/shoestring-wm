@@ -128,16 +128,23 @@ pub fn apply_geometry(
     rect: Rectangle<i32, Logical>,
     maximized: bool,
 ) {
-    let xdg = window.toplevel().unwrap();
-    xdg.with_pending_state(|s| {
-        s.size = Some(rect.size);
-        if maximized {
-            s.states.set(xdg_toplevel::State::Maximized);
-        } else {
-            s.states.unset(xdg_toplevel::State::Maximized);
-        }
-    });
-    xdg.send_pending_configure();
+    if let Some(xdg) = window.toplevel() {
+        xdg.with_pending_state(|s| {
+            s.size = Some(rect.size);
+            if maximized {
+                s.states.set(xdg_toplevel::State::Maximized);
+            } else {
+                s.states.unset(xdg_toplevel::State::Maximized);
+            }
+        });
+        xdg.send_pending_configure();
+    } else if let Some(x11) = window.x11_surface() {
+        // X11: configure synchronously with the new geometry. There's no
+        // separate maximized "state" in the xdg sense — set_maximized
+        // marks it in the X-side property table so apps can react.
+        let _ = x11.set_maximized(maximized);
+        let _ = x11.configure(rect);
+    }
     space.map_element(window.clone(), rect.loc, false);
 }
 

@@ -38,10 +38,12 @@ impl CompositorHandler for ShoestringWm {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
+            // Any mapped window kind (xdg or x11) might match: x11 surfaces
+            // sit in the same Space and their commits land here too.
             let window = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == &root)
+                .find(|w| crate::window_ext::matches_surface(w, &root))
                 .cloned();
             if let Some(window) = window {
                 window.on_commit();

@@ -17,8 +17,10 @@ mod remote_command;
 mod remote_screenshot;
 mod screencopy;
 mod state;
+mod window_ext;
 mod window_rules;
 mod workspace;
+mod xwayland;
 
 use anyhow::Result;
 use clap::Parser;
@@ -158,6 +160,11 @@ fn main() -> Result<()> {
     // IPC socket goes up after WAYLAND_DISPLAY is exported so
     // default_socket_path() can resolve it.
     state.start_ipc();
+
+    // XWayland goes up before autostart so X11 apps in the autostart
+    // list (and any first client launched from a terminal that inherits
+    // our env) find $DISPLAY when they reach for it.
+    state.start_xwayland();
 
     // Config hot-reload watcher. No-op when launched without a config file.
     state.start_config_watcher();

@@ -61,9 +61,8 @@ Explicit non-goals (v1)
 - Server-side decoration polish.
 - A built-in bar — shoestring-bar is intentionally a separate process.
 - Gestures, tablet, accessibility.
-- XWayland is deferred: the integration point exists in ``backend/``
-  but the feature isn't wired in v1. It will be added when an app the
-  author cares about forces it.
+- (XWayland was deferred until GIMP forced it; now shipped — see the
+  "What ships" section.)
 
 What ships in v1
 ----------------
@@ -78,7 +77,13 @@ Implemented today:
 - Per-window floating geometry with TileLeft / TileRight / Maximize /
   Minimize and floating-rect save/restore.
 - Per-app window rules (app_id / title-contains → workspace, position,
-  size).
+  size). For X11 toplevels the rule matcher reads ``WM_CLASS`` as the
+  app_id equivalent.
+- XWayland integration: X11 toplevels map alongside Wayland windows,
+  with bidirectional clipboard and primary-selection forwarding. Spawn
+  any X11 app (``gimp``, ``inkscape``, ``feh``) directly from a
+  terminal once the compositor's running; ``$DISPLAY`` is exported on
+  Xwayland Ready.
 - Layer-shell + foreign-toplevel-list (so the bar, menu, locker and
   notification helpers can attach).
 - xcursor sprite rendering at the pointer.

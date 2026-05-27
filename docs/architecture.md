@@ -11,7 +11,7 @@ underlying research.
 - Workspaces are **shared/global** across all monitors (16 total)
 - Config format: **TOML**
 - IPC: **unix socket + JSON line-delimited**
-- XWayland: **plan integration point, defer implementation**
+- XWayland: deferred at start, **now shipped** (forced by GIMP); see `src/xwayland.rs`
 - Tile-half: **operates on current monitor only**
 - Focus: **configurable**, default **click-to-focus**
 - New windows: **centered on active monitor**
@@ -38,7 +38,6 @@ Openbox-inspired ergonomics.
 - Window decoration polish
 - Built-in bar / status panel (separate companion project)
 - Wayland gimmicks (gestures, fractional scaling, tablet, etc.)
-- XWayland (deferred; add when a needed app forces it)
 
 ---
 
@@ -58,8 +57,8 @@ Openbox-inspired ergonomics.
 - `backend_libinput` — for real hardware later
 - `backend_drm`, `backend_gbm`, `backend_session_libseat`, `backend_udev` —
   added in milestone 7 for native TTY operation
-- *Not initially:* `xwayland`, `backend_vulkan`, `renderer_multi`,
-  `renderer_pixman`
+- `xwayland` — added when GIMP forced X11 support
+- *Not enabled:* `backend_vulkan`, `renderer_multi`, `renderer_pixman`
 
 **Beyond smithay (kept deliberately small):**
 - `tracing` + `tracing-subscriber` — logging (matches smithay convention)

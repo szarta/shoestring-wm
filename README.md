@@ -111,6 +111,7 @@ Working today:
 - TileLeft / TileRight / Maximize / Minimize with floating-rect restore.
 - Super+drag move; sustained edge-drag shifts the window across workspaces.
 - Configurable focus model: click-to-focus (default), focus-follows-mouse, sloppy.
+- XWayland integration: X11 toplevels (e.g. GIMP, Inkscape) map alongside Wayland windows; class/title window rules apply; clipboard + primary selection bridged.
 - Layer-shell + foreign-toplevel-list (bar/menu/lock/notification enablement).
 - xcursor sprite rendering.
 - Per-app window rules (app\_id / title → workspace, position, size).
@@ -132,7 +133,6 @@ Working today:
 Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
 
 - Notification daemon (`shoestring-notify`, `org.freedesktop.Notifications`).
-- XWayland integration.
 - Workspace switch indicator popup.
 - Server-side decoration rendering (border + optional titlebar).
 - FreeBSD smoke-test of the winit build.

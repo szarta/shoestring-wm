@@ -160,6 +160,21 @@ pub struct ShoestringWm {
     /// when the chosen xcursor frame is unchanged across renders (the common
     /// case — static cursors stay on a single frame indefinitely).
     pub pointer_image: Option<xcursor::parser::Image>,
+
+    /// X11 window-manager client. `None` until Xwayland sends `Ready`
+    /// (and on Xwayland disconnect). See [`crate::xwayland`].
+    pub xwm: Option<smithay::xwayland::X11Wm>,
+    /// X display number Xwayland advertised; used to set `$DISPLAY` for
+    /// child processes. `None` mirrors `xwm`.
+    pub xdisplay: Option<u32>,
+    /// Wayland-side state for the `xwayland_shell_v1` global Xwayland
+    /// uses to publish its toplevels. Held for the global's lifetime.
+    pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
+    /// Primary selection (X11 middle-click clipboard) state. Held for
+    /// the global's lifetime so wayland-native apps can forward primary
+    /// to / from X11 apps via the XWayland selection bridge.
+    pub primary_selection_state:
+        smithay::wayland::selection::primary_selection::PrimarySelectionState,
 }
 
 impl ShoestringWm {
@@ -194,6 +209,10 @@ impl ShoestringWm {
         // permission to actually lock just receive `finished` when they try.
         // Our own gating (single locker at a time) lives in the handler.
         let session_lock_state = SessionLockManagerState::new::<Self, _>(&dh, |_| true);
+
+        let xwayland_shell_state = crate::xwayland::init_xwayland_globals(&dh);
+        let primary_selection_state =
+            smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Self>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -263,6 +282,10 @@ impl ShoestringWm {
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),
             pointer_image: None,
+            xwm: None,
+            xdisplay: None,
+            xwayland_shell_state,
+            primary_selection_state,
         }
     }
 
@@ -384,13 +407,14 @@ impl ShoestringWm {
         self.space.raise_element(window, true);
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {
-            let surface = window.toplevel().unwrap().wl_surface().clone();
-            kb.set_focus(self, Some(surface), serial);
+            if let Some(surface) = crate::window_ext::focus_surface(window) {
+                kb.set_focus(self, Some(surface), serial);
+            }
         }
         let target = window.clone();
         self.space.elements().for_each(|w| {
             w.set_activated(w == &target);
-            w.toplevel().unwrap().send_pending_configure();
+            crate::window_ext::send_pending_configure(w);
         });
         let active = self.workspaces.active();
         self.workspaces.record_focus(active, window);
@@ -408,13 +432,14 @@ impl ShoestringWm {
         use smithay::utils::SERIAL_COUNTER;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {
-            let surface = window.toplevel().unwrap().wl_surface().clone();
-            kb.set_focus(self, Some(surface), serial);
+            if let Some(surface) = crate::window_ext::focus_surface(window) {
+                kb.set_focus(self, Some(surface), serial);
+            }
         }
         let target = window.clone();
         self.space.elements().for_each(|w| {
             w.set_activated(w == &target);
-            w.toplevel().unwrap().send_pending_configure();
+            crate::window_ext::send_pending_configure(w);
         });
         let active = self.workspaces.active();
         self.workspaces.record_focus(active, window);
@@ -433,7 +458,7 @@ impl ShoestringWm {
         }
         self.space.elements().for_each(|w| {
             w.set_activated(false);
-            w.toplevel().unwrap().send_pending_configure();
+            crate::window_ext::send_pending_configure(w);
         });
         self.emit_ipc(shoestring_ipc::Event::WindowFocused { id: None });
     }

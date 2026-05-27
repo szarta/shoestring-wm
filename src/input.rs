@@ -258,7 +258,7 @@ impl ShoestringWm {
         }
     }
 
-    fn window_layout_action(&mut self, target: LayoutState) {
+    pub(crate) fn window_layout_action(&mut self, target: LayoutState) {
         let Some(window) = self.focused_window() else {
             tracing::debug!(?target, "no focused window for layout action");
             return;
@@ -303,7 +303,7 @@ impl ShoestringWm {
         let Some(window) = self.focused_window() else {
             return;
         };
-        window.toplevel().unwrap().send_close();
+        crate::window_ext::send_close(&window);
     }
 
     fn start_super_drag(
@@ -317,15 +317,13 @@ impl ShoestringWm {
         // Raise + focus so the dragged window comes to the front.
         self.space.raise_element(window, true);
         if let Some(kb) = self.seat.get_keyboard() {
-            kb.set_focus(
-                self,
-                Some(window.toplevel().unwrap().wl_surface().clone()),
-                serial,
-            );
+            if let Some(surface) = crate::window_ext::focus_surface(window) {
+                kb.set_focus(self, Some(surface), serial);
+            }
         }
         self.space.elements().for_each(|w| {
             w.set_activated(w == window);
-            w.toplevel().unwrap().send_pending_configure();
+            crate::window_ext::send_pending_configure(w);
         });
 
         let Some(window_loc) = self.space.element_location(window) else {

@@ -150,10 +150,7 @@ impl ShoestringWm {
     pub fn close_window_by_id(&self, id: &str) -> Result<(), String> {
         for (window, handle) in &self.foreign_toplevels {
             if handle.identifier() == id {
-                let Some(toplevel) = window.toplevel() else {
-                    return Err(format!("window {id:?} has no toplevel surface"));
-                };
-                toplevel.send_close();
+                crate::window_ext::send_close(window);
                 return Ok(());
             }
         }

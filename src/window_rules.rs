@@ -33,22 +33,30 @@ impl ShoestringWm {
         if self.config.window_rules.is_empty() {
             return;
         }
-        let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) else {
-            return;
-        };
-        let (app_id, title) = with_states(&surface, |states| {
-            let data = states.data_map.get::<XdgToplevelSurfaceData>();
-            match data {
-                Some(d) => {
-                    let g = d.lock().unwrap();
-                    (
-                        g.app_id.clone().unwrap_or_default(),
-                        g.title.clone().unwrap_or_default(),
-                    )
-                }
-                None => (String::new(), String::new()),
-            }
-        });
+        let (app_id, title) =
+            if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
+                with_states(&surface, |states| {
+                    let data = states.data_map.get::<XdgToplevelSurfaceData>();
+                    match data {
+                        Some(d) => {
+                            let g = d.lock().unwrap();
+                            (
+                                g.app_id.clone().unwrap_or_default(),
+                                g.title.clone().unwrap_or_default(),
+                            )
+                        }
+                        None => (String::new(), String::new()),
+                    }
+                })
+            } else if let Some(x11) = window.x11_surface() {
+                // X11 doesn't have an app_id; the closest analogue is the
+                // resource class (`WM_CLASS` second field — e.g. "Gimp",
+                // "Firefox"). Match rules read app_id from there so existing
+                // `[[window_rules]]` configs work for both window kinds.
+                (x11.class(), x11.title())
+            } else {
+                return;
+            };
 
         // Cloning the matched rule decouples the borrow on
         // `self.config` from the &mut self methods we call below.
@@ -107,12 +115,16 @@ impl ShoestringWm {
 
         if let Some([w, h]) = rule.actions.size {
             if w > 0 && h > 0 {
+                let size: Size<i32, Logical> = (w, h).into();
                 if let Some(toplevel) = window.toplevel() {
-                    let size: Size<i32, Logical> = (w, h).into();
                     toplevel.with_pending_state(|state| {
                         state.size = Some(size);
                     });
                     toplevel.send_configure();
+                } else if let Some(x11) = window.x11_surface() {
+                    // Keep the current position; just change the size.
+                    let geo = smithay::utils::Rectangle::new(x11.geometry().loc, size);
+                    let _ = x11.configure(geo);
                 }
             } else {
                 tracing::warn!(w, h, "window rule: size must be positive");

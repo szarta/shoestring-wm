@@ -35,6 +35,22 @@ bitflags::bitflags! {
     }
 }
 
+impl From<smithay::xwayland::xwm::ResizeEdge> for ResizeEdge {
+    fn from(edges: smithay::xwayland::xwm::ResizeEdge) -> Self {
+        use smithay::xwayland::xwm::ResizeEdge as X;
+        match edges {
+            X::Top => Self::TOP,
+            X::Bottom => Self::BOTTOM,
+            X::Left => Self::LEFT,
+            X::Right => Self::RIGHT,
+            X::TopLeft => Self::TOP_LEFT,
+            X::TopRight => Self::TOP_RIGHT,
+            X::BottomLeft => Self::BOTTOM_LEFT,
+            X::BottomRight => Self::BOTTOM_RIGHT,
+        }
+    }
+}
+
 pub struct ResizeSurfaceGrab {
     start_data: PointerGrabStartData<ShoestringWm>,
     window: Window,
@@ -50,12 +66,18 @@ impl ResizeSurfaceGrab {
         edges: ResizeEdge,
         initial_window_rect: Rectangle<i32, Logical>,
     ) -> Self {
-        ResizeSurfaceState::with(window.toplevel().unwrap().wl_surface(), |state| {
-            *state = ResizeSurfaceState::Resizing {
-                edges,
-                initial_rect: initial_window_rect,
-            };
-        });
+        // Only xdg toplevels run the ack/commit state machine; X11 surfaces
+        // accept the new size synchronously via X11Surface::configure on
+        // motion, so they have no "Resizing" / "WaitingForLastCommit"
+        // bookkeeping to seed here.
+        if let Some(t) = window.toplevel() {
+            ResizeSurfaceState::with(t.wl_surface(), |state| {
+                *state = ResizeSurfaceState::Resizing {
+                    edges,
+                    initial_rect: initial_window_rect,
+                };
+            });
+        }
 
         Self {
             start_data,
@@ -94,12 +116,17 @@ impl PointerGrab<ShoestringWm> for ResizeSurfaceGrab {
             new_h = (self.initial_rect.size.h as f64 + delta.y) as i32;
         }
 
-        let (min_size, max_size) =
-            compositor::with_states(self.window.toplevel().unwrap().wl_surface(), |states| {
-                let mut guard = states.cached_state.get::<SurfaceCachedState>();
-                let cur = guard.current();
-                (cur.min_size, cur.max_size)
-            });
+        let (min_size, max_size) = self
+            .window
+            .toplevel()
+            .map(|t| {
+                compositor::with_states(t.wl_surface(), |states| {
+                    let mut guard = states.cached_state.get::<SurfaceCachedState>();
+                    let cur = guard.current();
+                    (cur.min_size, cur.max_size)
+                })
+            })
+            .unwrap_or_default();
         let min_w = min_size.w.max(1);
         let min_h = min_size.h.max(1);
         let max_w = if max_size.w == 0 {
@@ -115,12 +142,18 @@ impl PointerGrab<ShoestringWm> for ResizeSurfaceGrab {
 
         self.last_window_size = Size::from((new_w.clamp(min_w, max_w), new_h.clamp(min_h, max_h)));
 
-        let xdg = self.window.toplevel().unwrap();
-        xdg.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-            state.size = Some(self.last_window_size);
-        });
-        xdg.send_pending_configure();
+        if let Some(xdg) = self.window.toplevel() {
+            xdg.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Resizing);
+                state.size = Some(self.last_window_size);
+            });
+            xdg.send_pending_configure();
+        } else if let Some(x11) = self.window.x11_surface() {
+            // X11 has no ack/commit dance: tell the client the new geometry
+            // synchronously. Position stays put, only size changes.
+            let geo = Rectangle::new(self.initial_rect.loc, self.last_window_size);
+            let _ = x11.configure(geo);
+        }
     }
 
     fn relative_motion(
@@ -143,19 +176,22 @@ impl PointerGrab<ShoestringWm> for ResizeSurfaceGrab {
         if !handle.current_pressed().contains(&BTN_RIGHT) {
             handle.unset_grab(self, data, event.serial, event.time, true);
 
-            let xdg = self.window.toplevel().unwrap();
-            xdg.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Resizing);
-                state.size = Some(self.last_window_size);
-            });
-            xdg.send_pending_configure();
+            if let Some(xdg) = self.window.toplevel() {
+                xdg.with_pending_state(|state| {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                    state.size = Some(self.last_window_size);
+                });
+                xdg.send_pending_configure();
 
-            ResizeSurfaceState::with(xdg.wl_surface(), |state| {
-                *state = ResizeSurfaceState::WaitingForLastCommit {
-                    edges: self.edges,
-                    initial_rect: self.initial_rect,
-                };
-            });
+                ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                    *state = ResizeSurfaceState::WaitingForLastCommit {
+                        edges: self.edges,
+                        initial_rect: self.initial_rect,
+                    };
+                });
+            }
+            // X11 already received the final size on the last motion event —
+            // no terminal ack to send.
         }
     }
 
@@ -304,7 +340,7 @@ impl ResizeSurfaceState {
 pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<()> {
     let window = space
         .elements()
-        .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
         .cloned()?;
 
     let mut window_loc = space.element_location(&window)?;

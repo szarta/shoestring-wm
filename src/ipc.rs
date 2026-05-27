@@ -577,24 +577,37 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
     state
         .foreign_toplevels
         .iter()
-        .filter_map(|(window, handle)| {
-            let surface = window.toplevel()?.wl_surface().clone();
-            let (title, app_id) = read_title_app_id(&surface);
+        .map(|(window, handle)| {
+            let (title, app_id) = window_title_app_id(window);
             let workspace = state
                 .workspaces
                 .windows_on_any()
                 .find(|(w, _)| w == window)
                 .map(|(_, ws)| ws.one_based())
                 .unwrap_or(0);
-            Some(WindowSummary {
+            WindowSummary {
                 id: handle.identifier(),
                 title,
                 app_id,
                 workspace,
                 focused: focused.as_ref() == Some(window),
-            })
+            }
         })
         .collect()
+}
+
+/// `(title, app_id)` for either an xdg toplevel or an X11 window.
+/// X11 surfaces use their `WM_CLASS` second field as the app_id
+/// equivalent — that's what window rules match against and what the
+/// bar will surface as the app label.
+fn window_title_app_id(window: &smithay::desktop::Window) -> (String, String) {
+    if let Some(toplevel) = window.toplevel() {
+        return read_title_app_id(toplevel.wl_surface());
+    }
+    if let Some(x11) = window.x11_surface() {
+        return (x11.title(), x11.class());
+    }
+    (String::new(), String::new())
 }
 
 fn read_title_app_id(

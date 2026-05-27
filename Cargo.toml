@@ -70,6 +70,7 @@ default-features = false
 features = [
     "wayland_frontend",
     "desktop",
+    "xwayland",
 ]
 
 [dependencies.smithay-drm-extras]

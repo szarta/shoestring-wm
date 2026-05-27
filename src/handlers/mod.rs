@@ -18,6 +18,9 @@ use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
+use smithay::wayland::selection::primary_selection::{
+    PrimarySelectionHandler, PrimarySelectionState,
+};
 use smithay::wayland::selection::SelectionHandler;
 
 use crate::state::ShoestringWm;
@@ -60,6 +63,12 @@ impl SelectionHandler for ShoestringWm {
 impl DataDeviceHandler for ShoestringWm {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
         &mut self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for ShoestringWm {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
     }
 }
 
