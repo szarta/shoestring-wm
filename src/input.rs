@@ -354,6 +354,51 @@ impl ShoestringWm {
         }
     }
 
+    /// Apply focus-follows-mouse / sloppy focus on a pointer motion.
+    /// No-op in click-to-focus mode, while a pointer grab is active, while
+    /// the session is locked, while the window picker is up, and when a
+    /// layer-shell surface currently owns keyboard focus (menu, picker,
+    /// lock surface — those are modal w.r.t. their own scope).
+    ///
+    /// `FollowsMouse` clears focus when the pointer is over empty space;
+    /// `Sloppy` keeps the previous focus until the pointer enters another
+    /// window. Neither variant raises — see [`focus_window_no_raise`].
+    fn maybe_pointer_focus(&mut self, pos: Point<f64, Logical>) {
+        use shoestring_config::FocusMode;
+        let mode = self.config.general.focus_mode;
+        if matches!(mode, FocusMode::ClickToFocus) {
+            return;
+        }
+        if self.is_locked() || self.pending_picker.is_some() {
+            return;
+        }
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        if pointer.is_grabbed() {
+            return;
+        }
+        // If keyboard focus is on a non-window surface (layer-shell), leave
+        // it. focused_window() returns None while kb.current_focus() is Some
+        // exactly in that case.
+        if self.focused_window().is_none() {
+            if let Some(kb) = self.seat.get_keyboard() {
+                if kb.current_focus().is_some() {
+                    return;
+                }
+            }
+        }
+        let current = self.focused_window();
+        let window = self.space.element_under(pos).map(|(w, _)| w.clone());
+        match (window, current) {
+            (Some(w), Some(cur)) if w == cur => {}
+            (Some(w), _) => self.focus_window_no_raise(&w),
+            (None, _) => {
+                if matches!(mode, FocusMode::FollowsMouse) {
+                    self.clear_focus();
+                }
+            }
+        }
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
             InputEvent::Keyboard { event, .. } => {
@@ -490,6 +535,7 @@ impl ShoestringWm {
                     },
                 );
                 pointer.frame(self);
+                self.maybe_pointer_focus(new);
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(output) = self.space.outputs().next() else {
@@ -512,6 +558,7 @@ impl ShoestringWm {
                     },
                 );
                 pointer.frame(self);
+                self.maybe_pointer_focus(pos);
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();

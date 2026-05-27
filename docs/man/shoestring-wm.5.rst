@@ -43,6 +43,10 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
 
 **focus_mode** (string, default ``click-to-focus``)
     One of ``click-to-focus``, ``follows-mouse``, ``sloppy``.
+    ``follows-mouse`` moves keyboard focus to whatever window the pointer
+    is over, and clears focus over empty space. ``sloppy`` is the same
+    but keeps the previous focus while the pointer is over empty space.
+    Neither variant raises the window — clicks still do.
 
 **repeat_delay** (integer, default ``600``)
     Milliseconds before a held key starts repeating.

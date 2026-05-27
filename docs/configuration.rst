@@ -31,10 +31,14 @@ The ``[general]`` section
    * - ``focus_mode``
      - string
      - ``"click-to-focus"``
-     - One of ``click-to-focus``, ``follows-mouse``, ``sloppy``. Click
-       is the default; the other two are accepted by the parser today
-       but partially implemented (``follows-mouse`` / ``sloppy`` are on
-       the roadmap).
+     - One of ``click-to-focus``, ``follows-mouse``, ``sloppy``.
+       ``click-to-focus`` (default): keyboard focus only changes on a
+       press. ``follows-mouse``: focus tracks the window under the
+       pointer; pointer over empty space clears focus. ``sloppy``: like
+       ``follows-mouse`` but the previous window keeps focus while the
+       pointer is over empty space (it's only stolen when the pointer
+       enters another window). Pointer-driven focus updates do NOT
+       raise — clicks still do.
    * - ``repeat_delay``
      - integer ms
      - ``600``

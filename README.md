@@ -110,6 +110,7 @@ Working today:
 - Multi-monitor with hotplug; HiDPI / fractional scale.
 - TileLeft / TileRight / Maximize / Minimize with floating-rect restore.
 - Super+drag move; sustained edge-drag shifts the window across workspaces.
+- Configurable focus model: click-to-focus (default), focus-follows-mouse, sloppy.
 - Layer-shell + foreign-toplevel-list (bar/menu/lock/notification enablement).
 - xcursor sprite rendering.
 - Per-app window rules (app\_id / title → workspace, position, size).
@@ -131,7 +132,6 @@ Working today:
 Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
 
 - Notification daemon (`shoestring-notify`, `org.freedesktop.Notifications`).
-- Focus-follows-mouse / sloppy focus modes.
 - XWayland integration.
 - Workspace switch indicator popup.
 - Server-side decoration rendering (border + optional titlebar).

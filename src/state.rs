@@ -399,6 +399,30 @@ impl ShoestringWm {
         self.emit_ipc(shoestring_ipc::Event::WindowFocused { id });
     }
 
+    /// Like [`focus_window`] but does not raise the window in the
+    /// stacking order. Used by focus-follows-mouse / sloppy focus: the
+    /// pointer-driven path moves keyboard focus and activation without
+    /// reordering the stack, so passive hover doesn't reshuffle windows
+    /// behind the user.
+    pub fn focus_window_no_raise(&mut self, window: &Window) {
+        use smithay::utils::SERIAL_COUNTER;
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(kb) = self.seat.get_keyboard() {
+            let surface = window.toplevel().unwrap().wl_surface().clone();
+            kb.set_focus(self, Some(surface), serial);
+        }
+        let target = window.clone();
+        self.space.elements().for_each(|w| {
+            w.set_activated(w == &target);
+            w.toplevel().unwrap().send_pending_configure();
+        });
+        let active = self.workspaces.active();
+        self.workspaces.record_focus(active, window);
+
+        let id = self.foreign_toplevels.get(window).map(|h| h.identifier());
+        self.emit_ipc(shoestring_ipc::Event::WindowFocused { id });
+    }
+
     /// Clear keyboard focus and deactivate every mapped window. Used when
     /// switching to an empty workspace or minimizing the last window.
     pub fn clear_focus(&mut self) {
