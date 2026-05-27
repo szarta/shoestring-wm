@@ -102,6 +102,14 @@ struct State {
     finished: bool,
     /// Exit code if non-zero (Escape).
     exit_code: u8,
+
+    /// wl_surface holding the crosshair sprite. `None` when the xcursor
+    /// theme doesn't ship a crosshair-equivalent and we fall back to the
+    /// compositor's default cursor. Attached / committed once at startup;
+    /// reused on every Enter via `set_cursor`.
+    cursor_surface: Option<WlSurface>,
+    /// Cursor sprite hotspot in surface-local coords.
+    cursor_hotspot: (i32, i32),
 }
 
 fn main() -> ExitCode {
@@ -169,6 +177,8 @@ fn run() -> Result<u8> {
         drag_cur: (0.0, 0.0),
         finished: false,
         exit_code: 0,
+        cursor_surface: None,
+        cursor_hotspot: (0, 0),
     };
 
     // One layer surface per output, anchored to all four edges so the
@@ -192,6 +202,12 @@ fn run() -> Result<u8> {
         state.outputs[i].surface = Some(surface);
         state.outputs[i].layer_surface = Some(layer_surface);
     }
+
+    // Best-effort: load the crosshair sprite and commit it to a dedicated
+    // surface so `set_cursor` on Enter can reuse the same buffer. Themes
+    // without any crosshair-equivalent silently fall through and we
+    // inherit whatever cursor the compositor was already showing.
+    init_crosshair_cursor(&mut state, &qh);
 
     // First roundtrip: wl_output.name events arrive, layer-shell configures
     // start flowing. We don't strictly need names for drawing, but we need
@@ -446,6 +462,99 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, rect: Option<(i32, i32, i32, i32)>)
     }
 }
 
+// ---- Cursor ---------------------------------------------------------------
+
+/// Names a theme might advertise for a crosshair-style cursor. Picked in
+/// order; the first one the theme has wins. Themes vary in what they
+/// ship — "crosshair" is the freedesktop convention, "cross" / "tcross"
+/// / "diamond_cross" are X11-era fallbacks.
+const CROSSHAIR_NAMES: &[&str] = &["crosshair", "cross", "tcross", "diamond_cross"];
+
+/// Default xcursor theme + size (mirrors the WM's loader so the picker
+/// inherits the user's `XCURSOR_*` env).
+const DEFAULT_THEME: &str = "default";
+const DEFAULT_SIZE: u32 = 24;
+
+/// Best-effort: load the crosshair sprite from the active xcursor theme,
+/// allocate an shm buffer, and attach it to a dedicated cursor surface.
+/// Failures (theme missing, no crosshair-equivalent, shm/IO trouble) just
+/// leave `state.cursor_surface` as `None` — the picker still works, the
+/// pointer just keeps whatever shape it had on Enter.
+fn init_crosshair_cursor(state: &mut State, qh: &QueueHandle<State>) {
+    let theme_name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| DEFAULT_THEME.into());
+    let size = std::env::var("XCURSOR_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_SIZE);
+    let theme = xcursor::CursorTheme::load(&theme_name);
+
+    let Some(image) = load_crosshair_image(&theme, size) else {
+        return;
+    };
+
+    let stride = image.width as i32 * 4;
+    let buf_size = (stride as usize) * image.height as usize;
+    let Ok(tmp) = tempfile::tempfile() else {
+        return;
+    };
+    if tmp.set_len(buf_size as u64).is_err() {
+        return;
+    }
+    let Ok(mut mmap) = (unsafe { MmapMut::map_mut(&tmp) }) else {
+        return;
+    };
+    // xcursor's `pixels_rgba` is the file's byte order, which the X cursor
+    // format stores as ARGB — same memory layout wl_shm's Argb8888 expects
+    // on little-endian. Smithay uses this field the same way.
+    mmap.copy_from_slice(&image.pixels_rgba);
+    drop(mmap);
+
+    let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), buf_size as i32, qh, ());
+    let buffer: WlBuffer = pool.create_buffer(
+        0,
+        image.width as i32,
+        image.height as i32,
+        stride,
+        wl_shm::Format::Argb8888,
+        qh,
+        (),
+    );
+    pool.destroy();
+
+    let surface = state.compositor.create_surface(qh, ());
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, image.width as i32, image.height as i32);
+    surface.commit();
+    // The compositor owns the buffer for as long as it's bound to the
+    // surface; once we hand it over with attach() we can let go locally.
+    buffer.destroy();
+
+    state.cursor_surface = Some(surface);
+    state.cursor_hotspot = (image.xhot as i32, image.yhot as i32);
+}
+
+fn load_crosshair_image(
+    theme: &xcursor::CursorTheme,
+    target_size: u32,
+) -> Option<xcursor::parser::Image> {
+    use std::io::Read;
+    let path = CROSSHAIR_NAMES
+        .iter()
+        .find_map(|name| theme.load_icon(name))?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let frames = xcursor::parser::parse_xcursor(&bytes)?;
+    // Pick the frame whose nominal size is nearest the requested cursor
+    // size — the crosshair shouldn't animate, but if a theme ships
+    // multiple sizes we still want the closest match.
+    frames
+        .into_iter()
+        .min_by_key(|f| (target_size as i32 - f.size as i32).abs())
+}
+
 // ---- Dispatch glue -------------------------------------------------------
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
@@ -614,7 +723,7 @@ impl Dispatch<WlSeat, ()> for State {
 impl Dispatch<WlPointer, ()> for State {
     fn event(
         state: &mut Self,
-        _: &WlPointer,
+        pointer: &WlPointer,
         event: <WlPointer as Proxy>::Event,
         _: &(),
         _: &Connection,
@@ -622,6 +731,7 @@ impl Dispatch<WlPointer, ()> for State {
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
@@ -639,6 +749,14 @@ impl Dispatch<WlPointer, ()> for State {
                             state.drag_cur = (surface_x, surface_y);
                             state.outputs[sidx].dirty = true;
                         }
+                    }
+                    // Switch the cursor to the crosshair sprite for as
+                    // long as the pointer is over our overlay. The
+                    // compositor reverts it automatically once the
+                    // pointer leaves (no work needed on Leave).
+                    if let Some(cursor) = state.cursor_surface.as_ref() {
+                        let (hx, hy) = state.cursor_hotspot;
+                        pointer.set_cursor(serial, Some(cursor), hx, hy);
                     }
                 }
             }

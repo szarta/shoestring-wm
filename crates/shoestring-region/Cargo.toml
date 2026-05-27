@@ -24,4 +24,7 @@ libc = "0.2"
 # Keyboard: we only need Escape, but the keymap path mirrors the lock/menu.
 xkbcommon = { version = "0.9", features = ["wayland"] }
 
+# Crosshair cursor (same xcursor theme machinery the WM uses).
+xcursor = "0.3"
+
 anyhow = "1"
