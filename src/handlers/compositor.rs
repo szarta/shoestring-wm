@@ -28,7 +28,18 @@ impl CompositorHandler for ShoestringWm {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        // Two ClientData shapes carry per-client compositor state: our
+        // own ClientState (regular wayland clients) and smithay's
+        // XWaylandClientData (the Xwayland subprocess). Branch on which
+        // one the client was created with — panicking would take the
+        // whole compositor down on the first Xwayland commit.
+        if let Some(state) = client.get_data::<ClientState>() {
+            return &state.compositor_state;
+        }
+        if let Some(state) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &state.compositor_state;
+        }
+        panic!("client connected with unknown ClientData type");
     }
 
     fn commit(&mut self, surface: &WlSurface) {
