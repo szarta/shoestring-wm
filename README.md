@@ -5,10 +5,10 @@ A lightweight Wayland status bar for
 `wayland-client` — no Smithay, no GTK, no system bus, no fontconfig.
 
 Renders workspaces, the open-window list, the currently focused window,
-and a clock; attaches to the bottom edge of an output via
-`zwlr_layer_shell_v1`. Window data comes from
-`ext-foreign-toplevel-list-v1`; workspace and focus state come from
-shoestring-wm's IPC stream.
+a battery indicator (when one is detected), and a clock; attaches to
+the bottom edge of an output via `zwlr_layer_shell_v1`. Window data
+comes from `ext-foreign-toplevel-list-v1`; workspace and focus state
+come from shoestring-wm's IPC stream.
 
 ## Build & run
 
@@ -65,7 +65,18 @@ show_workspaces = true   # set false to hide the box cluster + active name
 format = "%a %b %d  %H:%M"   # strftime(3) pattern
 # format = "24h-short"        # alias for "%H:%M"
 # format = "iso"              # alias for "%Y-%m-%d %H:%M:%S"
+
+[battery]
+show               = true            # auto-hidden when no battery present
+format             = "{pct}%{sign}"  # {sign} is +/-/'' (charging/discharging/full)
+low_threshold      = 20              # turns orange at or below this
+critical_threshold = 10              # turns red at or below this
 ```
+
+Battery sources: Linux reads the first `/sys/class/power_supply/BAT*`
+entry; FreeBSD reads `hw.acpi.battery.{life,state,units}` via
+`sysctlbyname`. Other OSes (and BSDs without ACPI batteries) hide
+the indicator silently.
 
 Font resolution order: `[bar].font` → `$SHOESTRING_BAR_FONT` → built-in
 candidate paths.
