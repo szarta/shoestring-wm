@@ -477,6 +477,27 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::DispatchAction { action } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                // Decode the JSON Value into a real Action via shoestring-config's
+                // serde impl. Failures here are user-fixable (bad key, missing
+                // field) so the error string is surfaced verbatim.
+                let resp = match serde_json::from_value::<shoestring_config::Action>(action) {
+                    Ok(action) => {
+                        tracing::info!(?action, "dispatching action via ipc");
+                        state.dispatch_action(action);
+                        Response::Ok
+                    }
+                    Err(e) => Response::Error {
+                        message: format!("dispatch_action: malformed action: {e}"),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
         }
     }
 }

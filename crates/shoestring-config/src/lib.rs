@@ -656,6 +656,6 @@ count = 8
             cfg.workspaces.names.get("3").map(String::as_str),
             Some("chat")
         );
-        assert!(cfg.workspaces.names.get("2").is_none());
+        assert!(!cfg.workspaces.names.contains_key("2"));
     }
 }

@@ -30,6 +30,9 @@ struct Cli {
     cmd: Command,
 }
 
+// `RunCommand` happens to end with the enum's name; renaming would
+// change the user-facing CLI subcommand and IPC protocol, so allow it.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print the active workspace and total workspace count.
@@ -131,6 +134,20 @@ enum Command {
         #[arg(long, value_name = "X,Y,W,H", requires = "output")]
         region: Option<String>,
     },
+    /// Run a bind `Action` server-side as if a keybind had fired. Unlike
+    /// `key`, this does not need an external key chord to land on a
+    /// focused surface — Super+Shift+Q is consumed by the WM, but
+    /// `dispatch-action quit` fires the same Action::Quit path. Requires
+    /// the automation gate to be on.
+    ///
+    /// ACTION is either a bare kebab-case name for a no-arg action
+    /// (`quit`, `tile-left`, `maximize`, `reload-config`, `lock`, ...)
+    /// or a JSON object for parametric actions (`{"type":"focus-workspace",
+    /// "index":3}`).
+    DispatchAction {
+        /// Bare name (e.g. `quit`) or JSON object literal.
+        action: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -182,6 +199,9 @@ fn main() -> Result<()> {
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
         Command::FocusWindow { id } => Request::FocusWindow { id },
+        Command::DispatchAction { action } => Request::DispatchAction {
+            action: parse_action(&action)?,
+        },
     };
 
     let mut writer = stream.try_clone()?;
@@ -227,6 +247,18 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Expand a `dispatch-action` argument into the JSON Value the IPC
+/// expects. A bare kebab-case name like `quit` becomes `{"type":"quit"}`;
+/// anything starting with `{` is passed through as already-formed JSON.
+fn parse_action(s: &str) -> Result<serde_json::Value> {
+    let trimmed = s.trim();
+    if trimmed.starts_with('{') {
+        return serde_json::from_str(trimmed)
+            .with_context(|| format!("dispatch-action: not valid JSON: {trimmed}"));
+    }
+    Ok(serde_json::json!({ "type": trimmed }))
 }
 
 fn parse_region(s: &str) -> Result<ScreenshotRegion> {

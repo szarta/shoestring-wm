@@ -162,6 +162,29 @@ pub enum Request {
     /// is [`Response::Ok`] on success, [`Response::Error`] if no
     /// window matches.
     FocusWindow { id: String },
+    /// Run a named bind `Action` server-side, exactly as if a keybind
+    /// had fired. Unlike [`Request::InjectKey`] this does *not* route
+    /// through the focused surface — Super+Shift+Q won't fire because
+    /// the WM consumes the chord, but `dispatch_action {"type":"quit"}`
+    /// will. This is the canonical entry point for driving WM actions
+    /// from automation.
+    ///
+    /// `action` is a `shoestring_config::Action` serialised the same
+    /// way `[[bindings]]` entries in the config TOML are (i.e. the
+    /// JSON form of the same `#[serde(tag="type", rename_all="kebab-case")]`
+    /// enum). Carried as a raw JSON value so this crate doesn't have
+    /// to depend on `shoestring-config` and pull its dep tree into
+    /// every IPC client.
+    ///
+    /// Examples:
+    /// - `{"type":"quit"}`
+    /// - `{"type":"focus-workspace","index":3}`
+    /// - `{"type":"spawn","command":"alacritty","args":[]}`
+    ///
+    /// Gated by `set_automation`: returns [`Response::Error`] when the
+    /// runtime automation gate is off. Reply is [`Response::Ok`] on
+    /// success, [`Response::Error`] on malformed `action`.
+    DispatchAction { action: serde_json::Value },
 }
 
 /// Per-stream byte cap for [`Request::RunCommand`]. Keeps IPC frames
