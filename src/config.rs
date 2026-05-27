@@ -17,6 +17,8 @@ pub struct RawConfig {
     pub bar: BarSection,
     #[serde(default)]
     pub clock: ClockSection,
+    #[serde(default)]
+    pub battery: BatterySection,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -35,6 +37,15 @@ pub struct BarSection {
 #[serde(deny_unknown_fields)]
 pub struct ClockSection {
     pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatterySection {
+    pub show: Option<bool>,
+    pub format: Option<String>,
+    pub low_threshold: Option<u8>,
+    pub critical_threshold: Option<u8>,
 }
 
 /// Resolved, validated runtime config. All fields are non-optional — defaults
@@ -56,6 +67,20 @@ pub struct Config {
     /// suppressed and the window list slides to the left edge. Pairs with
     /// shoestring-wsindicator for users who prefer a popup-on-switch.
     pub show_workspaces: bool,
+    /// When `false`, the battery indicator is suppressed even if a
+    /// battery is detected. Default `true`: auto-detect + show if
+    /// present, hide silently otherwise.
+    pub battery_show: bool,
+    /// Format template with `{pct}` and `{sign}` placeholders. Default
+    /// `"{pct}%{sign}"` renders `"85%-"` while discharging.
+    pub battery_format: String,
+    /// Capacity at or below which the indicator switches to the
+    /// "low" color. Only applied when discharging / unknown.
+    pub battery_low_threshold: u8,
+    /// Capacity at or below which the indicator switches to the
+    /// "critical" color (also only when discharging / unknown). Must
+    /// be `<=` `battery_low_threshold`.
+    pub battery_critical_threshold: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +100,10 @@ impl Default for Config {
             font_size: 14.0,
             clock_format: "%a %b %d  %H:%M".to_string(),
             show_workspaces: true,
+            battery_show: true,
+            battery_format: "{pct}%{sign}".to_string(),
+            battery_low_threshold: 20,
+            battery_critical_threshold: 10,
         }
     }
 }
@@ -137,6 +166,31 @@ impl Config {
         }
         if let Some(b) = raw.bar.show_workspaces {
             cfg.show_workspaces = b;
+        }
+        if let Some(b) = raw.battery.show {
+            cfg.battery_show = b;
+        }
+        if let Some(f) = raw.battery.format {
+            cfg.battery_format = f;
+        }
+        if let Some(t) = raw.battery.low_threshold {
+            if t > 100 {
+                return Err(anyhow!("battery.low_threshold must be 0..=100"));
+            }
+            cfg.battery_low_threshold = t;
+        }
+        if let Some(t) = raw.battery.critical_threshold {
+            if t > 100 {
+                return Err(anyhow!("battery.critical_threshold must be 0..=100"));
+            }
+            cfg.battery_critical_threshold = t;
+        }
+        if cfg.battery_critical_threshold > cfg.battery_low_threshold {
+            return Err(anyhow!(
+                "battery.critical_threshold ({}) must be <= battery.low_threshold ({})",
+                cfg.battery_critical_threshold,
+                cfg.battery_low_threshold
+            ));
         }
         Ok(cfg)
     }
@@ -215,6 +269,24 @@ show_workspaces = true
 format      = \"%a %b %d  %H:%M\"
 # format    = \"24h-short\"   # alias for \"%H:%M\"
 # format    = \"iso\"         # alias for \"%Y-%m-%d %H:%M:%S\"
+
+[battery]
+# Show a battery indicator when a battery is detected. Auto-hidden on
+# systems with no battery (desktops, headless boxes, BSDs without
+# ACPI). Set to false to suppress entirely.
+show              = true
+
+# {pct} is the percent, {sign} is '+' (charging), '-' (discharging),
+# or empty (full / unknown).
+format            = \"{pct}%{sign}\"
+
+# Capacity (%) at or below which the indicator switches to an orange
+# warning color. Only applied while discharging.
+low_threshold     = 20
+
+# Capacity (%) at or below which the indicator switches to red.
+# Must be <= low_threshold.
+critical_threshold = 10
 ";
 
 /// Accepts `#RGB`, `#RRGGBB`, `#AARRGGBB`, and `0x`-prefixed hex. Returns
@@ -267,6 +339,53 @@ mod tests {
         assert_eq!(c.position, Position::Bottom);
         assert_eq!(c.clock_format, "%a %b %d  %H:%M");
         assert!(c.show_workspaces);
+        assert!(c.battery_show);
+        assert_eq!(c.battery_format, "{pct}%{sign}");
+        assert_eq!(c.battery_low_threshold, 20);
+        assert_eq!(c.battery_critical_threshold, 10);
+    }
+
+    #[test]
+    fn battery_section_overrides() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+            [battery]
+            show = false
+            format = "BAT {pct}%"
+            low_threshold = 30
+            critical_threshold = 15
+        "#,
+        )
+        .unwrap();
+        let c = Config::from_raw(raw).unwrap();
+        assert!(!c.battery_show);
+        assert_eq!(c.battery_format, "BAT {pct}%");
+        assert_eq!(c.battery_low_threshold, 30);
+        assert_eq!(c.battery_critical_threshold, 15);
+    }
+
+    #[test]
+    fn battery_critical_must_not_exceed_low() {
+        let raw: RawConfig = toml::from_str(
+            r#"[battery]
+            low_threshold = 10
+            critical_threshold = 20
+        "#,
+        )
+        .unwrap();
+        let err = Config::from_raw(raw).unwrap_err().to_string();
+        assert!(err.contains("critical_threshold"));
+    }
+
+    #[test]
+    fn battery_threshold_out_of_range_rejected() {
+        let raw: RawConfig = toml::from_str(
+            r#"[battery]
+            low_threshold = 200
+        "#,
+        )
+        .unwrap();
+        assert!(Config::from_raw(raw).is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@
 // in positional form — wrapping them in a struct buys nothing readable.
 #![allow(clippy::too_many_arguments)]
 
+mod battery;
 mod config;
 mod ipc_client;
 
@@ -60,6 +61,10 @@ const DIM: u32 = 0xFF_55_55_55;
 /// Accent: focused workspace box and focused window's highlight backdrop.
 /// Not currently user-configurable.
 const ACCENT: u32 = 0xFF_55_77_BB;
+/// Battery indicator color at or below `battery_low_threshold`. Orange.
+const BAT_LOW: u32 = 0xFF_FF_AA_55;
+/// Battery indicator color at or below `battery_critical_threshold`. Red.
+const BAT_CRITICAL: u32 = 0xFF_FF_55_55;
 /// Horizontal text inset from the bar edges.
 const PADDING_X: i32 = 8;
 
@@ -162,6 +167,16 @@ struct State {
     /// the last [`draw_window_list`] pass. Hit-tested by the pointer
     /// button handler; cleared and rebuilt on every redraw.
     window_entry_rects: Vec<(i32, i32, String)>,
+    /// Auto-detected battery source. `None` on systems with no
+    /// recognised battery — the indicator is hidden entirely in that
+    /// case so the bar layout doesn't reserve dead space.
+    battery_source: Option<Box<dyn battery::BatterySource>>,
+    /// Most recent reading. `None` until the first successful poll
+    /// (or if the source temporarily fails to read).
+    battery_reading: Option<battery::BatteryReading>,
+    /// Wall-clock time of the last battery poll. Polling cadence is
+    /// 1s, matching the existing event-loop tick — no extra fds.
+    last_battery_poll: SystemTime,
     running: bool,
 }
 
@@ -272,6 +287,21 @@ fn main() -> Result<()> {
         false
     });
 
+    // Detect the battery source once at startup. If `battery_show` is
+    // off, skip detection entirely so we don't even open the sysfs
+    // dir on platforms where the user has opted out.
+    let battery_source = if cfg.battery_show {
+        battery::auto_detect()
+    } else {
+        None
+    };
+    if battery_source.is_some() {
+        tracing::info!("battery indicator: source detected");
+    } else if cfg.battery_show {
+        tracing::debug!("battery indicator: no battery detected; hidden");
+    }
+    let battery_reading = battery_source.as_ref().and_then(|s| s.read());
+
     let mut state = State {
         cfg,
         compositor,
@@ -294,6 +324,9 @@ fn main() -> Result<()> {
         pointer: None,
         pointer_x: None,
         window_entry_rects: Vec::new(),
+        battery_source,
+        battery_reading,
+        last_battery_poll: SystemTime::now(),
         running: true,
     };
 
@@ -434,6 +467,27 @@ fn event_loop(
         if state.last_clock != now_clock {
             state.last_clock = now_clock;
             state.dirty = true;
+        }
+
+        // Re-poll the battery at most once per second. The poll() call
+        // below caps at 1000ms, so this naturally rate-limits to ~1Hz
+        // without any timer plumbing. Only mark dirty when the reading
+        // actually changed — otherwise a static 85% battery would
+        // force a full redraw every tick.
+        if let Some(src) = state.battery_source.as_ref() {
+            let due = state
+                .last_battery_poll
+                .elapsed()
+                .map(|e| e.as_secs() >= 1)
+                .unwrap_or(true);
+            if due {
+                state.last_battery_poll = SystemTime::now();
+                let new_reading = src.read();
+                if state.battery_reading != new_reading {
+                    state.battery_reading = new_reading;
+                    state.dirty = true;
+                }
+            }
         }
         if state.dirty {
             if let Some((w, h)) = state.size {
@@ -662,6 +716,31 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         None
     };
 
+    // Battery indicator: drawn immediately left of the AUTO chip (or
+    // left of the clock when AUTO is hidden). Skipped when no source
+    // was detected or `battery_show = false` (which short-circuits
+    // detection up in main).
+    let battery_left = match (state.battery_source.as_ref(), state.battery_reading) {
+        (Some(_), Some(reading)) => {
+            const BAT_GAP: i32 = 8;
+            let text = battery::format_reading(&reading, &state.cfg.battery_format);
+            let text_w = measure_text(&state.font, font_px, &text);
+            let right_anchor = auto_chip_left.unwrap_or(clock_x);
+            let bat_x = right_anchor - BAT_GAP - text_w;
+            let color = battery::pick_color(
+                &reading,
+                fg,
+                BAT_LOW,
+                state.cfg.battery_low_threshold,
+                BAT_CRITICAL,
+                state.cfg.battery_critical_threshold,
+            );
+            draw_text(&mut mmap, w, h, &state.font, font_px, bat_x, &text, color);
+            Some(bat_x)
+        }
+        _ => None,
+    };
+
     // Far left: workspace cluster. Active box in accent color, the rest
     // dimmed. Suppressed entirely when `cfg.show_workspaces` is false,
     // in which case the window list slides to the left edge.
@@ -714,7 +793,7 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // ordered by FT identifier (stable across renders). When no window
     // exists on the active workspace the slot stays empty — `--version`
     // is the supported channel for reading the build version.
-    let list_end_x = auto_chip_left.unwrap_or(clock_x) - PADDING_X;
+    let list_end_x = battery_left.or(auto_chip_left).unwrap_or(clock_x) - PADDING_X;
     let list_budget = (list_end_x - list_start_x).max(0);
     // draw_window_list also fills `entry_rects`, which the pointer
     // button handler reads on the next click to hit-test entries.
