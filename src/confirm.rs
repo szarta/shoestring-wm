@@ -6,10 +6,13 @@
 //! `0` means the user pressed Enter and we run the wrapped action,
 //! anything else means cancel/error and we do nothing.
 //!
-//! The helper's stdout is piped only so we have an fd that EOFs on exit
-//! — `shoestring-confirm` itself doesn't print anything there. This
-//! avoids pulling in `pidfd_open` while still giving us non-blocking
-//! "child exited" notification on calloop's main thread.
+//! The helper writes its decision as a single ASCII digit on stdout
+//! right before exiting (`0` = accept, anything else = cancel/error).
+//! We read that byte instead of calling `waitpid` because the WM
+//! installs `SA_NOCLDWAIT` (see `install_sigchld_autoreap` in main.rs)
+//! to keep spawned helpers from zombifying — that auto-reap makes
+//! `Child::wait` fail with `ECHILD`, so the exit code is unreachable.
+//! Pipe EOF still gives us the "helper exited" notification.
 //!
 //! Only one confirm dialog is active at a time. A second
 //! `confirm_action` call while one is pending is dropped — this keeps
@@ -96,7 +99,11 @@ impl ShoestringWm {
         });
 
         let source = Generic::new(StdoutFd(stdout), Interest::READ, Mode::Level);
-        let insert = self.loop_handle.insert_source(source, |_, fd, state| {
+        // The helper writes one ASCII digit (followed by a newline)
+        // right before exit. We remember the most recent non-newline
+        // byte seen across reads — that's our decision.
+        let mut last_digit: Option<u8> = None;
+        let insert = self.loop_handle.insert_source(source, move |_, fd, state| {
             // SAFETY: see remote_command::register_pipe — calloop owns
             // the Generic<StdoutFd>; we only borrow during dispatch.
             let fd = unsafe { fd.get_mut() };
@@ -104,19 +111,22 @@ impl ShoestringWm {
             loop {
                 match fd.0.read(&mut buf) {
                     Ok(0) => {
-                        state.finalize_confirm();
+                        let accepted = last_digit == Some(b'0');
+                        state.finalize_confirm(accepted);
                         return Ok(PostAction::Remove);
                     }
-                    // Helper isn't supposed to print to stdout, but if
-                    // it does, drain and ignore — only EOF + exit code
-                    // matter.
-                    Ok(_) => continue,
+                    Ok(n) => {
+                        if let Some(&b) = buf[..n].iter().rev().find(|&&b| b != b'\n') {
+                            last_digit = Some(b);
+                        }
+                        continue;
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         return Ok(PostAction::Continue);
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "confirm pipe read failed");
-                        state.finalize_confirm();
+                        state.finalize_confirm(false);
                         return Ok(PostAction::Remove);
                     }
                 }
@@ -141,28 +151,26 @@ impl ShoestringWm {
         }
     }
 
-    /// Helper exited (or its pipe errored out). Reap and dispatch the
-    /// `on_accept` callback if exit code is 0.
-    fn finalize_confirm(&mut self) {
+    /// Helper exited (or its pipe errored out). Dispatch the
+    /// `on_accept` callback if the helper signalled accept on stdout.
+    ///
+    /// `wait()` here is best-effort: SA_NOCLDWAIT auto-reaps the
+    /// helper before we get here, so the call almost always returns
+    /// `ECHILD`. We don't rely on it.
+    fn finalize_confirm(&mut self, accepted: bool) {
         let Some(mut pending) = self.pending_confirm.take() else {
             return;
         };
         if let Some(t) = pending.stdout_token.take() {
             self.loop_handle.remove(t);
         }
-        let exit_code = match pending.child.wait() {
-            Ok(status) => status.code().unwrap_or(-1),
-            Err(e) => {
-                tracing::warn!(error = %e, "wait shoestring-confirm");
-                return;
-            }
-        };
-        if exit_code == 0 {
+        let _ = pending.child.wait();
+        if accepted {
             if let Some(cb) = pending.on_accept.take() {
                 cb(self);
             }
         } else {
-            tracing::debug!(exit_code, "confirm cancelled");
+            tracing::debug!("confirm cancelled");
         }
     }
 }

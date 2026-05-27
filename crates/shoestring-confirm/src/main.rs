@@ -115,13 +115,20 @@ struct State {
 }
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(code) => ExitCode::from(code),
+    let code = match run() {
+        Ok(code) => code,
         Err(e) => {
             eprintln!("shoestring-confirm: {e:#}");
-            ExitCode::from(EXIT_ERROR)
+            EXIT_ERROR
         }
-    }
+    };
+    // Echo the decision on stdout before exiting so callers that
+    // can't use waitpid (e.g. a WM that installs SA_NOCLDWAIT and
+    // can't recover the exit status) still see accept vs cancel as
+    // a single ASCII digit. The exit code remains authoritative for
+    // shell callers; stdout is purely a side channel.
+    println!("{code}");
+    ExitCode::from(code)
 }
 
 fn parse_args() -> Result<String> {
