@@ -34,3 +34,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# poll(2) for the frame-paced event loop. Already transitively in
+# our tree via memmap2 / xkbcommon, so no new external crate.
+libc = "0.2"

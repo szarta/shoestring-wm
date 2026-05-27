@@ -19,12 +19,15 @@
 //! desktop. Spawned by shoestring-wm via the `Action::Lock` /
 //! `shoestring-ctl lock` paths.
 
+mod maze;
+
 use std::{
     fs,
     io::Write,
-    os::fd::AsFd,
+    os::fd::{AsFd, AsRawFd},
     path::{Path, PathBuf},
     process::ExitCode,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -52,6 +55,146 @@ use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_v1::{self, ExtSessionLockV1},
 };
 use xkbcommon::xkb;
+
+// Color palette taken from xscreensaver's maze.c defaults (lines
+// 1361-1376): black background, ~white walls, #00FF00 live path,
+// #880000 dead/backtracked path. Argb8888 with opaque alpha so the
+// compositor doesn't blend the lock surface with anything below.
+const COLOR_BG: u32 = 0xFF00_0000;
+const COLOR_WALL: u32 = 0xFFE0_E0E0;
+const COLOR_LIVE: u32 = 0xFF00_FF00;
+const COLOR_DEAD: u32 = 0xFF88_0000;
+/// Solid backdrop drawn behind the prompt block so the text stays
+/// legible over the busy maze. Dark gray, opaque.
+const COLOR_PROMPT_BG: u32 = 0xFF20_2020;
+
+/// Animation tick interval. ~30Hz keeps CPU light while staying
+/// visually smooth for a screensaver.
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Solver steps to advance per frame. Yields ~90 steps/sec — close
+/// to xscreensaver's default --solve-delay=10000 µs (≈100/sec).
+const STEPS_PER_FRAME: u32 = 3;
+/// Pause showing the freshly-generated maze before the solver starts.
+const PRE_SOLVE_DELAY: Duration = Duration::from_millis(800);
+/// Pause showing the fully-solved maze before regenerating.
+const POST_SOLVE_DELAY: Duration = Duration::from_millis(1800);
+/// Target pixels per maze cell. Adjusted to whatever divides the
+/// output cleanly enough to fit at least [`MIN_CELLS`] in each axis.
+const TARGET_CELL_PX: u32 = 24;
+const MIN_CELL_PX: u32 = 12;
+const MIN_CELLS: u16 = 12;
+
+/// Per-output animation state: a freshly-generated maze, a solver
+/// chewing through it, and a small phase machine so we linger briefly
+/// on each new maze before/after solving (matches xscreensaver's
+/// `--pre-delay` / `--post-delay` knobs).
+struct Animation {
+    /// Logical-pixel size of one cell. Picked at construction to
+    /// divide the output evenly enough to fit [`MIN_CELLS`] in each
+    /// axis while staying close to [`TARGET_CELL_PX`].
+    cell_px: u32,
+    /// Top-left offset of the maze inside the output, in logical
+    /// pixels. Centers the maze when `cell_px * dims` doesn't tile
+    /// the surface exactly.
+    offset: (i32, i32),
+    maze: maze::Maze,
+    solver: maze::Solver,
+    phase: Phase,
+    rng: maze::Rng,
+}
+
+#[derive(Debug)]
+enum Phase {
+    /// Showing the freshly-generated maze, untouched, before the
+    /// solver starts.
+    PreSolve { until: Instant },
+    /// Solver running. Steps advance per frame in the main loop.
+    Solving,
+    /// Solver finished. Maze stays on screen until `until`, then we
+    /// regenerate.
+    PostSolve { until: Instant },
+}
+
+impl Animation {
+    fn new(surface_w: u32, surface_h: u32) -> Self {
+        let cell_px = pick_cell_size(surface_w, surface_h);
+        let cols = (surface_w / cell_px).max(MIN_CELLS as u32) as u16;
+        let rows = (surface_h / cell_px).max(MIN_CELLS as u32) as u16;
+        let offset = (
+            ((surface_w as i32) - (cols as i32 * cell_px as i32)) / 2,
+            ((surface_h as i32) - (rows as i32 * cell_px as i32)) / 2,
+        );
+        let mut rng = maze::Rng::from_clock();
+        let maze = maze::Maze::generate_dfs(cols, rows, &mut rng);
+        let solver = maze::Solver::new(&maze, (0, 0), (cols - 1, rows - 1), true);
+        Self {
+            cell_px,
+            offset,
+            maze,
+            solver,
+            phase: Phase::PreSolve {
+                until: Instant::now() + PRE_SOLVE_DELAY,
+            },
+            rng,
+        }
+    }
+
+    /// Tear down + rebuild the maze. Reuses the same cell size /
+    /// offset (output didn't resize).
+    fn regenerate(&mut self) {
+        let cols = self.maze.width();
+        let rows = self.maze.height();
+        self.maze = maze::Maze::generate_dfs(cols, rows, &mut self.rng);
+        self.solver = maze::Solver::new(&self.maze, (0, 0), (cols - 1, rows - 1), true);
+        self.phase = Phase::PreSolve {
+            until: Instant::now() + PRE_SOLVE_DELAY,
+        };
+    }
+
+    /// Advance the animation. Returns `true` if anything visible
+    /// changed (caller should redraw).
+    fn tick(&mut self) -> bool {
+        let now = Instant::now();
+        match self.phase {
+            Phase::PreSolve { until } => {
+                if now >= until {
+                    self.phase = Phase::Solving;
+                }
+                false
+            }
+            Phase::Solving => {
+                let mut dirty = false;
+                for _ in 0..STEPS_PER_FRAME {
+                    if self.solver.step(&self.maze).is_some() {
+                        dirty = true;
+                    }
+                    if self.solver.finished() {
+                        self.phase = Phase::PostSolve {
+                            until: now + POST_SOLVE_DELAY,
+                        };
+                        break;
+                    }
+                }
+                dirty
+            }
+            Phase::PostSolve { until } => {
+                if now >= until {
+                    self.regenerate();
+                    return true;
+                }
+                false
+            }
+        }
+    }
+}
+
+/// Pick a cell size that divides the surface into at least
+/// [`MIN_CELLS`] in each axis, preferring [`TARGET_CELL_PX`].
+fn pick_cell_size(surface_w: u32, surface_h: u32) -> u32 {
+    let max_by_w = (surface_w / MIN_CELLS as u32).max(MIN_CELL_PX);
+    let max_by_h = (surface_h / MIN_CELLS as u32).max(MIN_CELL_PX);
+    TARGET_CELL_PX.min(max_by_w).min(max_by_h).max(MIN_CELL_PX)
+}
 
 const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -96,6 +239,9 @@ struct OutputEntry {
     /// True once we've drawn a buffer matching the latest configure.
     #[allow(dead_code)]
     drawn: bool,
+    /// Per-output screensaver state. Built lazily on first
+    /// configure (need the size), torn down + rebuilt on resize.
+    anim: Option<Animation>,
 }
 
 struct State {
@@ -185,6 +331,7 @@ fn run(cli: Cli) -> Result<()> {
                     lock_surface: None,
                     size: None,
                     drawn: false,
+                    anim: None,
                 }
             })
             .collect()
@@ -220,15 +367,84 @@ fn run(cli: Cli) -> Result<()> {
         create_lock_surface(&mut state, &qh, i);
     }
 
+    // Frame-paced event loop. Wayland events are dispatched whenever
+    // the fd is readable; between events we sleep up to
+    // FRAME_INTERVAL, then tick each output's animation. The same
+    // poll(2) pattern shoestring-bar uses — no calloop dep needed.
+    let mut last_frame = Instant::now();
     while !state.finished {
+        conn.flush().context("flush wayland")?;
+
+        let timeout_ms = {
+            let elapsed = last_frame.elapsed();
+            if elapsed >= FRAME_INTERVAL {
+                0
+            } else {
+                (FRAME_INTERVAL - elapsed).as_millis() as i32
+            }
+        };
+
+        if let Some(guard) = conn.prepare_read() {
+            let fd = guard.connection_fd().as_raw_fd();
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let n = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
+            }
+            if n > 0 && pfd.revents & libc::POLLIN != 0 {
+                if let Err(e) = guard.read() {
+                    // WouldBlock can fire if wayland-rs already
+                    // drained the fd inside prepare_read.
+                    if !matches!(
+                        &e,
+                        wayland_client::backend::WaylandError::Io(io)
+                            if io.kind() == std::io::ErrorKind::WouldBlock
+                    ) {
+                        tracing::warn!(error = ?e, "wayland read");
+                    }
+                }
+            } else {
+                drop(guard);
+            }
+        }
         queue
-            .blocking_dispatch(&mut state)
+            .dispatch_pending(&mut state)
             .context("wayland dispatch")?;
+
+        if last_frame.elapsed() >= FRAME_INTERVAL {
+            last_frame = Instant::now();
+            tick_animations(&mut state, &qh);
+        }
     }
     // Final roundtrip so the unlock_and_destroy actually reaches the
     // compositor before we exit and the connection is torn down.
     let _ = conn.roundtrip();
     Ok(())
+}
+
+/// Advance every output's screensaver animation and redraw the ones
+/// that report dirty. Called once per frame.
+fn tick_animations(state: &mut State, qh: &QueueHandle<State>) {
+    for i in 0..state.outputs.len() {
+        let dirty = state.outputs[i]
+            .anim
+            .as_mut()
+            .map(|a| a.tick())
+            .unwrap_or(false);
+        if dirty && state.outputs[i].size.is_some() {
+            if let Err(e) = redraw_output(state, qh, i) {
+                tracing::warn!(idx = i, error = %e, "redraw failed");
+            }
+        }
+    }
 }
 
 fn create_lock_surface(state: &mut State, qh: &QueueHandle<State>, idx: usize) {
@@ -394,8 +610,18 @@ impl Dispatch<ExtSessionLockSurfaceV1, OutputSurfaceData> for State {
             if data.idx >= state.outputs.len() {
                 return;
             }
-            state.outputs[data.idx].size = Some((width, height));
-            state.outputs[data.idx].drawn = false;
+            let entry = &mut state.outputs[data.idx];
+            let prev = entry.size;
+            entry.size = Some((width, height));
+            entry.drawn = false;
+            // (Re)build the animation on first configure or genuine
+            // resize. Same-size reconfigures preserve the running
+            // solver so the maze doesn't restart on each focus
+            // change / mode flap.
+            let need_rebuild = entry.anim.is_none() || prev != Some((width, height));
+            if need_rebuild {
+                entry.anim = Some(Animation::new(width, height));
+            }
             if let Err(e) = redraw_output(state, qh, data.idx) {
                 tracing::warn!(error = %e, "redraw failed");
             }
@@ -629,24 +855,36 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
     let size = (stride as usize) * h as usize;
     let mut tmp = tempfile::tempfile()?;
     tmp.set_len(size as u64)?;
-    // Pre-fill so a peek before our mmap stamp still shows black.
+    // Pre-fill so a peek before our mmap stamp still shows the bg.
     {
-        let zero_row = vec![0u8; stride as usize];
+        let mut row = vec![0u8; stride as usize];
+        let bg = COLOR_BG.to_ne_bytes();
+        for px in row.chunks_exact_mut(4) {
+            px.copy_from_slice(&bg);
+        }
         for _ in 0..h {
-            tmp.write_all(&zero_row)?;
+            tmp.write_all(&row)?;
         }
     }
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
-    fill_black(&mut mmap, w, h);
+    fill_solid(&mut mmap, w, h, COLOR_BG);
 
+    // Maze underlay. Drawn first so the prompt overlay below
+    // composites on top.
+    if let Some(anim) = entry.anim.as_ref() {
+        draw_maze(&mut mmap, w, h, anim);
+    }
+
+    // Prompt overlay: centered 3-line block with a solid backdrop
+    // so the text stays readable over the busy maze. Same text
+    // geometry as the pre-screensaver version; only the backdrop
+    // is new.
     let title = format!("{} · locked", state.hostname);
     let masked: String = "•".repeat(state.password.chars().count());
     let prompt = format!("Password: {masked}");
-    let status = &state.status;
     let font_px = state.font_size;
-    let lines = [title.as_str(), prompt.as_str(), status.as_str()];
+    let lines = [title.as_str(), prompt.as_str(), state.status.as_str()];
 
-    // Vertical layout: center the block of (up to 3) lines on the output.
     let line_metrics =
         state
             .font
@@ -659,15 +897,27 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
             });
     let line_h = (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).max(font_px);
     let total_h = line_h * lines.len() as f32;
-    let top = ((h as f32 - total_h) / 2.0).round() as i32;
+    let max_text_w = lines
+        .iter()
+        .map(|l| measure_text(&state.font, font_px, l))
+        .max()
+        .unwrap_or(0);
+    let pad_x = (font_px * 1.5).round() as i32;
+    let pad_y = (font_px * 0.8).round() as i32;
+    let box_w = max_text_w + pad_x * 2;
+    let box_h = total_h.round() as i32 + pad_y * 2;
+    let box_x = (w as i32 - box_w) / 2;
+    let box_y = ((h as f32 - total_h) / 2.0).round() as i32 - pad_y;
+    fill_rect(&mut mmap, w, h, box_x, box_y, box_w, box_h, COLOR_PROMPT_BG);
 
+    let text_top = box_y + pad_y;
     for (i, line) in lines.iter().enumerate() {
         if line.is_empty() {
             continue;
         }
         let text_w = measure_text(&state.font, font_px, line);
-        let x = ((w as i32 - text_w) / 2).max(0);
-        let baseline_y = top + (i as f32 * line_h + line_metrics.ascent).round() as i32;
+        let x = box_x + (box_w - text_w) / 2;
+        let baseline_y = text_top + (i as f32 * line_h + line_metrics.ascent).round() as i32;
         draw_text(
             &mut mmap,
             w,
@@ -702,17 +952,114 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
     Ok(())
 }
 
-fn fill_black(mmap: &mut MmapMut, w: u32, h: u32) {
-    let stride = w as usize * 4;
-    let row = vec![0u8; stride];
-    // Argb8888 with alpha=0xFF so the compositor doesn't blend the lock.
-    let mut row_opaque = row.clone();
-    for px in row_opaque.chunks_exact_mut(4) {
-        px[3] = 0xFF;
+/// Render the current state of `anim` into the buffer. Visited
+/// cells go down first (live green / dead red), inset by `wp`
+/// on every side so the wall pass that follows ends up with the
+/// xscreensaver-style black border on both sides of every line.
+/// Open doorways between two visited cells get a small color bridge
+/// across the wall plane so the trail reads as continuous.
+fn draw_maze(mmap: &mut MmapMut, w: u32, h: u32, anim: &Animation) {
+    let cs = anim.cell_px as i32;
+    let (ox, oy) = anim.offset;
+    let cols = anim.maze.width();
+    let rows = anim.maze.height();
+    // Wall thickness scales with cell size so the look stays
+    // proportional on hi-dpi displays.
+    let wp = ((anim.cell_px / 12).max(1)) as i32;
+    let inner = cs - 2 * wp;
+
+    let color_of = |x: u16, y: u16| -> Option<u32> {
+        match anim.solver.cell_state(x, y) {
+            maze::CellState::Untouched => None,
+            maze::CellState::Live => Some(COLOR_LIVE),
+            maze::CellState::Dead => Some(COLOR_DEAD),
+        }
+    };
+
+    for y in 0..rows {
+        for x in 0..cols {
+            let Some(color) = color_of(x, y) else {
+                continue;
+            };
+            let px = ox + x as i32 * cs;
+            let py = oy + y as i32 * cs;
+            if inner > 0 {
+                fill_rect(mmap, w, h, px + wp, py + wp, inner, inner, color);
+            }
+            // Bridge the wall gap toward each visited neighbour we
+            // share an open doorway with. N/W per cell is enough —
+            // S/E end up drawn by the neighbour's pass.
+            let walls = anim.maze.walls(x, y);
+            if walls & maze::WALL_N == 0 && y > 0 && color_of(x, y - 1).is_some() && inner > 0 {
+                fill_rect(mmap, w, h, px + wp, py, inner, wp, color);
+            }
+            if walls & maze::WALL_W == 0 && x > 0 && color_of(x - 1, y).is_some() && inner > 0 {
+                fill_rect(mmap, w, h, px, py + wp, wp, inner, color);
+            }
+        }
     }
-    for y in 0..h as usize {
-        let off = y * stride;
-        mmap[off..off + stride].copy_from_slice(&row_opaque);
+
+    // Walls. N + W per cell covers every interior edge exactly once;
+    // the S row + E column passes finish the outer border.
+    for y in 0..rows {
+        for x in 0..cols {
+            let walls = anim.maze.walls(x, y);
+            let px = ox + x as i32 * cs;
+            let py = oy + y as i32 * cs;
+            if walls & maze::WALL_N != 0 {
+                fill_rect(mmap, w, h, px, py, cs, wp, COLOR_WALL);
+            }
+            if walls & maze::WALL_W != 0 {
+                fill_rect(mmap, w, h, px, py, wp, cs, COLOR_WALL);
+            }
+        }
+    }
+    let bottom_y = oy + rows as i32 * cs - wp;
+    for x in 0..cols {
+        let walls = anim.maze.walls(x, rows - 1);
+        if walls & maze::WALL_S != 0 {
+            fill_rect(mmap, w, h, ox + x as i32 * cs, bottom_y, cs, wp, COLOR_WALL);
+        }
+    }
+    let right_x = ox + cols as i32 * cs - wp;
+    for y in 0..rows {
+        let walls = anim.maze.walls(cols - 1, y);
+        if walls & maze::WALL_E != 0 {
+            fill_rect(mmap, w, h, right_x, oy + y as i32 * cs, wp, cs, COLOR_WALL);
+        }
+    }
+}
+
+fn fill_solid(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
+    fill_rect(mmap, w, h, 0, 0, w as i32, h as i32, color);
+}
+
+#[allow(clippy::too_many_arguments)] // positional (mmap,dst_w,dst_h,x,y,w,h,color) reads cleanly
+fn fill_rect(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let x0 = x.max(0) as u32;
+    let y0 = y.max(0) as u32;
+    let x1 = (x + w).max(0).min(dst_w as i32) as u32;
+    let y1 = (y + h).max(0).min(dst_h as i32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let stride = dst_w as usize * 4;
+    let row: Vec<u8> = color.to_ne_bytes().repeat((x1 - x0) as usize);
+    for yy in y0..y1 {
+        let off = yy as usize * stride + x0 as usize * 4;
+        mmap[off..off + row.len()].copy_from_slice(&row);
     }
 }
 

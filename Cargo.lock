@@ -1932,6 +1932,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fontdue",
+ "libc",
  "memmap2",
  "pam-client2",
  "tempfile",
