@@ -91,7 +91,12 @@ impl DispatchOutcome {
     }
 }
 
-pub fn dispatch(call: &MarshalledMessage, queue: &mut Queue, now: Instant) -> DispatchOutcome {
+pub fn dispatch(
+    call: &MarshalledMessage,
+    queue: &mut Queue,
+    default_timeout_ms: u32,
+    now: Instant,
+) -> DispatchOutcome {
     if call.typ != MessageType::Call {
         return DispatchOutcome::empty();
     }
@@ -113,7 +118,7 @@ pub fn dispatch(call: &MarshalledMessage, queue: &mut Queue, now: Instant) -> Di
         (Some(INTERFACE) | None, "GetServerInformation") => {
             DispatchOutcome::reply_only(get_server_information(call))
         }
-        (Some(INTERFACE) | None, "Notify") => notify(call, queue, now),
+        (Some(INTERFACE) | None, "Notify") => notify(call, queue, default_timeout_ms, now),
         (Some(INTERFACE) | None, "CloseNotification") => close_notification(call, queue),
         (Some(INTROSPECTABLE_INTERFACE) | None, "Introspect") => {
             DispatchOutcome::reply_only(introspect(call))
@@ -147,7 +152,12 @@ fn introspect(call: &MarshalledMessage) -> MarshalledMessage {
     reply
 }
 
-fn notify(call: &MarshalledMessage, queue: &mut Queue, now: Instant) -> DispatchOutcome {
+fn notify(
+    call: &MarshalledMessage,
+    queue: &mut Queue,
+    default_timeout_ms: u32,
+    now: Instant,
+) -> DispatchOutcome {
     let args = match parse_notify(call) {
         Ok(a) => a,
         Err(e) => {
@@ -164,7 +174,7 @@ fn notify(call: &MarshalledMessage, queue: &mut Queue, now: Instant) -> Dispatch
         replaces = args.replaces_id,
         "Notify"
     );
-    let id = queue.notify(args, now);
+    let id = queue.notify(args, default_timeout_ms, now);
     let mut reply = call.dynheader.make_response();
     reply.body.push_param(id).expect("push id");
     DispatchOutcome::reply_only(reply)

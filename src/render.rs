@@ -54,6 +54,10 @@ pub fn layout(
     }
 }
 
+/// Width of the left-edge accent stripe drawn when `accent` is `Some`.
+/// Chosen to be visible without eating into the text column.
+const ACCENT_STRIPE_PX: u32 = 3;
+
 pub fn paint(
     mmap: &mut MmapMut,
     font: &Font,
@@ -63,8 +67,21 @@ pub fn paint(
     body_size: f32,
     background: u32,
     foreground: u32,
+    accent: Option<u32>,
 ) {
     fill_bg(mmap, layout.width, layout.height, background);
+    if let Some(color) = accent {
+        fill_rect(
+            mmap,
+            layout.width,
+            layout.height,
+            0,
+            0,
+            ACCENT_STRIPE_PX,
+            layout.height,
+            color,
+        );
+    }
 
     let summary_h = line_height(font, summary_size);
     let body_h = line_height(font, body_size);
@@ -225,6 +242,34 @@ fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
     for y in 0..h as usize {
         let off = y * stride;
         mmap[off..off + stride].copy_from_slice(&row);
+    }
+}
+
+/// Solid-color rectangle clamped to the buffer. Used for the urgency
+/// accent stripe.
+fn fill_rect(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    color: u32,
+) {
+    let bytes = color.to_ne_bytes();
+    let stride = dst_w as usize * 4;
+    let x0 = x.max(0) as usize;
+    let x1 = (x + w as i32).min(dst_w as i32).max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let y1 = (y + h as i32).min(dst_h as i32).max(0) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let row: Vec<u8> = bytes.repeat(x1 - x0);
+    for yy in y0..y1 {
+        let off = yy * stride + x0 * 4;
+        mmap[off..off + row.len()].copy_from_slice(&row);
     }
 }
 

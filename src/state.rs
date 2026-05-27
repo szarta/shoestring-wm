@@ -5,9 +5,6 @@
 
 use std::time::{Duration, Instant};
 
-/// Default expire_timeout when the client passes -1.
-const DEFAULT_EXPIRE_MS: u32 = 5_000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Urgency {
     Low,
@@ -80,8 +77,12 @@ impl Queue {
     /// Add a new notification, or replace an existing one when
     /// `replaces_id` is non-zero and matches a live entry. Returns the
     /// assigned id.
-    pub fn notify(&mut self, args: NotifyArgs, now: Instant) -> u32 {
-        let expires_at = compute_expiry(args.urgency, args.expire_timeout, now);
+    ///
+    /// `default_timeout_ms` is the fallback applied when the sender
+    /// passes `expire_timeout = -1` (the FDO spec's "server default"
+    /// sentinel). Sourced from `Config::default_timeout_ms`.
+    pub fn notify(&mut self, args: NotifyArgs, default_timeout_ms: u32, now: Instant) -> u32 {
+        let expires_at = compute_expiry(args.urgency, args.expire_timeout, default_timeout_ms, now);
 
         if args.replaces_id != 0 {
             if let Some(slot) = self.items.iter_mut().find(|n| n.id == args.replaces_id) {
@@ -159,13 +160,18 @@ impl Queue {
     }
 }
 
-fn compute_expiry(urgency: Urgency, expire_timeout: i32, now: Instant) -> Option<Instant> {
+fn compute_expiry(
+    urgency: Urgency,
+    expire_timeout: i32,
+    default_timeout_ms: u32,
+    now: Instant,
+) -> Option<Instant> {
     if urgency == Urgency::Critical {
         return None;
     }
     let ms: u32 = match expire_timeout {
         0 => return None,
-        n if n < 0 => DEFAULT_EXPIRE_MS,
+        n if n < 0 => default_timeout_ms,
         n => n as u32,
     };
     Some(now + Duration::from_millis(ms as u64))
@@ -192,21 +198,22 @@ mod tests {
     fn ids_start_at_one_and_increment() {
         let mut q = Queue::new();
         let now = Instant::now();
-        assert_eq!(q.notify(args(0, Urgency::Normal, -1), now), 1);
-        assert_eq!(q.notify(args(0, Urgency::Normal, -1), now), 2);
+        assert_eq!(q.notify(args(0, Urgency::Normal, -1), 5_000, now), 1);
+        assert_eq!(q.notify(args(0, Urgency::Normal, -1), 5_000, now), 2);
     }
 
     #[test]
     fn replaces_id_updates_in_place_same_id_and_bumps_revision() {
         let mut q = Queue::new();
         let now = Instant::now();
-        let id = q.notify(args(0, Urgency::Normal, -1), now);
+        let id = q.notify(args(0, Urgency::Normal, -1), 5_000, now);
         assert_eq!(q.items[0].revision, 0);
         let again = q.notify(
             NotifyArgs {
                 summary: "replaced".into(),
                 ..args(id, Urgency::Normal, -1)
             },
+            5_000,
             now,
         );
         assert_eq!(id, again);
@@ -219,7 +226,7 @@ mod tests {
     fn critical_never_expires() {
         let mut q = Queue::new();
         let now = Instant::now();
-        q.notify(args(0, Urgency::Critical, 2_000), now);
+        q.notify(args(0, Urgency::Critical, 2_000), 5_000, now);
         assert!(q.next_expiry().is_none());
     }
 
@@ -227,7 +234,7 @@ mod tests {
     fn zero_timeout_never_expires() {
         let mut q = Queue::new();
         let now = Instant::now();
-        q.notify(args(0, Urgency::Normal, 0), now);
+        q.notify(args(0, Urgency::Normal, 0), 5_000, now);
         assert!(q.next_expiry().is_none());
     }
 
@@ -235,8 +242,8 @@ mod tests {
     fn drain_expired_returns_ids_in_queue_order() {
         let mut q = Queue::new();
         let now = Instant::now();
-        let a = q.notify(args(0, Urgency::Normal, 1_000), now);
-        let _b = q.notify(args(0, Urgency::Normal, 5_000), now);
+        let a = q.notify(args(0, Urgency::Normal, 1_000), 5_000, now);
+        let _b = q.notify(args(0, Urgency::Normal, 5_000), 5_000, now);
         let later = now + Duration::from_millis(2_000);
         let expired = q.drain_expired(later);
         assert_eq!(expired, vec![a]);
@@ -247,8 +254,8 @@ mod tests {
     fn close_removes_only_matching_id() {
         let mut q = Queue::new();
         let now = Instant::now();
-        let a = q.notify(args(0, Urgency::Normal, -1), now);
-        let b = q.notify(args(0, Urgency::Normal, -1), now);
+        let a = q.notify(args(0, Urgency::Normal, -1), 5_000, now);
+        let b = q.notify(args(0, Urgency::Normal, -1), 5_000, now);
         assert!(q.close(a));
         assert!(!q.close(a));
         assert_eq!(q.items.len(), 1);
@@ -259,7 +266,7 @@ mod tests {
     fn replaces_id_unknown_gets_fresh_id() {
         let mut q = Queue::new();
         let now = Instant::now();
-        let id = q.notify(args(999, Urgency::Normal, -1), now);
+        let id = q.notify(args(999, Urgency::Normal, -1), 5_000, now);
         assert_ne!(id, 999);
     }
 }

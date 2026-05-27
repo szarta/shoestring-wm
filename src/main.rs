@@ -25,6 +25,22 @@ use crate::wayland::State;
 static SHUTDOWN_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 fn main() -> Result<()> {
+    let cli = parse_cli().context("parsing CLI arguments")?;
+    match cli {
+        CliAction::Run => {}
+        CliAction::Help => {
+            print!("{}", help_text());
+            return Ok(());
+        }
+        CliAction::Version => {
+            println!("shoestring-notify {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        CliAction::WriteDefaultConfig { force } => {
+            return write_default_config_to_disk(force);
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -37,7 +53,13 @@ fn main() -> Result<()> {
         "shoestring-notify starting"
     );
 
-    let cfg = Config::default();
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, "config load failed; using defaults");
+            Config::default()
+        }
+    };
     let (conn, mut queue, qh, mut state) = wayland::init(cfg)?;
 
     // Filter rustbus traffic down to messages aimed at us (plus peer).
@@ -173,8 +195,9 @@ fn drain_and_dispatch(state: &mut State) -> Result<()> {
         {
             continue;
         }
+        let default_timeout_ms = state.cfg.default_timeout_ms;
         let DispatchOutcome { reply, signals } =
-            dbus_iface::dispatch(&call, &mut state.queue, Instant::now());
+            dbus_iface::dispatch(&call, &mut state.queue, default_timeout_ms, Instant::now());
         if let Some(mut reply) = reply {
             send_message(&mut state.rpc, &mut reply)?;
         }
@@ -305,5 +328,83 @@ fn install_signal_handlers() -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
+
+// ---- CLI -----------------------------------------------------------------
+
+enum CliAction {
+    Run,
+    Help,
+    Version,
+    WriteDefaultConfig { force: bool },
+}
+
+/// Hand-parses argv. Avoids pulling clap for three flags — staying lean
+/// is a project goal; shoestring-bar does the same.
+fn parse_cli() -> Result<CliAction> {
+    let mut write_config = false;
+    let mut force = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--write-default-config" => write_config = true,
+            "--force" => force = true,
+            "-h" | "--help" => return Ok(CliAction::Help),
+            "-V" | "--version" => return Ok(CliAction::Version),
+            other => anyhow::bail!("unknown argument: {other:?} (try --help)"),
+        }
+    }
+    if force && !write_config {
+        anyhow::bail!("--force only makes sense with --write-default-config");
+    }
+    if write_config {
+        Ok(CliAction::WriteDefaultConfig { force })
+    } else {
+        Ok(CliAction::Run)
+    }
+}
+
+fn help_text() -> String {
+    format!(
+        "shoestring-notify {ver} — lightweight desktop notification daemon.
+
+Usage: shoestring-notify [OPTIONS]
+
+Options:
+      --write-default-config   Write the bundled default config to the
+                               user's config path and exit. Refuses to
+                               overwrite unless --force is also passed.
+      --force                  Allow --write-default-config to overwrite.
+  -h, --help                   Print this help and exit.
+  -V, --version                Print version and exit.
+
+Config file: $XDG_CONFIG_HOME/shoestring-notify/config.toml (defaults to
+~/.config/shoestring-notify/config.toml). Run without flags to start the
+daemon.
+
+Environment: WAYLAND_DISPLAY (required), DBUS_SESSION_BUS_ADDRESS
+(required for the session bus), SHOESTRING_NOTIFY_FONT (font path
+override), RUST_LOG (tracing filter).
+",
+        ver = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn write_default_config_to_disk(force: bool) -> Result<()> {
+    let target = config::default_config_path()
+        .ok_or_else(|| anyhow!("no config path resolvable: set $HOME or $XDG_CONFIG_HOME"))?;
+    if target.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; pass --force to overwrite",
+            target.display()
+        );
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&target, config::default_config_toml())
+        .with_context(|| format!("writing {}", target.display()))?;
+    println!("wrote default config to {}", target.display());
     Ok(())
 }

@@ -35,6 +35,11 @@ anyhow = "1"
 # our transitive tree via rustbus, so this adds zero new crates.
 libc = "0.2"
 
+# TOML config parser. Versions match shoestring-bar to keep the
+# resolved dep set shared across the two binaries.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
 # Structured logs (env-filterable). Match shoestring-wm/bar so RUST_LOG
 # works the same way.
 tracing = "0.1"

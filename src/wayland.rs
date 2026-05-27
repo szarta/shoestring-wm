@@ -37,10 +37,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
 };
 
-use crate::config::{Config, FONT_CANDIDATES};
+use crate::config::{Config, Position, FONT_CANDIDATES};
 use crate::dbus_iface::notification_closed_signal;
 use crate::render;
-use crate::state::{CloseReason, Queue};
+use crate::state::{CloseReason, Queue, Urgency};
 
 /// One layer-shell surface per live notification. The owning HashMap is
 /// keyed by notification id, so the struct does not duplicate it.
@@ -55,8 +55,9 @@ pub struct NotifySurface {
     /// Highest `Notification::revision` we have committed a buffer for.
     /// Drives "draw on first configure, redraw on replace".
     pub drawn_revision: Option<u64>,
-    /// Margin from the top anchor edge. Recomputed on every restack.
-    pub margin_top: u32,
+    /// Distance from the anchored edge (top edge for top-* positions,
+    /// bottom edge for bottom-*). Recomputed on every restack.
+    pub stack_offset: u32,
 }
 
 pub struct State {
@@ -198,11 +199,13 @@ fn create_surface_for(state: &mut State, qh: &QueueHandle<State>, notif_id: u32)
         qh,
         notif_id,
     );
-    layer_surface.set_anchor(Anchor::Top | Anchor::Right);
+    layer_surface.set_anchor(anchor_for(state.cfg.position));
     layer_surface.set_size(size.0, size.1);
-    // Margin is computed properly in restack; set a placeholder so the
-    // first commit doesn't paint at (0,0) before restack fires.
-    layer_surface.set_margin(state.cfg.gap as i32, state.cfg.gap as i32, 0, 0);
+    // Margin is computed properly in restack; set a placeholder at
+    // gap-from-edge so the first commit doesn't paint at (0,0) before
+    // restack fires.
+    let (t, r, b, l) = margin_for(state.cfg.position, state.cfg.gap, state.cfg.gap);
+    layer_surface.set_margin(t, r, b, l);
     wl_surface.commit();
 
     state.surface_id_to_notif.insert(wl_surface.id(), notif_id);
@@ -214,10 +217,34 @@ fn create_surface_for(state: &mut State, qh: &QueueHandle<State>, notif_id: u32)
             requested_size: size,
             configured: false,
             drawn_revision: None,
-            margin_top: state.cfg.gap,
+            stack_offset: state.cfg.gap,
         },
     );
     tracing::debug!(id = notif_id, w = size.0, h = size.1, "created surface");
+}
+
+/// Layer-shell anchor flags for the four supported corner positions.
+fn anchor_for(p: Position) -> Anchor {
+    match p {
+        Position::TopRight => Anchor::Top | Anchor::Right,
+        Position::TopLeft => Anchor::Top | Anchor::Left,
+        Position::BottomRight => Anchor::Bottom | Anchor::Right,
+        Position::BottomLeft => Anchor::Bottom | Anchor::Left,
+    }
+}
+
+/// Compute (top, right, bottom, left) margins for a surface at
+/// `stack_offset` pixels from its anchored edge, with `edge_gap` to the
+/// perpendicular edge.
+fn margin_for(p: Position, stack_offset: u32, edge_gap: u32) -> (i32, i32, i32, i32) {
+    let s = stack_offset as i32;
+    let g = edge_gap as i32;
+    match p {
+        Position::TopRight => (s, g, 0, 0),
+        Position::TopLeft => (s, 0, 0, g),
+        Position::BottomRight => (0, g, s, 0),
+        Position::BottomLeft => (0, 0, s, g),
+    }
 }
 
 fn destroy_surface(state: &mut State, notif_id: u32) {
@@ -234,18 +261,19 @@ fn destroy_surface(state: &mut State, notif_id: u32) {
 
 fn restack(state: &mut State) {
     let gap = state.cfg.gap;
-    let mut next_top = gap;
+    let position = state.cfg.position;
+    let mut next_offset = gap;
     // Iterate in queue order (insertion order): oldest closest to the
-    // anchor (top), newest below.
+    // anchored edge, newest furthest from it.
     for notif in state.queue.iter() {
         if let Some(s) = state.surfaces.get_mut(&notif.id) {
-            if s.margin_top != next_top {
-                s.margin_top = next_top;
-                s.layer_surface
-                    .set_margin(next_top as i32, gap as i32, 0, 0);
+            if s.stack_offset != next_offset {
+                s.stack_offset = next_offset;
+                let (t, r, b, l) = margin_for(position, next_offset, gap);
+                s.layer_surface.set_margin(t, r, b, l);
                 s.wl_surface.commit();
             }
-            next_top += s.requested_size.1 + gap;
+            next_offset += s.requested_size.1 + gap;
         }
     }
 }
@@ -303,6 +331,7 @@ fn paint(state: &mut State, qh: &QueueHandle<State>, notif_id: u32) -> Result<()
     }
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
 
+    let accent = (notif.urgency == Urgency::Critical).then_some(cfg.border);
     render::paint(
         &mut mmap,
         font,
@@ -312,6 +341,7 @@ fn paint(state: &mut State, qh: &QueueHandle<State>, notif_id: u32) -> Result<()
         cfg.body_size,
         cfg.background,
         cfg.foreground,
+        accent,
     );
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
