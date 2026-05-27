@@ -388,15 +388,12 @@ impl ShoestringWm {
     }
 
     /// The window whose toplevel surface currently holds keyboard focus.
+    /// Matches both xdg and X11 windows via [`crate::window_ext::matches_surface`].
     pub fn focused_window(&self) -> Option<Window> {
         let focused = self.seat.get_keyboard()?.current_focus()?;
         self.space
             .elements()
-            .find(|w| {
-                w.toplevel()
-                    .map(|t| *t.wl_surface() == focused)
-                    .unwrap_or(false)
-            })
+            .find(|w| crate::window_ext::matches_surface(w, &focused))
             .cloned()
     }
 
