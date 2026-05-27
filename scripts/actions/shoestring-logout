@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Terminate the running shoestring-wm gracefully. SIGTERM drives the
 # compositor's shutdown path so clients see disconnect and outputs
-# tear down cleanly. Use --exact so we don't accidentally match
-# shoestring-wm-ctl or an editor with the source open.
+# tear down cleanly. Use -x (exact match) so we don't accidentally
+# match shoestring-wm-ctl or an editor with the source open. -x is the
+# POSIX short flag accepted by both GNU pkill and the BSD pkills; the
+# GNU-only --exact long flag breaks on FreeBSD.
 #
 # Confirmation dialog (todo #52) belongs in the WM, not here — this
 # script is the unconditional last step.
 set -euo pipefail
-pkill --signal SIGTERM --exact shoestring-wm
+pkill --signal SIGTERM -x shoestring-wm

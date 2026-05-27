@@ -83,7 +83,7 @@ These call **Linux-only userland**:
 | `shoestring-volume-{up,down,mute}` | `wpctl` (PipeWire) | works on FreeBSD if PipeWire is installed (`pkg install pipewire`) |
 | `shoestring-mic-mute` | `wpctl` | same |
 | `shoestring-brightness-{up,down}` | `brightnessctl` | **Linux-only** (reads `/sys/class/backlight`); no BSD equivalent. FreeBSD uses `backlight(8)`. |
-| `shoestring-logout` | `pkill --exact` | `--exact` is GNU; FreeBSD's `pkill -x` is the equivalent flag and is also accepted by GNU pkill. |
+| `shoestring-logout` | `pkill -x` | POSIX short flag; accepted by both GNU pkill and FreeBSD pkill. |
 
 `scripts/actions/README.md` already lists the tool dependency per
 script. They are user-facing helpers, not load-bearing WM code — the
@@ -96,8 +96,6 @@ Concrete blockers worth tracking as their own todos:
 - **task 61** — actually build + smoke-test the winit feature on
   FreeBSD (e.g. inside Sway on a FreeBSD VM); document the
   `pkg install` line in `docs/install.rst`.
-- **task 62** — `shoestring-logout`: swap `pkill --exact` for
-  `pkill -x` (POSIX-portable, accepted on Linux and BSD).
 - **task 63** — `shoestring-brightness-*`: add a FreeBSD branch using
   `backlight(8)` (or document the script as Linux-only and ship a
   per-OS alternate in `scripts/actions/freebsd/`).
