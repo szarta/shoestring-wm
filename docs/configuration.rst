@@ -13,8 +13,9 @@ Bootstrap a starter file:
     $ shoestring-wm --write-default-config
     wrote default config to /home/you/.config/shoestring-wm/config.toml
 
-The file has two sections — ``[general]`` and a ``[[bindings]]`` array
-— both optional. Missing sections take built-in defaults.
+The file has four sections — ``[general]``, ``[workspaces]``,
+``[[bindings]]``, and ``[[window_rules]]`` — all optional. Missing
+sections take built-in defaults.
 
 The ``[general]`` section
 -------------------------
@@ -52,6 +53,31 @@ The ``[general]`` section
        ``wp_fractional_scale_v1`` see the exact value, others round up).
        Match this to your ``Xft.dpi`` equivalent so text size carries
        over from an X session.
+   * - ``lock_command``
+     - string
+     - ``"shoestring-lock"``
+     - Command spawned by the ``lock`` action and the ``lock`` IPC
+       request. Split on whitespace (first token = executable, rest =
+       args). The binary itself drives ``ext-session-lock-v1`` and
+       reports unlock; if it's missing or fails to spawn the session
+       just stays unlocked (logged).
+   * - ``autostart``
+     - array of strings
+     - ``["shoestring-bar"]``
+     - Commands spawned once at WM startup, after the wayland socket
+       is listening but before user interaction. Each entry is split
+       on whitespace like ``lock_command``. Failures log a warning and
+       don't block startup. Set to ``[]`` to disable.
+   * - ``automation_enabled``
+     - bool
+     - ``false``
+     - Master gate for remote-automation IPC methods (``inject_key`` /
+       ``inject_text`` / ``inject_click`` / ``screenshot`` /
+       ``run_command`` / ``dispatch_action``). Off by default so an
+       attacker with only socket access can't drive the session. The
+       CLI flag ``--enable-automation`` and the runtime IPC
+       ``set_automation`` both override this without writing back to
+       disk — the config file stays the source of truth at next start.
 
 Example::
 
@@ -60,6 +86,38 @@ Example::
     repeat_delay = 300
     repeat_rate = 40
     output_scale = 1.5
+    lock_command = "shoestring-lock"
+    autostart = ["shoestring-bar", "swww init"]
+    automation_enabled = false
+
+The ``[workspaces]`` section
+----------------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 12 12 58
+
+   * - Key
+     - Type
+     - Default
+     - Meaning
+   * - ``count``
+     - integer
+     - ``16``
+     - Total workspace count. Must be ``1..=16``. Surfaced over IPC as
+       ``workspaces.count`` so a bar can size its workspace strip.
+   * - ``names``
+     - table ``"N" = "label"``
+     - ``{}``
+     - Sparse map from 1-based workspace index to a display name.
+       Slots without an entry render as the number. Indexes ``> count``
+       are rejected at parse time.
+
+Example::
+
+    [workspaces]
+    count = 8
+    names = { 1 = "main", 2 = "web", 8 = "chat" }
 
 Bindings
 --------
@@ -111,11 +169,20 @@ Each action type and its fields:
         action = { type = "spawn", command = "firefox", args = ["--new-window"] }
 
 ``quit``
-    Exit the WM cleanly.
+    Bring up a confirm dialog (``shoestring-confirm``); exit the WM
+    cleanly on *Yes*, stay running on *No*. The dialog is the only path
+    out of the WM today — there is no force-quit action.
+
+``lock``
+    Spawn ``[general].lock_command`` (default ``shoestring-lock``). The
+    locker binds ``ext-session-lock-v1`` and drives the session-lock
+    handshake; a misconfigured / missing binary just logs and leaves
+    the session unlocked.
 
 ``reload-config``
-    Re-read the config file from disk. (Config hot-reload via file watch
-    is on the roadmap; this action triggers a manual reload today.)
+    Re-read the TOML config from disk and recompile the binding table.
+    Config hot-reload via ``notify`` watches the file automatically;
+    this action is the manual trigger for the same path.
 
 ``tile-left``
     Snap the focused window to the left half of its monitor's usable
@@ -193,6 +260,45 @@ These three actions are also exposed over IPC as ``inject_key`` /
 ``inject_text`` / ``inject_click`` requests; see :doc:`ipc`. The
 ``shoestring-ctl key`` / ``type`` / ``click`` subcommands are the
 xdotool-equivalent CLI built on top.
+
+Window rules
+------------
+
+Per-app actions evaluated once on first commit after a window maps.
+Each rule is a ``match`` predicate plus an ``actions`` table; the
+first rule whose match succeeds wins. Reload does *not* re-evaluate
+rules against already-mapped windows.
+
+::
+
+    [[window_rules]]
+    match = { app_id = "firefox" }
+    actions = { workspace = 2 }
+
+    [[window_rules]]
+    match = { app_id = "Alacritty", title_contains = "scratch" }
+    actions = { position = [100, 100], size = [800, 600] }
+
+``match``
+    Sparse predicate. All set fields are AND-ed. An empty matcher
+    matches every window — almost never what you want.
+
+    - ``app_id`` (string) — exact match on the toplevel's xdg-shell
+      ``app_id`` (the closest Wayland analogue to X11 ``WM_CLASS``).
+    - ``title_contains`` (string) — case-sensitive substring match on
+      the toplevel title. The substring matcher is deliberate: regex
+      lives on the IPC side (``find_windows``) where strings are
+      arbitrary; rules favour the simpler form.
+
+``actions``
+    Sparse action set. Each field is independently optional.
+
+    - ``workspace`` (1..=count) — move the window to this workspace
+      without switching the user's view.
+    - ``position`` (``[x, y]``, logical px) — override the
+      auto-centered spawn position.
+    - ``size`` (``[w, h]``, logical px) — preferred size; sent as part
+      of the next configure (client may negotiate a different value).
 
 Pointer bindings
 ----------------

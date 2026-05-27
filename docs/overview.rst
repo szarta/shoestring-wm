@@ -38,10 +38,12 @@ operations are the four that the Openbox flow relies on:
 Plus ``Super+Left-drag`` to move and ``Super+Right-drag`` to resize, so
 the pointer-driven Openbox feel carries straight over.
 
-**Global workspaces.** 16 workspaces, shared across all monitors:
-switching the active workspace swaps every monitor at once. Per-window
-monitor assignment is preserved, so a window that lived on monitor B
-reappears on monitor B when its workspace returns.
+**Global workspaces.** Configurable workspace count (default 16, capped
+at 16), shared across all monitors: switching the active workspace
+swaps every monitor at once. Per-window monitor assignment is
+preserved, so a window that lived on monitor B reappears on monitor B
+when its workspace returns. Workspaces can be given sparse per-slot
+names via ``[workspaces].names``.
 
 **TOML config, hot-reloadable.** Lives at
 ``$XDG_CONFIG_HOME/shoestring-wm/config.toml``. Every keybinding is
@@ -58,7 +60,7 @@ Explicit non-goals (v1)
 - Animations or fancy transitions.
 - Server-side decoration polish.
 - A built-in bar — shoestring-bar is intentionally a separate process.
-- Fractional-scale gymnastics, gestures, tablet, screencopy.
+- Gestures, tablet, accessibility.
 - XWayland is deferred: the integration point exists in ``backend/``
   but the feature isn't wired in v1. It will be added when an app the
   author cares about forces it.
@@ -71,13 +73,26 @@ Implemented today:
 - Winit backend for development inside an existing X11/Wayland session.
 - Native DRM/KMS + libinput + libseat (libudev) backend for TTY use,
   including ``Ctrl+Alt+F1..F12`` VT switching.
-- 16 global workspaces, multi-monitor, hotplug-safe.
+- Configurable global workspaces (default 16, sparse named slots),
+  multi-monitor, hotplug-safe.
 - Per-window floating geometry with TileLeft / TileRight / Maximize /
   Minimize and floating-rect save/restore.
-- Layer-shell + foreign-toplevel-list (so the bar and menu can attach).
+- Per-app window rules (app_id / title-contains → workspace, position,
+  size).
+- Layer-shell + foreign-toplevel-list (so the bar, menu, locker and
+  notification helpers can attach).
 - xcursor sprite rendering at the pointer.
-- IPC server with query + event-stream subscriptions.
+- IPC server with query + event-stream subscriptions, plus key/text/
+  click injection, action dispatch, find-windows regex search, command
+  execution, and screenshot capture (the last four gated by a runtime
+  automation gate).
 - HiDPI / output-scale handling (integer and fractional).
+- wlr-screencopy + region picker (``shoestring-screenshot`` +
+  ``shoestring-region``).
+- ``ext-session-lock-v1`` + PAM unlock via ``shoestring-lock``.
+- TOML config hot-reload via filesystem watcher (and an explicit
+  ``reload-config`` action / IPC trigger).
+- Configurable autostart list.
 - ``--write-default-config`` to bootstrap a fresh user config.
 
 See :doc:`architecture` for the source-level breakdown.

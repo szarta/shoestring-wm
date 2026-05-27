@@ -75,11 +75,67 @@ Each request is a JSON object with a ``type`` discriminator:
        needed and switches to its workspace if it lives elsewhere,
        then raises + activates it the same way a click does. Returns
        ``error`` if no window matches.
+   * - ``{"type": "find_windows", "title": "...", "app_id": "..."}``
+     - List every mapped window whose ``title`` and ``app_id`` match
+       the supplied regular expressions. Each filter is independent and
+       both are AND-ed; an unset filter matches everything. Patterns
+       use Rust ``regex`` syntax (Perl-like, no backrefs) and are not
+       anchored — ``firefox`` matches anywhere; use ``^firefox$`` for
+       exact match. Reply reuses the ``windows`` response shape; bad
+       regex returns ``error``.
+   * - ``{"type": "dispatch_action", "action": {...}}``
+     - Run a named bind ``Action`` server-side, exactly as if a keybind
+       had fired. Unlike ``inject_key``, this bypasses the focused
+       surface and goes through the WM's action dispatcher —
+       ``Super+Shift+Q`` is consumed by the WM and won't fire from
+       ``inject_key``, but ``{"type":"dispatch_action","action":{"type":"quit"}}``
+       will. ``action`` is the same JSON shape used by ``[[bindings]]``
+       entries in the config file (e.g. ``{"type":"focus-workspace","index":3}``).
+       Gated by the automation gate.
+   * - ``{"type": "lock"}``
+     - Spawn ``[general].lock_command``. Replies ``ok`` immediately;
+       the locker drives the ``ext-session-lock-v1`` handshake itself.
+   * - ``{"type": "set_automation", "enabled": true}``
+     - Flip the runtime automation gate. Reply is ``automation`` with
+       the new state; ``automation_changed`` is broadcast to
+       subscribers when the value actually changes. Not persisted to
+       disk.
+   * - ``{"type": "automation_status"}``
+     - Read the current automation gate state without changing it.
+       Reply is ``automation``.
+   * - ``{"type": "reload_config"}``
+     - Re-read the TOML config the WM was launched with and recompile
+       the binding table. Broadcasts ``config_reloaded`` on success.
+       Reply is ``ok`` or ``error``.
+   * - ``{"type": "screenshot", "output": null, "region": null}``
+     - Capture a PNG via the WM's wlr-screencopy server. ``output`` is
+       the output name (omit / null → first advertised output).
+       ``region`` is ``{"x":..,"y":..,"w":..,"h":..}`` in the named
+       output's logical coords and requires ``output`` to be set. Reply
+       is ``screenshot`` with the absolute path. Gated by the
+       automation gate.
+   * - ``{"type": "run_command", "argv": ["...", ...], "timeout_ms": null}``
+     - Spawn a child process under the WM's environment and return its
+       captured output once it exits. ``argv`` must be non-empty;
+       ``timeout_ms`` (optional) sends ``SIGKILL`` after the given
+       milliseconds. Output is capped at 64 KiB per stream; extra bytes
+       are drained but discarded and ``truncated`` is set. Reply is
+       ``command_result``. Gated by the automation gate.
 
 Injected key and click events bypass the WM's binding table — a scripted
-``Super+q`` will NOT trigger the ``Quit`` binding. Use the relevant typed
-request (or, for now, the WM's existing keybind config) when you want a
-WM-level action.
+``Super+q`` will NOT trigger the ``Quit`` binding. Use
+``dispatch_action`` (above) for that path.
+
+Automation gate
+~~~~~~~~~~~~~~~
+
+The following requests refuse with an ``error`` while
+``[general].automation_enabled`` is off (and the CLI flag
+``--enable-automation`` / the IPC ``set_automation`` haven't flipped
+it): ``inject_key``, ``inject_text``, ``inject_click``,
+``dispatch_action``, ``screenshot``, ``run_command``. The error message
+is stable enough to scrape on:
+``automation disabled: enable with `shoestring-ctl automation on`...``.
 
 Responses
 ---------
@@ -109,6 +165,20 @@ The server replies with a single JSON object tagged by ``type``:
     Returned in reply to ``pick_window`` once the user resolves the
     picker. ``null`` on cancel or a click that didn't land on a
     toplevel.
+
+``automation``
+    ``{"type": "automation", "enabled": <bool>}``. Returned for both
+    ``set_automation`` and ``automation_status``.
+
+``screenshot``
+    ``{"type": "screenshot", "path": "/absolute/path.png"}``.
+
+``command_result``
+    ``{"type": "command_result", "exit_code": <int>, "stdout": "...",
+    "stderr": "...", "truncated": <bool>}``. ``exit_code`` is the
+    child's real code; ``-1`` means killed by signal (typically the
+    timeout-driven ``SIGKILL``). ``truncated`` is true if either
+    stream exceeded the 64 KiB cap.
 
 ``error``
     ``{"type": "error", "message": "..."}``. The client should print the
@@ -158,11 +228,25 @@ Each event is tagged by ``type``.
 ``window_title_changed``
     ``{"type": "window_title_changed", "id": "...", "title": "...", "app_id": "..."}``
 
+``window_moved_to_workspace``
+    ``{"type": "window_moved_to_workspace", "id": "...", "workspace": <1..count>}``.
+    Fired when a window is reassigned to a different workspace via the
+    move-to-workspace bindings or a ``[[window_rules]]`` action.
+
 ``output_added``
     Same shape as ``OutputSummary``.
 
 ``output_removed``
     ``{"type": "output_removed", "name": "DP-1"}``
+
+``automation_changed``
+    ``{"type": "automation_changed", "enabled": <bool>}``. Fired when
+    the runtime automation gate flips.
+
+``config_reloaded``
+    ``{"type": "config_reloaded"}``. Fired after a successful config
+    re-read (file-watcher or explicit ``reload_config`` trigger).
+    Subscribers should re-query anything derived from the config.
 
 Reference client
 ----------------
@@ -197,6 +281,27 @@ subcommand maps to one request:
     $ shoestring-ctl pick-window        # blocks until user clicks
     {"type":"picked_window","window":{"id":"...","title":"...", ...}}
     $ shoestring-ctl close-window <id>  # ask that toplevel to close
+    $ shoestring-ctl focus-window <id>  # focus + raise + switch workspace
+
+    $ shoestring-ctl find-windows --app-id '^Alacritty$'
+    {"type":"windows","windows":[ ... ]}
+    $ shoestring-ctl find-windows --title '(?i)slack'
+
+    $ shoestring-ctl dispatch-action quit                                  # bare name
+    $ shoestring-ctl dispatch-action '{"type":"focus-workspace","index":3}'
+
+    $ shoestring-ctl automation status
+    {"type":"automation","enabled":false}
+    $ shoestring-ctl automation on
+
+    $ shoestring-ctl screenshot --output eDP-1 --region 100,100,800,600
+    {"type":"screenshot","path":"/home/you/Pictures/Screenshot-AUTO-...png"}
+
+    $ shoestring-ctl run-command --timeout-ms 500 -- echo hi
+    {"type":"command_result","exit_code":0,"stdout":"hi\n",...}
+
+    $ shoestring-ctl lock           # spawn the configured locker
+    $ shoestring-ctl reload-config  # re-read the TOML config
 
 A higher-level binary, ``shoestring-kill`` (xkill equivalent), chains
 the two: it sends ``pick_window``, then forwards the resulting ``id``

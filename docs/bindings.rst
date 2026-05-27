@@ -35,8 +35,9 @@ Binding                                Action
 ``Super+Shift+1`` … ``Super+Shift+9``  Move focused window to workspace 1..9
 =====================================  ========================================
 
-Workspaces 10..16 exist but have no default keybind; bind them with
-``focus-workspace`` / ``move-window-to-workspace`` actions as needed.
+Workspaces 10..16 exist (when ``[workspaces].count`` allows them) but
+have no default keybind; bind them with ``focus-workspace`` /
+``move-window-to-workspace`` actions as needed.
 
 Launchers and shell
 -------------------
@@ -47,7 +48,32 @@ Binding                            Action
 ``Super+Return``                   Spawn ``alacritty``
 ``Super+P``                        Spawn ``shoestring-menu`` (commands)
 ``Super+B``                        Spawn ``shoestring-menu --mode bookmarks``
-``Super+Shift+Q``                  Quit shoestring-wm
+``Super+Shift+L``                  Lock session (spawn ``shoestring-lock``)
+``Super+Shift+Q``                  Quit shoestring-wm (confirm dialog)
+================================  ============================================
+
+The ``quit`` action raises a yes/no modal rendered by
+``shoestring-confirm``; pressing Enter exits cleanly, Escape stays
+running.
+
+Media and brightness
+--------------------
+
+The default config also binds the standard XF86 keys to action scripts
+under ``scripts/actions/`` in the repository. The bindings spawn the
+script by name (no path), so installing the scripts on ``$PATH`` lights
+them up; if the scripts are missing the spawn fails silently with a
+warning and the bind still resolves.
+
+================================  ============================================
+Binding                            Spawns
+================================  ============================================
+``XF86AudioRaiseVolume``           ``shoestring-volume-up``
+``XF86AudioLowerVolume``           ``shoestring-volume-down``
+``XF86AudioMute``                  ``shoestring-volume-mute``
+``XF86AudioMicMute``               ``shoestring-mic-mute``
+``XF86MonBrightnessUp``            ``shoestring-brightness-up``
+``XF86MonBrightnessDown``          ``shoestring-brightness-down``
 ================================  ============================================
 
 If ``shoestring-menu`` is not on ``$PATH``, the ``Super+P`` / ``Super+B``

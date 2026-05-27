@@ -36,6 +36,15 @@ Command-line flags
 ``--force``
     Allow ``--write-default-config`` to overwrite an existing file.
 
+``--enable-automation``
+    Force the runtime automation gate ON at startup, regardless of
+    ``[general].automation_enabled`` in the config. The gate is off by
+    default; ``inject_key`` / ``inject_text`` / ``inject_click`` /
+    ``screenshot`` / ``run_command`` / ``dispatch_action`` all refuse
+    while it is off. The runtime ``shoestring-ctl automation on/off``
+    can still flip the gate; the config file is the source of truth at
+    next start. See :doc:`ipc`.
+
 ``-V, --version``
     Print the binary version.
 
@@ -108,20 +117,22 @@ Openbox. The binds are wired by default.
 Autostart and companion processes
 ---------------------------------
 
-The bar and any other "session" processes are launched the same way as
-any other client: by binding them to a key (``--write-default-config``
-binds ``Super+P``/``Super+B`` for the menu) or by passing them with
-``--command`` and chaining other launches via a wrapper script.
-Configurable autostart is on the roadmap; until then a tiny wrapper
-works::
+The WM spawns an autostart list once the wayland socket is up and
+before any user interaction. Configure it via ``[general].autostart``
+(see :doc:`configuration`); the default list is ``["shoestring-bar"]``
+so a fresh user gets the bar on first run. Each entry is split on
+whitespace (first token = executable, rest = args). Failures log a
+warning and don't block startup.
 
-    #!/bin/sh
-    shoestring-bar &
-    exec shoestring-wm --command alacritty
+For one-off launches alongside the WM, ``--command CMD`` still spawns
+a single client once the compositor is ready — handy for ``shoestring-wm
+--command alacritty`` during nested winit development.
 
 Quitting
 --------
 
-``Super+Shift+Q`` (the default bind for the ``quit`` action) exits the
-compositor cleanly. On the TTY backend this drops you back to the
-console you started from.
+``Super+Shift+Q`` (the default bind for the ``quit`` action) brings up
+a modal yes/no confirmation rendered by ``shoestring-confirm``; the
+session exits on *Yes* (Enter), stays running on *No* (Escape). On the
+TTY backend a confirmed quit drops you back to the console you started
+from.

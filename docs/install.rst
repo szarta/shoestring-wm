@@ -3,9 +3,9 @@ Install
 
 shoestring-wm is built from source with cargo. The runtime needs a small
 set of native libraries (DRM, GBM, EGL, udev, libinput, libseat,
-libdisplay-info, wayland, xkbcommon). Per-distro install commands for
-the development headers are below; on most distros the matching runtime
-packages are pulled in automatically.
+libdisplay-info, wayland, xkbcommon, plus PAM for ``shoestring-lock``).
+Per-distro install commands for the development headers are below; on
+most distros the matching runtime packages are pulled in automatically.
 
 The TTY backend (the daily-driver path) needs all of the libraries below.
 If you only want the winit dev backend you can build with
@@ -50,7 +50,8 @@ Debian / Ubuntu
         libwayland-dev libxkbcommon-dev \
         libdrm-dev libgbm-dev libegl-dev \
         libudev-dev libinput-dev \
-        libseat-dev libdisplay-info-dev
+        libseat-dev libdisplay-info-dev \
+        libpam0g-dev
 
 If your distro's ``libdisplay-info-dev`` is older than 0.1 you may need
 to pull it from backports (Debian) or build it from upstream.
@@ -64,7 +65,8 @@ Fedora / RHEL
         wayland-devel libxkbcommon-devel \
         libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
         systemd-devel libinput-devel \
-        libseat-devel libdisplay-info-devel
+        libseat-devel libdisplay-info-devel \
+        pam-devel
 
 (``systemd-devel`` provides ``libudev.pc`` on Fedora.)
 
@@ -77,7 +79,8 @@ Arch / Manjaro
         wayland libxkbcommon \
         libdrm libglvnd mesa \
         systemd libinput \
-        seatd libdisplay-info
+        seatd libdisplay-info \
+        pam
 
 Alpine
 ~~~~~~
@@ -88,7 +91,8 @@ Alpine
         wayland-dev libxkbcommon-dev \
         libdrm-dev mesa-dev \
         eudev-dev libinput-dev \
-        seatd-dev libdisplay-info-dev
+        seatd-dev libdisplay-info-dev \
+        linux-pam-dev
 
 FreeBSD
 ~~~~~~~
@@ -99,6 +103,8 @@ FreeBSD
         wayland libxkbcommon \
         drm-kmod mesa-libs \
         libinput seatd libdisplay-info
+
+(PAM is provided by the base system.)
 
 DRM-KMS support on FreeBSD depends on the ``drm-kmod`` port matching
 your kernel; verify ``/dev/dri/card0`` exists after a reboot. The
@@ -121,6 +127,7 @@ A development shell that brings in everything needed:
         libdrm mesa libGL
         udev libinput
         seatd libdisplay-info
+        pam
       ];
     }
 

@@ -118,8 +118,10 @@ Working today:
 - `ext-session-lock-v1` + PAM unlock via `shoestring-lock`.
 - wlr-screencopy + region picker + IPC `screenshot` request.
 - IPC server: queries, event stream, `inject_key`/`text`/`click`,
-  `focus_window`, `pick_window` + `close_window`, `run_command`,
-  `set_automation` gate, hot-reload trigger.
+  `focus_window`, `pick_window` + `close_window`, `find_windows`
+  (title/app_id regex filter), `dispatch_action` (fire any keybind
+  server-side), `run_command`, `screenshot`, `set_automation` gate,
+  hot-reload trigger.
 - Modal confirm dialog primitive (`shoestring-confirm`); wraps `Quit` today.
 - Action helper scripts (volume, brightness, logout) wired to XF86 keys.
 
@@ -127,7 +129,6 @@ Working today:
 
 Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
 
-- `DispatchAction` IPC (drive any keybinding without xdotool).
 - Notification daemon (`shoestring-notify`, `org.freedesktop.Notifications`).
 - Focus-follows-mouse / sloppy focus modes.
 - XWayland integration.

@@ -4,7 +4,7 @@ shoestring-wm
 Synopsis
 --------
 
-| **shoestring-wm** [**-c** *FILE*] [**-b** winit|tty] [**-C** *CMD*]
+| **shoestring-wm** [**-c** *FILE*] [**-b** winit|tty] [**-C** *CMD*] [**--enable-automation**]
 | **shoestring-wm** **--write-default-config** [**--force**] [**-c** *FILE*]
 | **shoestring-wm** **-V** | **--version**
 | **shoestring-wm** **-h** | **--help**
@@ -46,6 +46,15 @@ Options
 
 **--force**
     Allow **--write-default-config** to overwrite an existing file.
+
+**--enable-automation**
+    Force the runtime automation gate ON at startup, overriding
+    ``[general].automation_enabled`` in the config. The gate is off
+    by default; remote-automation IPC methods (``inject_key`` /
+    ``inject_text`` / ``inject_click`` / ``screenshot`` /
+    ``run_command`` / ``dispatch_action``) refuse to fire while it is
+    off. The runtime IPC ``set_automation`` request can still flip the
+    gate; the config file remains the source of truth at next start.
 
 **-V**, **--version**
     Print version information.
@@ -94,6 +103,40 @@ Exit status
 Non-zero
     Startup error (missing config file when explicitly named, backend
     unavailable, etc.). See stderr or ``$SHOESTRING_WM_LOG``.
+
+Helpers
+-------
+
+The WM ships and (in some cases) spawns these companion binaries:
+
+**shoestring-ctl**\(1)
+    Reference CLI client for the IPC socket.
+
+**shoestring-bar**\(1)
+    Status bar; spawned by default via ``[general].autostart``.
+
+**shoestring-menu**\(1)
+    dmenu-style launcher; bound to ``Super+P`` / ``Super+B`` by default.
+
+**shoestring-lock**
+    Session locker; spawned by the ``lock`` action and the ``lock``
+    IPC request. Configurable via ``[general].lock_command``.
+
+**shoestring-screenshot**
+    PNG capture via wlr-screencopy; invoked by the ``screenshot`` IPC
+    request. Region selection delegates to **shoestring-region**.
+
+**shoestring-region**
+    Slurp-equivalent rectangle picker; reads coordinates back over its
+    stdout.
+
+**shoestring-kill**
+    xkill-equivalent. Sends ``pick_window`` then ``close_window`` on
+    success.
+
+**shoestring-confirm**
+    Modal yes/no dialog. Used by the ``quit`` action; available for
+    custom destructive flows.
 
 See also
 --------
