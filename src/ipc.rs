@@ -477,6 +477,14 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::FindWindows { title, app_id } => {
+                let resp = match find_windows(state, title.as_deref(), app_id.as_deref()) {
+                    Ok(windows) => Response::Windows { windows },
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::DispatchAction { action } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -521,6 +529,33 @@ pub(crate) fn write_response(client: &Rc<RefCell<Client>>, resp: &Response) -> s
     c.stream.write_all(b"\n")?;
     c.spent = true;
     Ok(())
+}
+
+/// Compile each supplied pattern once, then return every window whose
+/// `title` and `app_id` match. An unset filter matches everything; both
+/// filters are AND-ed when both are set. Returns `Err(message)` if either
+/// regex fails to compile so the caller (IPC) can surface a useful error
+/// instead of an empty match list.
+fn find_windows(
+    state: &ShoestringWm,
+    title: Option<&str>,
+    app_id: Option<&str>,
+) -> Result<Vec<WindowSummary>, String> {
+    let title_re = title
+        .map(regex::Regex::new)
+        .transpose()
+        .map_err(|e| format!("find_windows: title regex invalid: {e}"))?;
+    let app_id_re = app_id
+        .map(regex::Regex::new)
+        .transpose()
+        .map_err(|e| format!("find_windows: app_id regex invalid: {e}"))?;
+    Ok(collect_windows(state)
+        .into_iter()
+        .filter(|w| {
+            title_re.as_ref().is_none_or(|re| re.is_match(&w.title))
+                && app_id_re.as_ref().is_none_or(|re| re.is_match(&w.app_id))
+        })
+        .collect())
 }
 
 fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {

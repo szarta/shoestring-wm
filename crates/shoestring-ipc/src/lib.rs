@@ -185,6 +185,23 @@ pub enum Request {
     /// runtime automation gate is off. Reply is [`Response::Ok`] on
     /// success, [`Response::Error`] on malformed `action`.
     DispatchAction { action: serde_json::Value },
+    /// List every mapped window whose `title` and `app_id` match the
+    /// supplied regular expressions. Each filter is independent; an
+    /// unset filter matches everything. Both filters are AND-ed:
+    /// `{title: Some("foo"), app_id: Some("bar")}` matches only windows
+    /// where title matches `foo` *and* app_id matches `bar`.
+    ///
+    /// Regexes use Rust's `regex` crate syntax (Perl-like, no
+    /// backreferences). They are not anchored — `firefox` matches
+    /// anywhere in the string; use `^firefox$` to require an exact
+    /// match. Reply reuses [`Response::Windows`]; an empty list means
+    /// no matches. Malformed regex yields [`Response::Error`].
+    FindWindows {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+    },
 }
 
 /// Per-stream byte cap for [`Request::RunCommand`]. Keeps IPC frames
@@ -556,6 +573,32 @@ mod tests {
         let e = Event::WindowFocused { id: None };
         let s = serde_json::to_string(&e).unwrap();
         assert_eq!(s, r#"{"type":"window_focused","id":null}"#);
+    }
+
+    #[test]
+    fn find_windows_request_shape() {
+        // Bare {} (no filters) serializes terse — both fields skipped.
+        let bare = Request::FindWindows {
+            title: None,
+            app_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"type":"find_windows"}"#
+        );
+        let with_both = Request::FindWindows {
+            title: Some("^foo".into()),
+            app_id: Some("bar$".into()),
+        };
+        let s = serde_json::to_string(&with_both).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Request::FindWindows {
+                title: Some(ref t),
+                app_id: Some(ref a),
+            } if t == "^foo" && a == "bar$"
+        ));
     }
 
     #[test]

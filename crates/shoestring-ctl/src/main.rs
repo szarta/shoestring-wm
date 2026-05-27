@@ -39,6 +39,20 @@ enum Command {
     Workspaces,
     /// List every mapped window with title, app_id, workspace, focused flag.
     Windows,
+    /// List windows whose title and/or app_id match the given regexes.
+    /// Each filter is independent and AND-ed; an omitted filter matches
+    /// everything. Patterns are not anchored — `firefox` matches anywhere
+    /// in the string; use `^firefox$` for exact match. Output shape is
+    /// the same as `windows`. Useful for find-then-focus scripting:
+    /// `shoestring-ctl find-windows --app-id '^Alacritty$' | jq ...`.
+    FindWindows {
+        /// Regex matched against the window title.
+        #[arg(short, long)]
+        title: Option<String>,
+        /// Regex matched against the window app_id.
+        #[arg(short, long)]
+        app_id: Option<String>,
+    },
     /// List every connected output with its mode and scale.
     Outputs,
     /// Stream events forever (one JSON line per event). Exits on socket
@@ -179,6 +193,7 @@ fn main() -> Result<()> {
     let request = match cli.cmd {
         Command::Workspaces => Request::Workspaces,
         Command::Windows => Request::Windows,
+        Command::FindWindows { title, app_id } => Request::FindWindows { title, app_id },
         Command::Outputs => Request::Outputs,
         Command::EventStream => Request::EventStream,
         Command::Key { keysym } => Request::InjectKey { keysym },

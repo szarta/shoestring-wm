@@ -61,6 +61,7 @@ bitflags = "2"
 thiserror = "2"
 xcursor = "0.3"
 notify = "8"
+regex = "1"
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"
