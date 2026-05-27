@@ -158,8 +158,9 @@ impl PointerGrab<ShoestringWm> for MoveSurfaceGrab {
         handle.motion(data, None, event);
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_window_location.to_f64() + delta;
-        data.space
-            .map_element(self.window.clone(), new_location.to_i32_round(), true);
+        let rounded = new_location.to_i32_round();
+        data.space.map_element(self.window.clone(), rounded, true);
+        crate::window_ext::sync_x11_location(&self.window, rounded);
 
         let prev_x = self.last_pointer_x;
         let cur_x = event.location.x;

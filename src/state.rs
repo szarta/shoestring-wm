@@ -509,7 +509,8 @@ impl ShoestringWm {
                 continue;
             }
             let loc = self.workspaces.saved_location(&w).unwrap_or((0, 0).into());
-            self.space.map_element(w, loc, false);
+            self.space.map_element(w.clone(), loc, false);
+            crate::window_ext::sync_x11_location(&w, loc);
         }
 
         // Restore focus to the new workspace's MRU top (skipping windows
@@ -746,6 +747,7 @@ impl ShoestringWm {
         let new_loc: smithay::utils::Point<i32, smithay::utils::Logical> = (x, y).into();
         tracing::debug!(?new_loc, geo_size = ?size, "initial center pass");
         self.space.map_element(window.clone(), new_loc, false);
+        crate::window_ext::sync_x11_location(window, new_loc);
         self.workspaces.record_location(window, new_loc);
         self.pending_initial_center.remove(window);
     }

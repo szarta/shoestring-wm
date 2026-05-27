@@ -10,7 +10,9 @@
 //! ignorant of which kind of window it's holding.
 
 use smithay::{
-    desktop::Window, reexports::wayland_server::protocol::wl_surface::WlSurface,
+    desktop::Window,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point, Rectangle},
     wayland::seat::WaylandFocus,
 };
 
@@ -49,4 +51,22 @@ pub fn send_close(window: &Window) {
 /// in `find()` predicates; works for both window kinds.
 pub fn matches_surface(window: &Window, surface: &WlSurface) -> bool {
     window.wl_surface().is_some_and(|s| &*s == surface)
+}
+
+/// Push `loc` (compositor-space coordinates) to the X11 client as its
+/// root-window position. No-op for xdg windows — wayland clients don't
+/// know their on-screen coordinates and don't need to.
+///
+/// X11 popup menus (GIMP's File menu, etc.) compute their on-screen
+/// position by asking the X server where their parent toplevel lives in
+/// root coords; if we move the window via `space.map_element` without
+/// also calling `x11.configure`, that root-coord cache stays stale and
+/// the popup spawns at the wrong place until something else (a resize,
+/// a tile) re-syncs it.
+pub fn sync_x11_location(window: &Window, loc: Point<i32, Logical>) {
+    let Some(x11) = window.x11_surface() else {
+        return;
+    };
+    let size = window.geometry().size;
+    let _ = x11.configure(Rectangle::new(loc, size));
 }
