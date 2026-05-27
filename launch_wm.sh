@@ -29,7 +29,12 @@ log_file="$log_dir/wm.log"
 # panics / errors vanish into the framebuffer.
 stderr_file="$log_dir/stderr.log"
 
-cargo build --release --manifest-path "$repo/Cargo.toml"
+# --workspace rebuilds the helper crates too (shoestring-confirm,
+# shoestring-ctl, shoestring-region, ...) so a launcher relaunch
+# always picks up source changes to them, not just the WM. Without
+# this, the stale binaries in target/release/ silently shadow your
+# fixes via the PATH prepend below.
+cargo build --release --workspace --manifest-path "$repo/Cargo.toml"
 
 # Workspace helpers (shoestring-confirm, shoestring-screenshot,
 # shoestring-region, shoestring-ctl, shoestring-kill) live in
