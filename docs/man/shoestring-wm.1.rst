@@ -51,8 +51,8 @@ Options
     Force the runtime automation gate ON at startup, overriding
     ``[general].automation_enabled`` in the config. The gate is off
     by default; remote-automation IPC methods (``inject_key`` /
-    ``inject_text`` / ``inject_click`` / ``screenshot`` /
-    ``run_command`` / ``dispatch_action``) refuse to fire while it is
+    ``inject_text`` / ``inject_click`` / ``move_mouse`` /
+    ``screenshot`` / ``run_command`` / ``dispatch_action``) refuse to fire while it is
     off. The runtime IPC ``set_automation`` request can still flip the
     gate; the config file remains the source of truth at next start.
 

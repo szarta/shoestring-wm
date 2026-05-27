@@ -118,6 +118,7 @@ Working today:
 - `ext-session-lock-v1` + PAM unlock via `shoestring-lock`.
 - wlr-screencopy + region picker + IPC `screenshot` request.
 - IPC server: queries, event stream, `inject_key`/`text`/`click`,
+  `move_mouse` + `pointer_position`,
   `focus_window`, `pick_window` + `close_window`, `find_windows`
   (title/app_id regex filter), `dispatch_action` (fire any keybind
   server-side), `run_command`, `screenshot`, `set_automation` gate,

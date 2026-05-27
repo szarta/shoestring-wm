@@ -72,8 +72,8 @@ The ``[general]`` section
      - bool
      - ``false``
      - Master gate for remote-automation IPC methods (``inject_key`` /
-       ``inject_text`` / ``inject_click`` / ``screenshot`` /
-       ``run_command`` / ``dispatch_action``). Off by default so an
+       ``inject_text`` / ``inject_click`` / ``move_mouse`` /
+       ``screenshot`` / ``run_command`` / ``dispatch_action``). Off by default so an
        attacker with only socket access can't drive the session. The
        CLI flag ``--enable-automation`` and the runtime IPC
        ``set_automation`` both override this without writing back to

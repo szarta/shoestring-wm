@@ -92,6 +92,39 @@ impl ShoestringWm {
         Ok(())
     }
 
+    /// Move the pointer to `(x, y)` without synthesizing a click. Mirrors
+    /// the motion half of [`inject_click`] but skips the focus update and
+    /// button events — that matches `xdotool mousemove` semantics and lets
+    /// callers compose drags (move → press → move → release) without each
+    /// step stealing keyboard focus.
+    pub fn inject_move_mouse(&mut self, x: f64, y: f64) {
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        let serial = SERIAL_COUNTER.next_serial();
+        let under = self.surface_under((x, y).into());
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location: (x, y).into(),
+                serial,
+                time: monotonic_msec(),
+            },
+        );
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.frame(self);
+    }
+
+    /// Current pointer location in compositor-space logical coords. Returns
+    /// `(0.0, 0.0)` if no pointer is bound to the seat — should be
+    /// unreachable in normal operation since we install one on startup.
+    pub fn pointer_position(&self) -> (f64, f64) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return (0.0, 0.0);
+        };
+        let loc = pointer.current_location();
+        (loc.x, loc.y)
+    }
+
     pub fn inject_click(
         &mut self,
         button: &str,

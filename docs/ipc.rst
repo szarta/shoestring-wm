@@ -58,6 +58,14 @@ Each request is a JSON object with a ``type`` discriminator:
        ``"right"`` / ``"middle"``, or a numeric Linux ``BTN_*`` code as a
        string. Pass ``"x"`` and ``"y"`` (both, as numbers) to move the
        pointer to those compositor-space coordinates first.
+   * - ``{"type": "move_mouse", "x": 100.0, "y": 200.0}``
+     - Move the pointer to compositor-space ``(x, y)`` without clicking.
+       Parity with ``xdotool mousemove``; useful for hover-only tests
+       and for composing drags (``move_mouse`` → ``inject_click``).
+       Does not change keyboard focus.
+   * - ``{"type": "pointer_position"}``
+     - Read the current pointer location. Reply is ``pointer_position``.
+       Read-only and not gated by automation.
    * - ``{"type": "pick_window"}``
      - Enter interactive picker mode: the WM waits for the user's next
        click and replies with ``picked_window``. Pointer/keyboard input
@@ -132,7 +140,7 @@ Automation gate
 The following requests refuse with an ``error`` while
 ``[general].automation_enabled`` is off (and the CLI flag
 ``--enable-automation`` / the IPC ``set_automation`` haven't flipped
-it): ``inject_key``, ``inject_text``, ``inject_click``,
+it): ``inject_key``, ``inject_text``, ``inject_click``, ``move_mouse``,
 ``dispatch_action``, ``screenshot``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
@@ -172,6 +180,11 @@ The server replies with a single JSON object tagged by ``type``:
 
 ``screenshot``
     ``{"type": "screenshot", "path": "/absolute/path.png"}``.
+
+``pointer_position``
+    ``{"type": "pointer_position", "x": <f64>, "y": <f64>}``. Returned
+    in reply to ``pointer_position``; same coordinate system as
+    ``move_mouse`` / ``inject_click``.
 
 ``command_result``
     ``{"type": "command_result", "exit_code": <int>, "stdout": "...",

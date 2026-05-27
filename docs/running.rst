@@ -40,7 +40,8 @@ Command-line flags
     Force the runtime automation gate ON at startup, regardless of
     ``[general].automation_enabled`` in the config. The gate is off by
     default; ``inject_key`` / ``inject_text`` / ``inject_click`` /
-    ``screenshot`` / ``run_command`` / ``dispatch_action`` all refuse
+    ``move_mouse`` / ``screenshot`` / ``run_command`` /
+    ``dispatch_action`` all refuse
     while it is off. The runtime ``shoestring-ctl automation on/off``
     can still flip the gate; the config file is the source of truth at
     next start. See :doc:`ipc`.

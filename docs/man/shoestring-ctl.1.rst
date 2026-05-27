@@ -38,6 +38,11 @@ Query subcommands
     Print every connected output: ``name``, ``width``, ``height``,
     ``scale``.
 
+**pointer-position**
+    Print the current pointer location in compositor-space logical
+    coords as ``{"type":"pointer_position","x":...,"y":...}``. Read-
+    only, not gated by automation.
+
 **find-windows** [**--title** *RE*] [**--app-id** *RE*]
     Like **windows** but filtered to those whose title and/or app_id
     match the given regular expressions. Each filter is independent
@@ -105,6 +110,11 @@ automation gate to be on.
     ``BTN_*`` code) at the current pointer. Pass ``--x`` and ``--y``
     together to move the pointer to compositor-space coordinates
     first.
+
+**move-mouse** *X* *Y*
+    Move the pointer to compositor-space ``(X, Y)`` without clicking.
+    Parity with ``xdotool mousemove``; useful for hover-only tests and
+    for setting up a drag (``move-mouse`` → ``click``).
 
 **screenshot** [**--output** *NAME*] [**--region** *X,Y,W,H*]
     Capture a PNG via the WM's wlr-screencopy server. ``--output``

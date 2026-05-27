@@ -75,6 +75,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         y: Option<f64>,
     },
+    /// Move the pointer to compositor-space `(x, y)` without clicking.
+    /// Parity with `xdotool mousemove`; useful for hover-only tests and
+    /// for setting up a drag (move → press → move → release). Does not
+    /// change keyboard focus — pointer focus follows the motion the same
+    /// way it would for a real `wl_pointer.motion` event. Gated by
+    /// `set_automation`. Reply is [`Response::Ok`].
+    MoveMouse { x: f64, y: f64 },
+    /// Read the current pointer location in compositor-space logical
+    /// coords. Reply is [`Response::PointerPosition`]. Read-only and not
+    /// gated by automation — pure observation, useful for verifying that
+    /// an earlier `move_mouse` / `inject_click` landed where it should.
+    PointerPosition,
     /// Lock the session. Spawns the WM's configured lock binary
     /// (`general.lock_command`); the binary itself drives the
     /// `ext-session-lock-v1` handshake. Returns immediately with
@@ -272,6 +284,13 @@ pub enum Response {
     PickedWindow {
         window: Option<WindowSummary>,
     },
+    /// Result of [`Request::PointerPosition`]. Compositor-space logical
+    /// coords — same coordinate system that [`Request::MoveMouse`] and
+    /// [`Request::InjectClick`] take.
+    PointerPosition {
+        x: f64,
+        y: f64,
+    },
     /// Server-side error; the client should print and exit non-zero.
     Error {
         message: String,
@@ -439,6 +458,30 @@ mod tests {
                 y: Some(_)
             } if button == "right"
         ));
+    }
+
+    #[test]
+    fn move_mouse_and_pointer_position_shapes() {
+        let mv = Request::MoveMouse { x: 100.0, y: 200.5 };
+        assert_eq!(
+            serde_json::to_string(&mv).unwrap(),
+            r#"{"type":"move_mouse","x":100.0,"y":200.5}"#
+        );
+        let back: Request =
+            serde_json::from_str(r#"{"type":"move_mouse","x":1.0,"y":2.0}"#).unwrap();
+        assert!(matches!(back, Request::MoveMouse { x, y } if x == 1.0 && y == 2.0));
+
+        let q = Request::PointerPosition;
+        assert_eq!(
+            serde_json::to_string(&q).unwrap(),
+            r#"{"type":"pointer_position"}"#
+        );
+
+        let resp = Response::PointerPosition { x: 10.0, y: 20.0 };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"pointer_position","x":10.0,"y":20.0}"#
+        );
     }
 
     #[test]

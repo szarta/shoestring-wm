@@ -84,6 +84,19 @@ enum Command {
         #[arg(long, requires = "x")]
         y: Option<f64>,
     },
+    /// Move the pointer to compositor-space (X, Y) without clicking. Same
+    /// coordinate system as `click --x --y`. Useful for hover-only tests
+    /// and for composing drags. Requires the automation gate.
+    MoveMouse {
+        /// X coordinate to move the pointer to.
+        x: f64,
+        /// Y coordinate to move the pointer to.
+        y: f64,
+    },
+    /// Print the current pointer location as
+    /// `{"type":"pointer_position","x":...,"y":...}`. Read-only and not
+    /// gated by automation.
+    PointerPosition,
     /// Lock the session. Spawns the WM's configured lock binary
     /// (`general.lock_command` in the WM config, default
     /// `shoestring-lock`).
@@ -199,6 +212,8 @@ fn main() -> Result<()> {
         Command::Key { keysym } => Request::InjectKey { keysym },
         Command::Type { text } => Request::InjectText { text },
         Command::Click { button, x, y } => Request::InjectClick { button, x, y },
+        Command::MoveMouse { x, y } => Request::MoveMouse { x, y },
+        Command::PointerPosition => Request::PointerPosition,
         Command::Lock => Request::Lock,
         Command::Automation { action } => match action {
             AutomationAction::On => Request::SetAutomation { enabled: true },

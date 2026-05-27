@@ -477,6 +477,20 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::MoveMouse { x, y } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                state.inject_move_mouse(x, y);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
+            Request::PointerPosition => {
+                let (x, y) = state.pointer_position();
+                let _ = write_response(client, &Response::PointerPosition { x, y });
+                return true;
+            }
             Request::FindWindows { title, app_id } => {
                 let resp = match find_windows(state, title.as_deref(), app_id.as_deref()) {
                     Ok(windows) => Response::Windows { windows },
