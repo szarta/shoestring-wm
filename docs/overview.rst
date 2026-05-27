@@ -9,10 +9,14 @@ finish out the desktop:
 ============================  ==========================================
 **shoestring-wm**             The compositor: input, output, layout, IPC.
 **shoestring-bar**            A status bar (workspaces, focused window,
-                              clock) — consumes the WM's IPC stream.
+                              clock, battery) — consumes the WM's IPC
+                              stream.
 **shoestring-menu**           A dmenu-style launcher for commands and
                               bookmarks; bound to ``Super+P`` /
                               ``Super+B`` by default.
+**shoestring-notify**         Notification daemon
+                              (``org.freedesktop.Notifications``);
+                              renders pop-ups via layer-shell.
 ============================  ==========================================
 
 Design philosophy
@@ -94,7 +98,8 @@ Implemented today:
 - HiDPI / output-scale handling (integer and fractional).
 - wlr-screencopy + region picker (``shoestring-screenshot`` +
   ``shoestring-region``).
-- ``ext-session-lock-v1`` + PAM unlock via ``shoestring-lock``.
+- ``ext-session-lock-v1`` + PAM unlock via ``shoestring-lock``, with an
+  xscreensaver-style maze-2d screensaver rendered behind the prompt.
 - TOML config hot-reload via filesystem watcher (and an explicit
   ``reload-config`` action / IPC trigger).
 - Configurable autostart list.

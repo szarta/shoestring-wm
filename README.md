@@ -23,9 +23,12 @@ The workspace ships the WM plus the small helpers it spawns:
 ## Sibling projects
 
 - **[shoestring-bar](https://github.com/szarta/shoestring-bar)** — status
-  bar (workspaces, focused window, clock).
+  bar (workspaces, focused window, clock, battery).
 - **[shoestring-menu](https://github.com/szarta/shoestring-menu)** —
   dmenu-style launcher for commands and bookmarks.
+- **[shoestring-notify](https://github.com/szarta/shoestring-notify)** —
+  desktop notification daemon (`org.freedesktop.Notifications` via
+  layer-shell).
 
 ## Quick start
 
@@ -37,8 +40,9 @@ sudo apt install build-essential pkg-config \
     libudev-dev libinput-dev libseat-dev libdisplay-info-dev \
     libpam0g-dev
 
-# Build (release; all workspace binaries land in target/release/)
-cargo build --release
+# Build (release; all workspace binaries land in target/release/).
+# `--workspace` rebuilds the helper crates too, not just the WM.
+cargo build --release --workspace
 
 # Drop them on $PATH — the WM and every helper it spawns
 install -Dm755 -t ~/.local/bin/ \
@@ -117,7 +121,8 @@ Working today:
 - Per-app window rules (app\_id / title → workspace, position, size).
 - Config hot-reload via `notify` watcher (and `shoestring-ctl reload-config`).
 - Configurable autostart list.
-- `ext-session-lock-v1` + PAM unlock via `shoestring-lock`.
+- `ext-session-lock-v1` + PAM unlock via `shoestring-lock`, with an
+  xscreensaver-style maze-2d screensaver underneath the prompt.
 - wlr-screencopy + region picker + IPC `screenshot` request.
 - IPC server: queries, event stream, `inject_key`/`text`/`click`,
   `move_mouse` + `pointer_position`,
@@ -132,10 +137,9 @@ Working today:
 
 Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
 
-- Notification daemon (`shoestring-notify`, `org.freedesktop.Notifications`).
-- Workspace switch indicator popup.
 - Server-side decoration rendering (border + optional titlebar).
 - FreeBSD smoke-test of the winit build.
+- BSD branches for the `shoestring-brightness-*` helper scripts.
 
 ## License
 

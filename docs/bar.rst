@@ -86,17 +86,24 @@ passed. The written contents match the schema below.
 .. code-block:: toml
 
     [bar]
-    position    = "bottom"   # "bottom" | "top"
-    height      = 24
-    background  = "#222222"  # #RGB, #RRGGBB, or #AARRGGBB
-    foreground  = "#ffffff"
-    font        = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    font_size   = 14.0
+    position        = "bottom"   # "bottom" | "top"
+    height          = 24
+    background      = "#222222"  # #RGB, #RRGGBB, or #AARRGGBB
+    foreground      = "#ffffff"
+    font            = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    font_size       = 14.0
+    show_workspaces = true       # hide the box cluster + active name
 
     [clock]
-    format = "%a %b %d  %H:%M"  # strftime(3) pattern
-    # format = "24h-short"       # alias for "%H:%M"
-    # format = "iso"             # alias for "%Y-%m-%d %H:%M:%S"
+    format = "%a %b %d  %H:%M"   # strftime(3) pattern
+    # format = "24h-short"        # alias for "%H:%M"
+    # format = "iso"              # alias for "%Y-%m-%d %H:%M:%S"
+
+    [battery]
+    show               = true             # auto-hidden when no battery
+    format             = "{pct}%{sign}"   # 85%- discharging, 85%+ charging
+    low_threshold      = 20               # orange at or below
+    critical_threshold = 10               # red at or below
 
 Colors are parsed as hex; an opaque alpha is assumed unless you spell out
 all eight digits. Font resolution order is ``[bar].font`` →
@@ -104,6 +111,38 @@ all eight digits. Font resolution order is ``[bar].font`` →
 
 The clock format is passed straight to ``libc::strftime``; the two
 named aliases above are the only special-cased values.
+
+Battery indicator
+-----------------
+
+When present, the battery readout is drawn immediately to the left of
+the clock (and to the left of the ``AUTO`` automation chip when that's
+shown). It re-polls on the bar's existing 1-second tick — no extra
+file descriptors.
+
+Source detection runs once at startup and falls through per platform:
+
+- **Linux**: the first ``/sys/class/power_supply/BAT*`` entry
+  (``capacity`` + ``status`` files).
+- **FreeBSD**: ``sysctlbyname`` against
+  ``hw.acpi.battery.{life,state,units}``. ``units == 0`` is treated
+  as "no battery present".
+- **Other OSes** (and BSDs without an ACPI battery): the indicator is
+  hidden entirely so the bar layout doesn't reserve dead space.
+
+Format placeholders:
+
+``{pct}``
+    Current capacity as an integer (e.g. ``85``).
+
+``{sign}``
+    ``+`` while charging, ``-`` while discharging, empty string when
+    full or in an unknown state.
+
+Color override: below ``low_threshold`` the indicator paints orange;
+below ``critical_threshold`` it paints red. Both thresholds are only
+applied while discharging — a charging or full battery stays in the
+normal foreground color even at low capacity.
 
 Limitations (v1)
 ----------------
