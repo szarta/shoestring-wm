@@ -22,6 +22,12 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/shoestring-wm"
 mkdir -p "$log_dir"
 log_file="$log_dir/wm.log"
+# Catch-all for the WM's own stderr (EGL / wgpu chatter that bypasses
+# tracing) and — more importantly — every spawned client's stderr,
+# since children inherit our fds. shoestring-bar writes tracing to
+# stderr with no log-file env of its own; without this capture its
+# panics / errors vanish into the framebuffer.
+stderr_file="$log_dir/stderr.log"
 
 cargo build --release --manifest-path "$repo/Cargo.toml"
 
@@ -36,6 +42,10 @@ export PATH="$repo/target/release:$PATH"
 export SHOESTRING_WM_LOG="$log_file"
 export RUST_LOG="${RUST_LOG:-info}"
 
-echo "shoestring-wm: logging to $log_file" >&2
-echo "  tail -f $log_file   (from another TTY / SSH session)" >&2
+echo "shoestring-wm: tracing -> $log_file" >&2
+echo "shoestring-wm: stderr (incl. spawned children) -> $stderr_file" >&2
+echo "  tail -f $log_file $stderr_file   (from another TTY / SSH session)" >&2
+# Redirect stderr first, then exec. Children inherit fd 2 → file, so
+# bar/menu/lock crash output lands in stderr.log too.
+exec >>"$stderr_file" 2>&1
 exec "$repo/target/release/shoestring-wm" --backend tty "$@"
