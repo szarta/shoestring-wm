@@ -193,7 +193,7 @@ impl ShoestringWm {
             }
             Action::ChangeVt { vt } => self.change_vt(vt),
             Action::InjectKey { keysym } => {
-                if let Err(e) = self.inject_key(&keysym) {
+                if let Err(e) = self.inject_key(&keysym, &[]) {
                     tracing::warn!(keysym, error = %e, "inject_key failed");
                 }
             }

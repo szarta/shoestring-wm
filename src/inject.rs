@@ -46,16 +46,41 @@ pub enum InjectError {
 }
 
 impl ShoestringWm {
-    pub fn inject_key(&mut self, keysym_name: &str) -> Result<(), InjectError> {
+    pub fn inject_key(
+        &mut self,
+        keysym_name: &str,
+        modifiers: &[String],
+    ) -> Result<(), InjectError> {
+        // Resolve everything up-front so a typo in any modifier aborts
+        // before we've started pressing keys — half-applied chords leave
+        // sticky modifiers on the focused surface.
+        let mut mod_keycodes: Vec<u32> = Vec::with_capacity(modifiers.len());
+        for m in modifiers {
+            let resolved = resolve_modifier_alias(m).unwrap_or(m.as_str());
+            let sym = parse_keysym_name(resolved)?;
+            let key = self
+                .resolve_keysym(sym)
+                .ok_or_else(|| InjectError::KeysymNotInKeymap(resolved.to_string()))?;
+            mod_keycodes.push(key.keycode);
+        }
         let sym = parse_keysym_name(keysym_name)?;
         let key = self
             .resolve_keysym(sym)
             .ok_or_else(|| InjectError::KeysymNotInKeymap(keysym_name.to_string()))?;
-        tracing::debug!(keysym_name, keycode = key.keycode, "inject_key dispatch");
-        // For a bare `inject_key`, ignore the modifier requirement — the
-        // caller asked for a keysym, not for a chord. Anything that needs
-        // an explicit modifier should compose key injections.
+        tracing::debug!(
+            keysym_name,
+            keycode = key.keycode,
+            modifiers = ?modifiers,
+            "inject_key dispatch",
+        );
+
+        for kc in &mod_keycodes {
+            self.press_key(*kc);
+        }
         self.tap_key(key.keycode);
+        for kc in mod_keycodes.iter().rev() {
+            self.release_key(*kc);
+        }
         Ok(())
     }
 
@@ -269,6 +294,21 @@ struct ResolvedKey {
     shifted: bool,
 }
 
+/// Map a short modifier name (case-insensitive) to its canonical xkb
+/// keysym name. Aliases match the WM's own keybind parser so chord
+/// strings written for `[[bindings]]` work verbatim in IPC requests.
+/// Returns `None` for names that aren't an alias — callers fall back to
+/// treating the input as a literal keysym name.
+fn resolve_modifier_alias(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "super" | "logo" | "mod4" | "win" => Some("Super_L"),
+        "ctrl" | "control" => Some("Control_L"),
+        "alt" | "mod1" => Some("Alt_L"),
+        "shift" => Some("Shift_L"),
+        _ => None,
+    }
+}
+
 fn parse_keysym_name(name: &str) -> Result<Keysym, InjectError> {
     let sym = xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS);
     if sym == Keysym::NoSymbol {
@@ -328,6 +368,23 @@ mod tests {
             parse_keysym_name("definitely-not-a-keysym").unwrap_err(),
             InjectError::UnknownKeysym(_)
         ));
+    }
+
+    #[test]
+    fn modifier_aliases_match_keybind_parser() {
+        assert_eq!(resolve_modifier_alias("super"), Some("Super_L"));
+        assert_eq!(resolve_modifier_alias("Super"), Some("Super_L"));
+        assert_eq!(resolve_modifier_alias("LOGO"), Some("Super_L"));
+        assert_eq!(resolve_modifier_alias("mod4"), Some("Super_L"));
+        assert_eq!(resolve_modifier_alias("win"), Some("Super_L"));
+        assert_eq!(resolve_modifier_alias("ctrl"), Some("Control_L"));
+        assert_eq!(resolve_modifier_alias("control"), Some("Control_L"));
+        assert_eq!(resolve_modifier_alias("alt"), Some("Alt_L"));
+        assert_eq!(resolve_modifier_alias("mod1"), Some("Alt_L"));
+        assert_eq!(resolve_modifier_alias("shift"), Some("Shift_L"));
+        // Non-aliases fall through so raw keysym names still work.
+        assert_eq!(resolve_modifier_alias("Hyper_L"), None);
+        assert_eq!(resolve_modifier_alias("q"), None);
     }
 
     #[test]

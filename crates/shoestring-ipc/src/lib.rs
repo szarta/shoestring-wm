@@ -55,11 +55,28 @@ pub enum Request {
     /// Switch the connection into streaming mode: server sends one
     /// [`Response::Ok`] then a stream of [`Event`]s, one per line, forever.
     EventStream,
-    /// Synthesize a single keypress (press + release) targeting whichever
-    /// surface currently holds keyboard focus. `keysym` is an X keysym
-    /// name as understood by `xkb_keysym_from_name` (e.g. `"Return"`,
-    /// `"F5"`, `"q"`, `"BackSpace"`).
-    InjectKey { keysym: String },
+    /// Synthesize a keypress (press + release) targeting whichever surface
+    /// currently holds keyboard focus. `keysym` is an X keysym name as
+    /// understood by `xkb_keysym_from_name` (e.g. `"Return"`, `"F5"`,
+    /// `"q"`, `"BackSpace"`).
+    ///
+    /// When `modifiers` is non-empty each modifier is pressed before the
+    /// main keysym and released after (in reverse order) — the focused
+    /// surface sees the key arrive with the right modifier mask, the same
+    /// way `xdotool key super+shift+q` works. Names are case-insensitive
+    /// and follow the WM's keybind alias table: `super` / `logo` / `mod4`
+    /// / `win`, `ctrl` / `control`, `alt` / `mod1`, `shift`. Anything
+    /// else is passed straight to `xkb_keysym_from_name`, so raw names
+    /// like `Hyper_L` or `Mode_switch` work too.
+    ///
+    /// Chords that the WM itself consumes (e.g. `Super+Shift+Q`) won't
+    /// reach the focused surface — use [`Request::DispatchAction`] for
+    /// those.
+    InjectKey {
+        keysym: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        modifiers: Vec<String>,
+    },
     /// Synthesize a sequence of keypresses that types `text`. v1 supports
     /// ASCII letters, digits, and space; other codepoints fall back to a
     /// server-side error so the caller knows to break the input up.
@@ -423,11 +440,37 @@ mod tests {
     fn inject_request_shapes() {
         let key = Request::InjectKey {
             keysym: "Return".into(),
+            modifiers: vec![],
         };
+        // Empty modifiers is skipped on the wire so the no-chord shape
+        // is unchanged from the pre-chord protocol.
         assert_eq!(
             serde_json::to_string(&key).unwrap(),
             r#"{"type":"inject_key","keysym":"Return"}"#
         );
+        // Legacy payloads without `modifiers` still deserialize.
+        let legacy: Request =
+            serde_json::from_str(r#"{"type":"inject_key","keysym":"Return"}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            Request::InjectKey { ref keysym, ref modifiers }
+                if keysym == "Return" && modifiers.is_empty()
+        ));
+        let chord = Request::InjectKey {
+            keysym: "q".into(),
+            modifiers: vec!["Super".into(), "Shift".into()],
+        };
+        assert_eq!(
+            serde_json::to_string(&chord).unwrap(),
+            r#"{"type":"inject_key","keysym":"q","modifiers":["Super","Shift"]}"#
+        );
+        let s = serde_json::to_string(&chord).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Request::InjectKey { ref keysym, ref modifiers }
+                if keysym == "q" && modifiers == &["Super", "Shift"]
+        ));
         let typ = Request::InjectText { text: "hi".into() };
         assert_eq!(
             serde_json::to_string(&typ).unwrap(),

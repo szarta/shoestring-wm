@@ -280,12 +280,12 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 tracing::debug!(?id, "ipc client subscribed to events");
                 return false;
             }
-            Request::InjectKey { keysym } => {
+            Request::InjectKey { keysym, modifiers } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
                     return true;
                 }
-                let resp = match state.inject_key(&keysym) {
+                let resp = match state.inject_key(&keysym, &modifiers) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
                         message: e.to_string(),

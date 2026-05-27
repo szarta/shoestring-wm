@@ -58,12 +58,24 @@ enum Command {
     /// Stream events forever (one JSON line per event). Exits on socket
     /// close (typically when the WM quits).
     EventStream,
-    /// Synthesize a single keypress (press + release) targeting the
-    /// focused surface. KEYSYM is an X keysym name like "Return", "F5",
-    /// or "q".
+    /// Synthesize a keypress (press + release) targeting the focused
+    /// surface. KEYSYM is an X keysym name like "Return", "F5", or "q",
+    /// optionally prefixed with modifiers in `+`-syntax
+    /// (`super+shift+q`, xdotool-compatible). Pass `--mod` (repeatable)
+    /// for the same effect without parsing. Modifier aliases:
+    /// `super`/`logo`/`mod4`/`win`, `ctrl`/`control`, `alt`/`mod1`,
+    /// `shift` (case-insensitive). Chords the WM consumes
+    /// (e.g. `super+shift+q`) won't reach the focused surface — use
+    /// `dispatch-action` for those.
     Key {
-        /// X keysym name (e.g. "Return", "BackSpace", "Page_Up", "q").
+        /// X keysym name or `mod+mod+keysym` chord. The keysym is the
+        /// last `+`-separated token; everything before it becomes a
+        /// modifier (merged with `--mod`).
         keysym: String,
+        /// Modifier to hold while the keysym is pressed. Repeatable.
+        /// Released in reverse order after the keysym.
+        #[arg(short = 'm', long = "mod", value_name = "NAME")]
+        modifiers: Vec<String>,
     },
     /// Type a literal string into the focused surface. v1 supports ASCII
     /// letters, digits, and space; other characters return an error.
@@ -209,7 +221,10 @@ fn main() -> Result<()> {
         Command::FindWindows { title, app_id } => Request::FindWindows { title, app_id },
         Command::Outputs => Request::Outputs,
         Command::EventStream => Request::EventStream,
-        Command::Key { keysym } => Request::InjectKey { keysym },
+        Command::Key { keysym, modifiers } => {
+            let (keysym, modifiers) = split_chord(&keysym, modifiers);
+            Request::InjectKey { keysym, modifiers }
+        }
         Command::Type { text } => Request::InjectText { text },
         Command::Click { button, x, y } => Request::InjectClick { button, x, y },
         Command::MoveMouse { x, y } => Request::MoveMouse { x, y },
@@ -279,6 +294,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Split an xdotool-style chord arg (`super+shift+q`) into the trailing
+/// keysym and the leading modifier list, appended to any `--mod` the
+/// user already passed. A keysym with no `+` is returned unchanged.
+/// `--mod`s are listed first (preserving the user's order) and chord
+/// tokens follow, since the IPC presses modifiers in vector order.
+fn split_chord(keysym: &str, mut mods: Vec<String>) -> (String, Vec<String>) {
+    if !keysym.contains('+') {
+        return (keysym.to_string(), mods);
+    }
+    let mut parts: Vec<&str> = keysym.split('+').collect();
+    let keysym = parts.pop().expect("split always yields >=1 part");
+    for p in parts {
+        mods.push(p.to_string());
+    }
+    (keysym.to_string(), mods)
+}
+
 /// Expand a `dispatch-action` argument into the JSON Value the IPC
 /// expects. A bare kebab-case name like `quit` becomes `{"type":"quit"}`;
 /// anything starting with `{` is passed through as already-formed JSON.
@@ -319,4 +351,31 @@ fn print_value<T: serde::Serialize>(value: &T, pretty: bool) -> Result<()> {
     }
     out.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_chord;
+
+    #[test]
+    fn split_chord_passes_through_bare_keysym() {
+        let (k, m) = split_chord("Return", vec![]);
+        assert_eq!(k, "Return");
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn split_chord_extracts_modifiers() {
+        let (k, m) = split_chord("super+shift+q", vec![]);
+        assert_eq!(k, "q");
+        assert_eq!(m, vec!["super", "shift"]);
+    }
+
+    #[test]
+    fn split_chord_appends_to_existing_mods() {
+        // --mod values are pressed before chord-derived ones.
+        let (k, m) = split_chord("alt+x", vec!["ctrl".into()]);
+        assert_eq!(k, "x");
+        assert_eq!(m, vec!["ctrl", "alt"]);
+    }
 }

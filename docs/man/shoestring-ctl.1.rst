@@ -96,10 +96,18 @@ Injection subcommands (gated)
 These three are the xdotool-equivalent surface and require the
 automation gate to be on.
 
-**key** *KEYSYM*
-    Synthesize a single press + release of *KEYSYM* (an X keysym name
-    like ``Return``, ``F5``, ``BackSpace``, ``q``) targeting the
-    focused surface.
+**key** *KEYSYM* [**--mod** *NAME*]...
+    Synthesize a press + release of *KEYSYM* (an X keysym name like
+    ``Return``, ``F5``, ``BackSpace``, ``q``) targeting the focused
+    surface. *KEYSYM* may also be a ``+``-joined chord like
+    ``super+shift+q`` — the last token is the keysym and the rest are
+    treated as modifiers, xdotool-compatible. ``--mod`` (repeatable,
+    case-insensitive: ``super``/``logo``/``mod4``/``win``, ``ctrl``/
+    ``control``, ``alt``/``mod1``, ``shift``, or a raw keysym name like
+    ``Hyper_L``) appends extra modifiers; chord-derived modifiers are
+    pressed after any ``--mod`` and released first. Chords the WM
+    consumes (e.g. ``super+shift+q``) won't reach the focused surface
+    — use **dispatch-action** for those.
 
 **type** *TEXT*
     Type a literal string into the focused surface. v1 supports ASCII

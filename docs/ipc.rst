@@ -44,11 +44,20 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "event_stream"}``
      - Switch into streaming mode. Server replies once with ``Ok`` then
        pushes events.
-   * - ``{"type": "inject_key", "keysym": "Return"}``
-     - Synthesize a single keypress (press + release) targeting the
-       focused surface. ``keysym`` is any X keysym name understood by
+   * - ``{"type": "inject_key", "keysym": "Return", "modifiers": ["Super", "Shift"]}``
+     - Synthesize a keypress (press + release) targeting the focused
+       surface. ``keysym`` is any X keysym name understood by
        ``xkb_keysym_from_name`` (e.g. ``"Return"``, ``"F5"``,
-       ``"BackSpace"``, ``"q"``).
+       ``"BackSpace"``, ``"q"``). ``modifiers`` (optional, default
+       ``[]``) are pressed before the keysym and released after in
+       reverse order — the focused surface sees the chord with the
+       right modifier mask, the same way ``xdotool key super+shift+q``
+       works. Modifier names are case-insensitive and follow the
+       keybind alias table: ``super`` / ``logo`` / ``mod4`` / ``win``,
+       ``ctrl`` / ``control``, ``alt`` / ``mod1``, ``shift``; anything
+       else falls through to a raw keysym name (``Hyper_L`` etc.).
+       Chords the WM consumes (e.g. ``Super+Shift+Q``) won't reach the
+       focused surface — use ``dispatch_action`` for those.
    * - ``{"type": "inject_text", "text": "hello"}``
      - Type a literal string into the focused surface. v1 supports ASCII
        letters, digits, and space; other codepoints return an ``error``
@@ -287,6 +296,8 @@ subcommand maps to one request:
     ...
 
     $ shoestring-ctl key Return         # synthesize a single Enter press
+    $ shoestring-ctl key super+shift+q  # chord; +-syntax matches xdotool
+    $ shoestring-ctl key q -m ctrl -m shift   # equivalent, no parsing
     $ shoestring-ctl type "hello 123"   # type ASCII into focused surface
     $ shoestring-ctl click left         # click at the current pointer
     $ shoestring-ctl click left --x 200 --y 400
