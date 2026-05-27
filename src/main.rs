@@ -12,9 +12,12 @@ use anyhow::{anyhow, Context, Result};
 use rustbus::connection::ll_conn::force_finish_on_error;
 use rustbus::message_builder::MarshalledMessage;
 use rustbus::{peer, MessageType, RpcConn};
+use wayland_client::{Connection, EventQueue, QueueHandle};
 
+use crate::config::Config;
 use crate::dbus_iface::{notification_closed_signal, DispatchOutcome};
-use crate::state::{CloseReason, Queue};
+use crate::state::CloseReason;
+use crate::wayland::State;
 
 /// Read end of the self-pipe written by SIGINT/SIGTERM handlers. We store
 /// it in an atomic so the async-signal-safe handler can just call
@@ -34,13 +37,11 @@ fn main() -> Result<()> {
         "shoestring-notify starting"
     );
 
-    let mut rpc = dbus_iface::acquire_bus()?;
-    let mut queue = Queue::new();
+    let cfg = Config::default();
+    let (conn, mut queue, qh, mut state) = wayland::init(cfg)?;
 
-    // Filter out anything that isn't aimed at us. Calls that don't pass the
-    // filter get an automatic UnknownMethod reply from RpcConn — fine for
-    // stray broadcasts and accidental misroutes.
-    rpc.set_filter(Box::new(|msg| match msg.typ {
+    // Filter rustbus traffic down to messages aimed at us (plus peer).
+    state.rpc.set_filter(Box::new(|msg| match msg.typ {
         MessageType::Call => peer::filter_peer(&msg.dynheader) || aimed_at_us(msg),
         MessageType::Signal | MessageType::Reply | MessageType::Error => true,
         MessageType::Invalid => false,
@@ -51,9 +52,11 @@ fn main() -> Result<()> {
     install_signal_handlers()?;
 
     let timer_fd = create_timerfd().context("create expiry timerfd")?;
-    let dbus_fd = rpc.conn().as_raw_fd();
+    let dbus_fd = state.rpc.conn().as_raw_fd();
 
-    run_loop(&mut rpc, &mut queue, dbus_fd, shutdown_r, timer_fd)?;
+    run_loop(
+        &conn, &mut queue, &qh, &mut state, dbus_fd, shutdown_r, timer_fd,
+    )?;
 
     tracing::info!("shoestring-notify exiting cleanly");
     Ok(())
@@ -64,93 +67,130 @@ fn aimed_at_us(msg: &MarshalledMessage) -> bool {
 }
 
 fn run_loop(
-    rpc: &mut RpcConn,
-    queue: &mut Queue,
+    conn: &Connection,
+    queue: &mut EventQueue<State>,
+    qh: &QueueHandle<State>,
+    state: &mut State,
     dbus_fd: RawFd,
     shutdown_r: RawFd,
     timer_fd: RawFd,
 ) -> Result<()> {
-    loop {
-        let mut fds = [
-            libc::pollfd {
-                fd: dbus_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: shutdown_r,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: timer_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
+    while state.running {
+        // Bring surfaces into sync with the queue, restack, paint.
+        wayland::sync_surfaces(state, qh);
 
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        // Flush wayland requests, prep for read.
+        conn.flush()?;
+        let guard = conn.prepare_read();
+        let wayland_fd = guard.as_ref().map(|g| g.connection_fd().as_raw_fd());
+
+        // Build the pollfd array. Order: dbus, shutdown, timer, [wayland].
+        let mut fds: [libc::pollfd; 4] = unsafe { std::mem::zeroed() };
+        let mut nfds: libc::nfds_t = 0;
+        let mut wayland_idx: Option<usize> = None;
+        for fd in [Some(dbus_fd), Some(shutdown_r), Some(timer_fd), wayland_fd]
+            .into_iter()
+            .flatten()
+        {
+            fds[nfds as usize] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            nfds += 1;
+        }
+        if wayland_fd.is_some() {
+            wayland_idx = Some((nfds - 1) as usize);
+        }
+
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), nfds, -1) };
         if rc < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
+                drop(guard);
                 continue;
             }
             return Err(anyhow!("poll failed: {err}"));
         }
 
+        // 1. Shutdown short-circuits everything else.
         if fds[1].revents & libc::POLLIN != 0 {
+            drop(guard);
             tracing::debug!("shutdown signal received");
             return Ok(());
         }
 
+        // 2. dbus.
         if fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-            drain_and_dispatch(rpc, queue)?;
+            drain_and_dispatch(state)?;
         }
 
+        // 3. timerfd.
         if fds[2].revents & libc::POLLIN != 0 {
             drain_timerfd(timer_fd);
-            handle_expirations(rpc, queue)?;
+            handle_expirations(state)?;
         }
 
-        rearm_timerfd(timer_fd, queue.next_expiry(), Instant::now())?;
+        // 4. wayland — must consume the prepared read regardless of
+        //    whether it had POLLIN, otherwise the guard's prepare_read
+        //    invariant gets held across the next iteration.
+        if let Some(guard) = guard {
+            let idx = wayland_idx.expect("wayland_idx set when guard exists");
+            if fds[idx].revents & libc::POLLIN != 0 {
+                if let Err(e) = guard.read() {
+                    // WouldBlock here is benign — POLLIN can fire after
+                    // wayland-rs already drained the fd inside prepare_read.
+                    if !matches!(&e, wayland_client::backend::WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        tracing::warn!(error = ?e, "wayland read failed");
+                    }
+                }
+            } else {
+                drop(guard);
+            }
+        }
+        queue.dispatch_pending(state)?;
+
+        // 5. Always rearm the timerfd from the current queue state. The
+        //    dispatch above may have changed `next_expiry`.
+        rearm_timerfd(timer_fd, state.queue.next_expiry(), Instant::now())?;
     }
+    Ok(())
 }
 
-fn drain_and_dispatch(rpc: &mut RpcConn, queue: &mut Queue) -> Result<()> {
-    // refill_all is nonblocking — it pulls every message currently buffered
-    // in the kernel's socket, queues calls/signals/responses internally, and
-    // returns auto-generated UnknownMethod replies for filtered-out calls
-    // (we still have to actually send those).
-    let auto_errors = rpc.refill_all().map_err(|e| anyhow!("refill_all: {e:?}"))?;
+fn drain_and_dispatch(state: &mut State) -> Result<()> {
+    let auto_errors = state
+        .rpc
+        .refill_all()
+        .map_err(|e| anyhow!("refill_all: {e:?}"))?;
     for mut reply in auto_errors {
-        send_message(rpc, &mut reply)?;
+        send_message(&mut state.rpc, &mut reply)?;
     }
 
-    while let Some(call) = rpc.try_get_call() {
-        // Peer interface (Ping, GetMachineId) is handled by rustbus itself.
-        if peer::handle_peer_message(&call, rpc.conn_mut())
+    while let Some(call) = state.rpc.try_get_call() {
+        if peer::handle_peer_message(&call, state.rpc.conn_mut())
             .map_err(|e| anyhow!("handle peer: {e:?}"))?
         {
             continue;
         }
-
-        let DispatchOutcome { reply, signals } = dbus_iface::dispatch(&call, queue, Instant::now());
+        let DispatchOutcome { reply, signals } =
+            dbus_iface::dispatch(&call, &mut state.queue, Instant::now());
         if let Some(mut reply) = reply {
-            send_message(rpc, &mut reply)?;
+            send_message(&mut state.rpc, &mut reply)?;
         }
         for mut sig in signals {
-            send_message(rpc, &mut sig)?;
+            send_message(&mut state.rpc, &mut sig)?;
         }
     }
     Ok(())
 }
 
-fn handle_expirations(rpc: &mut RpcConn, queue: &mut Queue) -> Result<()> {
-    let expired = queue.drain_expired(Instant::now());
+fn handle_expirations(state: &mut State) -> Result<()> {
+    let expired = state.queue.drain_expired(Instant::now());
     for id in expired {
         tracing::info!(id, "notification expired");
         let mut sig = notification_closed_signal(id, CloseReason::Expired);
-        send_message(rpc, &mut sig)?;
+        send_message(&mut state.rpc, &mut sig)?;
     }
     Ok(())
 }
@@ -188,11 +228,11 @@ fn create_timerfd() -> std::io::Result<RawFd> {
 
 /// Rearm the timerfd to fire at `next_expiry`. Passing `None` disarms it.
 ///
-/// We use relative arming (it_value = duration_from_now) rather than absolute
-/// TFD_TIMER_ABSTIME, because `std::time::Instant` is opaque — we can't pull
-/// a CLOCK_MONOTONIC `timespec` out of it without going via Duration math
-/// anyway. A 1ns floor handles "already in the past" (kernel rejects a zero
-/// it_value as a disarm).
+/// We use relative arming (it_value = duration_from_now) rather than
+/// absolute TFD_TIMER_ABSTIME because `std::time::Instant` is opaque —
+/// we can't pull a CLOCK_MONOTONIC `timespec` out of it without going
+/// via Duration math anyway. A 1ns floor handles "already in the past"
+/// since the kernel treats a zero it_value as disarm.
 fn rearm_timerfd(fd: RawFd, next_expiry: Option<Instant>, now: Instant) -> Result<()> {
     let it_value = match next_expiry {
         None => libc::timespec {
@@ -231,9 +271,6 @@ fn rearm_timerfd(fd: RawFd, next_expiry: Option<Instant>, now: Instant) -> Resul
     Ok(())
 }
 
-/// Read the 8-byte expiration counter so the fd becomes unreadable again.
-/// We don't actually care about the count — `drain_expired` will fish out
-/// every notification whose deadline has passed.
 fn drain_timerfd(fd: RawFd) {
     let mut buf = [0u8; 8];
     unsafe {

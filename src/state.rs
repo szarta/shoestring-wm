@@ -26,10 +26,10 @@ impl Urgency {
 }
 
 /// Reason field of `org.freedesktop.Notifications.NotificationClosed`.
-/// Reason 2 (DismissedByUser) lands when wayland click-to-dismiss is wired.
 #[derive(Debug, Clone, Copy)]
 pub enum CloseReason {
     Expired = 1,
+    DismissedByUser = 2,
     ClosedByCall = 3,
 }
 
@@ -45,6 +45,10 @@ pub struct Notification {
     /// `None` when the notification never auto-expires (critical, or
     /// the client passed expire_timeout == 0).
     pub expires_at: Option<Instant>,
+    /// Bumped on every replace. Surface code compares against its
+    /// last-drawn revision to decide whether the displayed buffer is
+    /// stale and needs a new paint.
+    pub revision: u64,
 }
 
 pub struct NotifyArgs {
@@ -88,6 +92,7 @@ impl Queue {
                 slot.urgency = args.urgency;
                 slot.image_path = args.image_path;
                 slot.expires_at = expires_at;
+                slot.revision += 1;
                 return slot.id;
             }
             // Spec edge case: replaces_id points at an unknown id. We
@@ -111,8 +116,17 @@ impl Queue {
             urgency: args.urgency,
             image_path: args.image_path,
             expires_at,
+            revision: 0,
         });
         id
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Notification> {
+        self.items.iter()
+    }
+
+    pub fn get(&self, id: u32) -> Option<&Notification> {
+        self.items.iter().find(|n| n.id == id)
     }
 
     /// Remove a notification by id. Returns true if anything was removed.
@@ -183,10 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn replaces_id_updates_in_place_same_id() {
+    fn replaces_id_updates_in_place_same_id_and_bumps_revision() {
         let mut q = Queue::new();
         let now = Instant::now();
         let id = q.notify(args(0, Urgency::Normal, -1), now);
+        assert_eq!(q.items[0].revision, 0);
         let again = q.notify(
             NotifyArgs {
                 summary: "replaced".into(),
@@ -197,6 +212,7 @@ mod tests {
         assert_eq!(id, again);
         assert_eq!(q.items.len(), 1);
         assert_eq!(q.items[0].summary, "replaced");
+        assert_eq!(q.items[0].revision, 1);
     }
 
     #[test]

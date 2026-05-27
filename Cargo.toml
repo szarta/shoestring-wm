@@ -22,6 +22,7 @@ fontdue = "0.9"
 # wl_shm pool: mmap an anon tempfile, hand the fd to the compositor,
 # draw into the mapping directly.
 memmap2 = "0.9"
+tempfile = "3"
 
 # org.freedesktop.Notifications session-bus service. Pure-Rust DBus
 # stack — no libdbus/zbus async runtime.
