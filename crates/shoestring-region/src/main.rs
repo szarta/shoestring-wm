@@ -797,10 +797,8 @@ impl Dispatch<WlPointer, ()> for State {
                             mark_all_dirty(state);
                         }
                     }
-                    WEnum::Value(ButtonState::Released) => {
-                        if state.drag_start.is_some() {
-                            commit_selection(state);
-                        }
+                    WEnum::Value(ButtonState::Released) if state.drag_start.is_some() => {
+                        commit_selection(state);
                     }
                     _ => {}
                 }

@@ -18,6 +18,11 @@
 //! Font resolution mirrors `shoestring-bar`: `$SHOESTRING_CONFIRM_FONT`
 //! first, then a small list of common system sans-serif paths.
 
+// Drawing primitives take (mmap, w, h, x, y, w, h, color) in positional
+// form — same pattern shoestring-bar uses; wrapping each in a struct
+// buys nothing for readability.
+#![allow(clippy::too_many_arguments)]
+
 use std::{
     env, fs,
     os::fd::{AsFd, AsRawFd},
