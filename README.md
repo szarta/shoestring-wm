@@ -8,27 +8,23 @@ JSON IPC. No animations, no decoration polish, no built-in bar.
 
 ## In-repo binaries
 
-The workspace ships the WM plus the small helpers it spawns:
+The workspace ships the WM plus every helper and desktop sibling it
+spawns. As of the monorepo migration, bar/menu/notify live in
+`crates/` alongside the original helpers — one `cargo build
+--workspace` produces everything below.
 
 | Binary | Purpose |
 |---|---|
 | `shoestring-wm` | The window manager itself (winit + TTY backends). |
+| `shoestring-bar` | Status bar (workspaces, focused window, clock, battery; consumes WM IPC). |
+| `shoestring-menu` | dmenu-style launcher for commands and bookmarks. |
+| `shoestring-notify` | `org.freedesktop.Notifications` daemon (layer-shell pop-ups). |
 | `shoestring-ctl` | Command-line IPC client (query state, fire actions, subscribe to events). |
-| `shoestring-lock` | Session locker (`ext-session-lock-v1`), PAM-authenticated. |
+| `shoestring-lock` | Session locker (`ext-session-lock-v1`), PAM-authenticated, maze screensaver. |
 | `shoestring-screenshot` | PNG capture via wlr-screencopy; optional region via `shoestring-region`. |
 | `shoestring-region` | Slurp-equivalent rectangle picker. |
 | `shoestring-kill` | xkill-equivalent click-to-close picker. |
 | `shoestring-confirm` | Modal yes/no helper (used by `Quit`, reusable for other destructive actions). |
-
-## Sibling projects
-
-- **[shoestring-bar](https://github.com/szarta/shoestring-bar)** — status
-  bar (workspaces, focused window, clock, battery).
-- **[shoestring-menu](https://github.com/szarta/shoestring-menu)** —
-  dmenu-style launcher for commands and bookmarks.
-- **[shoestring-notify](https://github.com/szarta/shoestring-notify)** —
-  desktop notification daemon (`org.freedesktop.Notifications` via
-  layer-shell).
 
 ## Quick start
 
@@ -44,9 +40,9 @@ sudo apt install build-essential pkg-config \
 # `--workspace` rebuilds the helper crates too, not just the WM.
 cargo build --release --workspace
 
-# Drop them on $PATH — the WM and every helper it spawns
+# Drop them on $PATH — the WM and every helper / sibling it spawns.
 install -Dm755 -t ~/.local/bin/ \
-  target/release/shoestring-{wm,ctl,lock,screenshot,region,kill,confirm}
+  target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
 
 # Bootstrap a config at ~/.config/shoestring-wm/config.toml
 shoestring-wm --write-default-config

@@ -27,15 +27,19 @@ Build
 
     git clone https://github.com/szarta/shoestring-wm
     cd shoestring-wm
-    cargo build --release
-    # Or, winit-only dev build (skip the DRM stack):
-    cargo build --release --no-default-features --features winit
+    # --workspace builds the WM plus every helper and sibling
+    # (bar, menu, notify, lock, ctl, screenshot, region, ...).
+    cargo build --release --workspace
+    # Or, winit-only dev build of just the WM (skip the DRM stack):
+    cargo build --release --no-default-features --features winit -p shoestring-wm
 
-The compiled binary is at ``target/release/shoestring-wm``. Drop it on
-``$PATH`` (e.g. ``cargo install --path .``) and bootstrap a config:
+The compiled binaries land under ``target/release/``. Drop the ones
+you want on ``$PATH``:
 
 ::
 
+    install -Dm755 -t ~/.local/bin/ \
+        target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
     shoestring-wm --write-default-config
 
 Distro packages

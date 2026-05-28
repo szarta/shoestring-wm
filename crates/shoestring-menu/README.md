@@ -7,8 +7,12 @@ layer-shell panel, pure `wayland-client`, two modes (**commands** and
 
 ## Build & run
 
+The menu is a workspace member of shoestring-wm. `cargo build
+--release --workspace` from the repo root builds it with everything
+else; to build just the menu:
+
 ```sh
-cargo install --path .
+cargo build --release -p shoestring-menu
 shoestring-menu                    # commands mode
 shoestring-menu --mode bookmarks   # bookmarks mode
 ```

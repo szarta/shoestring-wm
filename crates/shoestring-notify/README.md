@@ -16,8 +16,12 @@ follow-up milestones.
 
 ## Build & run
 
+The daemon is a workspace member of shoestring-wm. `cargo build
+--release --workspace` from the repo root builds it alongside
+everything else; to build just this binary:
+
 ```sh
-cargo install --path .
+cargo build --release -p shoestring-notify
 shoestring-notify
 ```
 

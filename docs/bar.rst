@@ -8,8 +8,10 @@ edge of an output, ``ext-foreign-toplevel-list-v1`` to track the open
 windows, and the shoestring-wm IPC stream for the active workspace and
 the currently focused window.
 
-The bar lives in its own repo at ``~/data/shoestring-bar`` and is
-released in lockstep with the WM.
+The bar lives in the shoestring-wm workspace at
+``crates/shoestring-bar/`` (it used to be a standalone sibling repo;
+folded in during the monorepo migration so a single
+``cargo build --workspace`` produces it alongside everything else).
 
 Running
 -------

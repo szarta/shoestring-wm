@@ -3,8 +3,9 @@ Overview
 
 shoestring-wm is a floating Wayland window manager written in Rust on top
 of the Smithay compositor toolkit. It is the daily-driver replacement for
-the author's Openbox/X11 setup, and it ships with two sibling tools that
-finish out the desktop:
+the author's Openbox/X11 setup. The repository is a Cargo workspace that
+ships the compositor alongside the small set of desktop pieces that
+finish out the environment:
 
 ============================  ==========================================
 **shoestring-wm**             The compositor: input, output, layout, IPC.

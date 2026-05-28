@@ -12,8 +12,12 @@ come from shoestring-wm's IPC stream.
 
 ## Build & run
 
+The bar is a workspace member of shoestring-wm. From the workspace
+root, `cargo build --release --workspace` builds it alongside
+everything else. To build just the bar:
+
 ```sh
-cargo install --path .
+cargo build --release -p shoestring-bar
 shoestring-bar
 ```
 
