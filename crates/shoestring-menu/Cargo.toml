@@ -1,0 +1,45 @@
+[package]
+name = "shoestring-menu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A lightweight dmenu-style launcher for shoestring-wm (commands and bookmarks)."
+repository = "https://github.com/szarta/shoestring-menu"
+
+[[bin]]
+name = "shoestring-menu"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland client + layer-shell. Same versions as shoestring-bar so the on-disk
+# cargo cache is shared and the deps tree stays uniform across the three
+# shoestring projects.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# Software font rasterizer (pure Rust, no fontconfig/freetype). Matches bar.
+fontdue = "0.9"
+
+# wl_shm pool: mmap an anon tempfile, hand the fd to the compositor.
+memmap2 = "0.9"
+tempfile = "3"
+
+# Lightweight error type for `main`.
+anyhow = "1"
+
+# Used for poll(2) on the wayland fd and a few exec/process bits. Already in
+# our tree via tempfile, so this is a zero-add.
+libc = "0.2"
+
+# Structured logs (env-filterable). Same env-var convention as wm/bar.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Keysym translation for wl_keyboard events. Same version shoestring-wm
+# resolves to, so the on-disk crate cache is shared.
+xkbcommon = "0.9"
+
+# skim-style fuzzy scoring. Small (one transitive crate, `thread_local`)
+# and gives dmenu/fzf-style subsequence matches out of the box.
+fuzzy-matcher = "0.3"

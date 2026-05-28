@@ -1,0 +1,4 @@
+target/
+
+# Local task tracker pointer (points at shoestring-wm/todo.sqlite).
+.todo-sqlite-cli
