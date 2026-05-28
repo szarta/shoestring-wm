@@ -1,0 +1,48 @@
+[package]
+name = "shoestring-bar"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A lightweight Wayland status bar for shoestring-wm."
+repository = "https://github.com/szarta/shoestring-bar"
+
+[[bin]]
+name = "shoestring-bar"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland client + the layer-shell / foreign-toplevel protocol bindings.
+# Versions match what shoestring-wm pulls via smithay, so both projects
+# share resolved deps on disk.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# Software font rasterizer. Pure Rust, no fontconfig/freetype.
+fontdue = "0.9"
+
+# Used for the wl_shm pool: mmap an anon tempfile, hand the fd to the
+# compositor, draw into the mapping directly.
+memmap2 = "0.9"
+tempfile = "3"
+
+# Lightweight error type for `main`.
+anyhow = "1"
+
+# Used solely for `localtime_r` (clock formatting) and `poll` (event-loop
+# wakeups for clock ticks). Already in our transitive tree via tempfile,
+# so this adds zero new crates.
+libc = "0.2"
+
+# shoestring-wm IPC wire types — for workspace + focus events. Path dep
+# across repo roots is deliberate: the two projects live side-by-side in
+# ~/data and ship as a pair.
+shoestring-ipc = { path = "../shoestring-wm/crates/shoestring-ipc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Structured logs (env-filterable). Match shoestring-wm so RUST_LOG works
+# the same way.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

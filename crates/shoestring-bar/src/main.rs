@@ -1,0 +1,1343 @@
+//! shoestring-bar: a lightweight Wayland status bar.
+//!
+//! Layer-shell anchored to the bottom of the focused output, drawing into a
+//! single `wl_shm` buffer. Renders a workspace indicator on the left, a
+//! window list (with focused-entry highlight) in the middle, and a clock
+//! on the right. Live state comes from shoestring-wm's IPC socket.
+
+// Drawing primitives intentionally take (mmap, w, h, x, y, w, h, color)
+// in positional form — wrapping them in a struct buys nothing readable.
+#![allow(clippy::too_many_arguments)]
+
+mod battery;
+mod config;
+mod ipc_client;
+
+use std::{
+    collections::HashMap,
+    ffi::CString,
+    fs,
+    io::Write,
+    os::fd::{AsFd, AsRawFd},
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
+use anyhow::{anyhow, bail, Context, Result};
+use config::{default_config_path, default_config_toml, Config, Position};
+use fontdue::{Font, FontSettings};
+use memmap2::MmapMut;
+use shoestring_ipc::Event as IpcEvent;
+use tracing_subscriber::EnvFilter;
+use wayland_client::{
+    backend::ObjectId,
+    event_created_child,
+    globals::{registry_queue_init, GlobalListContents},
+    protocol::{
+        wl_buffer::WlBuffer,
+        wl_compositor::WlCompositor,
+        wl_output::WlOutput,
+        wl_pointer::{self, ButtonState, WlPointer},
+        wl_registry::WlRegistry,
+        wl_seat::{self, Capability, WlSeat},
+        wl_shm::{Format, WlShm},
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
+    },
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1, EVT_TOPLEVEL_OPCODE},
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
+};
+
+/// Dim color for inactive workspace boxes and unfocused entry backgrounds.
+/// Not currently user-configurable (the M24 config spec only exposes bg/fg).
+const DIM: u32 = 0xFF_55_55_55;
+/// Accent: focused workspace box and focused window's highlight backdrop.
+/// Not currently user-configurable.
+const ACCENT: u32 = 0xFF_55_77_BB;
+/// Battery indicator color at or below `battery_low_threshold`. Orange.
+const BAT_LOW: u32 = 0xFF_FF_AA_55;
+/// Battery indicator color at or below `battery_critical_threshold`. Red.
+const BAT_CRITICAL: u32 = 0xFF_FF_55_55;
+/// Horizontal text inset from the bar edges.
+const PADDING_X: i32 = 8;
+
+/// Workspace box layout (left side). Count comes from the WM at startup
+/// via [`ipc_client::query_workspaces`]; geometry is fixed.
+const WS_BOX_W: i32 = 8;
+const WS_BOX_H: i32 = 8;
+const WS_GAP: i32 = 4;
+/// Gap between the workspace cluster and the start of the window list.
+const WS_LIST_GAP: i32 = 12;
+/// Pixel gap between adjacent window-list entries (separator-less; the
+/// focused-entry highlight is the visual divider).
+const ENTRY_GAP: i32 = 12;
+
+/// Search paths for a default sans font. We deliberately don't pull in
+/// fontconfig — picking the first hit keeps the dep surface tiny. User
+/// override via $SHOESTRING_BAR_FONT is the universal escape hatch.
+const FONT_CANDIDATES: &[&str] = &[
+    // Debian / Ubuntu
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    // Arch / generic Linux
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    // Fedora / RHEL
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+    // FreeBSD (pkg install dejavu / liberation-fonts-ttf)
+    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/liberation-fonts-ttf/LiberationSans-Regular.ttf",
+    "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
+];
+
+struct State {
+    cfg: Config,
+    compositor: WlCompositor,
+    shm: WlShm,
+    layer_shell: ZwlrLayerShellV1,
+    font: Font,
+    surface: Option<WlSurface>,
+    layer_surface: Option<ZwlrLayerSurfaceV1>,
+    size: Option<(u32, u32)>,
+    /// Live ext-foreign-toplevel-list entries, keyed by the handle's
+    /// wayland object id. Updated incrementally on each `done` event;
+    /// removed on `closed`. Activation state comes from the [`focused_id`]
+    /// field below (sourced via M9 IPC), since ext-FT itself doesn't
+    /// expose it.
+    toplevels: HashMap<ObjectId, Toplevel>,
+    /// 1-based active workspace; sourced from a `Workspaces` query at
+    /// startup and updated by `workspace_changed` events.
+    active_workspace: u8,
+    /// Total workspace count (cached from the same startup query).
+    workspace_count: u8,
+    /// Display name per workspace (1-based positionally). Length ==
+    /// `workspace_count` once seeded from the IPC `Workspaces`
+    /// response; entries are empty strings for unnamed slots. The
+    /// active workspace's non-empty name is rendered to the right of
+    /// the box cluster.
+    workspace_names: Vec<String>,
+    /// `ext-foreign-toplevel-list` identifier of the currently focused
+    /// window, sourced from `window_focused` events. `None` means no
+    /// window holds keyboard focus.
+    focused_id: Option<String>,
+    /// Runtime state of the WM's automation gate. Sourced from
+    /// [`ipc_client::query_automation`] at startup and updated by
+    /// `automation_changed` events. When `true` the bar shows an
+    /// "AUTO" chip next to the clock so the user can always tell at
+    /// a glance that injected input / remote commands are allowed.
+    automation_enabled: bool,
+    /// 1-based workspace for each window, keyed by ext-FT identifier.
+    /// Populated from `window_opened` and updated by
+    /// `window_moved_to_workspace`; ext-FT itself does not expose
+    /// workspace info. Entries without a mapping (haven't seen the
+    /// matching IPC event yet) are treated as "unknown" and hidden
+    /// from the bar list — the WM emits `window_opened` synchronously
+    /// with the ext-FT announce so this only matters momentarily.
+    window_workspaces: HashMap<String, u8>,
+    /// Set whenever any input that affects the rendered output changes
+    /// (toplevel arrival/departure, clock tick, etc). Cleared after the
+    /// next paint.
+    dirty: bool,
+    /// Last rendered clock string; we re-paint when this changes, which
+    /// makes sub-minute formats (e.g. `iso` → seconds) work without any
+    /// extra config plumbing.
+    last_clock: String,
+    /// `wl_seat`, kept alive so its `Capabilities` events keep arriving
+    /// and we can hand out a pointer when the compositor advertises one.
+    /// `None` when the compositor doesn't expose a seat at all (e.g.
+    /// headless test rig). Read in the WlSeat dispatch via the proxy
+    /// passed there, so the field is only here for its drop lifetime.
+    #[allow(dead_code)]
+    seat: Option<WlSeat>,
+    /// Bar-side pointer; created when the seat first advertises the
+    /// `pointer` capability and destroyed if it goes away (laptop lid
+    /// closed, etc.).
+    pointer: Option<WlPointer>,
+    /// Surface-local pointer x in pixels. `None` while the pointer is
+    /// not over the bar (we get `enter` / `leave` events).
+    pointer_x: Option<f64>,
+    /// (x_start, width, FT identifier) for each window-list entry from
+    /// the last [`draw_window_list`] pass. Hit-tested by the pointer
+    /// button handler; cleared and rebuilt on every redraw.
+    window_entry_rects: Vec<(i32, i32, String)>,
+    /// Auto-detected battery source. `None` on systems with no
+    /// recognised battery — the indicator is hidden entirely in that
+    /// case so the bar layout doesn't reserve dead space.
+    battery_source: Option<Box<dyn battery::BatterySource>>,
+    /// Most recent reading. `None` until the first successful poll
+    /// (or if the source temporarily fails to read).
+    battery_reading: Option<battery::BatteryReading>,
+    /// Wall-clock time of the last battery poll. Polling cadence is
+    /// 1s, matching the existing event-loop tick — no extra fds.
+    last_battery_poll: SystemTime,
+    running: bool,
+}
+
+#[derive(Default, Clone)]
+struct Toplevel {
+    /// Compositor-assigned stable string id. Will be used to match the
+    /// focused-window event from M9 IPC.
+    identifier: String,
+    title: String,
+    app_id: String,
+}
+
+fn main() -> Result<()> {
+    let cli = parse_cli().context("parsing CLI arguments")?;
+    match cli {
+        CliAction::Run => {}
+        CliAction::Help => {
+            print!("{}", help_text());
+            return Ok(());
+        }
+        CliAction::Version => {
+            println!("shoestring-bar {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        CliAction::WriteDefaultConfig { force } => {
+            return write_default_config_to_disk(force);
+        }
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, "config load failed; using defaults");
+            Config::default()
+        }
+    };
+
+    let font = load_font(cfg.font.as_deref()).context("could not load any system font")?;
+
+    let conn =
+        Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
+    let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
+    let qh = queue.handle();
+
+    let compositor: WlCompositor = globals
+        .bind(&qh, 4..=6, ())
+        .context("wl_compositor (>=v4) missing")?;
+    let shm: WlShm = globals.bind(&qh, 1..=2, ()).context("wl_shm missing")?;
+    let layer_shell: ZwlrLayerShellV1 = globals
+        .bind(&qh, 1..=5, ())
+        .context("zwlr_layer_shell_v1 missing (compositor doesn't support layer-shell?)")?;
+    // Subscribe to the window list. Missing global is not fatal — bar
+    // will just render without a window list (clock + future workspaces
+    // still useful).
+    let _toplevel_list: Option<ExtForeignToplevelListV1> = match globals.bind(&qh, 1..=1, ()) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            tracing::warn!(error = ?e, "no ext-foreign-toplevel-list global; window list disabled");
+            None
+        }
+    };
+
+    // Bind wl_seat so we can receive pointer button events. Missing seat
+    // is non-fatal — the bar still renders, the user just can't click
+    // entries. Version range matches what mainstream compositors ship.
+    let seat: Option<WlSeat> = match globals.bind(&qh, 1..=7, ()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(error = ?e, "no wl_seat global; bar will be non-interactive");
+            None
+        }
+    };
+
+    // Bootstrap initial workspace from the WM via a one-shot IPC query.
+    // Failure is non-fatal — we default to ws=1/count=16 and rely on
+    // subsequent event updates.
+    let (active_workspace, workspace_count, workspace_names) = ipc_client::query_workspaces()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = ?e, "ipc workspace query failed; using defaults");
+            (1, 16, Vec::new())
+        });
+
+    // Bootstrap per-window workspace mappings. ext-FT will replay every
+    // pre-existing toplevel to us, but the WM's `window_opened` IPC
+    // events are not replayed on subscribe, so without this the bar
+    // would treat every pre-existing window as "workspace unknown" and
+    // hide it.
+    let initial_windows = ipc_client::query_windows().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc windows query failed; window list will populate as events arrive");
+        Vec::new()
+    });
+    let window_workspaces: HashMap<String, u8> = initial_windows
+        .into_iter()
+        .map(|w| (w.id, w.workspace))
+        .collect();
+
+    // Bootstrap the automation gate state. Non-fatal: defaulting to
+    // `false` matches the WM's default gate position, and any subsequent
+    // `automation_changed` event will correct us if we guessed wrong.
+    let automation_enabled = ipc_client::query_automation().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc automation query failed; assuming off");
+        false
+    });
+
+    // Detect the battery source once at startup. If `battery_show` is
+    // off, skip detection entirely so we don't even open the sysfs
+    // dir on platforms where the user has opted out.
+    let battery_source = if cfg.battery_show {
+        battery::auto_detect()
+    } else {
+        None
+    };
+    if battery_source.is_some() {
+        tracing::info!("battery indicator: source detected");
+    } else if cfg.battery_show {
+        tracing::debug!("battery indicator: no battery detected; hidden");
+    }
+    let battery_reading = battery_source.as_ref().and_then(|s| s.read());
+
+    let mut state = State {
+        cfg,
+        compositor,
+        shm,
+        layer_shell,
+        font,
+        surface: None,
+        layer_surface: None,
+        size: None,
+        toplevels: HashMap::new(),
+        active_workspace,
+        workspace_count,
+        workspace_names,
+        focused_id: None,
+        automation_enabled,
+        window_workspaces,
+        dirty: false,
+        last_clock: String::new(),
+        seat,
+        pointer: None,
+        pointer_x: None,
+        window_entry_rects: Vec::new(),
+        battery_source,
+        battery_reading,
+        last_battery_poll: SystemTime::now(),
+        running: true,
+    };
+
+    let surface = state.compositor.create_surface(&qh, ());
+    let layer_surface = state.layer_shell.get_layer_surface(
+        &surface,
+        None,
+        Layer::Bottom,
+        "shoestring-bar".to_string(),
+        &qh,
+        (),
+    );
+    let edge_anchor = match state.cfg.position {
+        Position::Bottom => Anchor::Bottom,
+        Position::Top => Anchor::Top,
+    };
+    layer_surface.set_size(0, state.cfg.height);
+    layer_surface.set_anchor(edge_anchor | Anchor::Left | Anchor::Right);
+    layer_surface.set_exclusive_zone(state.cfg.height as i32);
+    surface.commit();
+
+    state.surface = Some(surface);
+    state.layer_surface = Some(layer_surface);
+
+    // Subscribe to WM events. None means IPC is unavailable — we still run
+    // with whatever defaults we have; the bar just won't update on focus
+    // or workspace changes.
+    let mut event_stream = match ipc_client::open_event_stream() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(error = ?e, "ipc event stream unavailable; running without live updates");
+            None
+        }
+    };
+
+    tracing::info!("shoestring-bar ready, waiting for configure");
+
+    event_loop(conn, &mut queue, &qh, &mut state, event_stream.as_mut())
+}
+
+// ---- CLI -----------------------------------------------------------------
+
+enum CliAction {
+    Run,
+    Help,
+    Version,
+    WriteDefaultConfig { force: bool },
+}
+
+/// Hand-parses argv. Avoids pulling clap for two flags + help/version —
+/// staying lean is one of the project's stated goals (see
+/// [[project-shoestring-wm-dependencies]] in author memory).
+fn parse_cli() -> Result<CliAction> {
+    let mut write_config = false;
+    let mut force = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--write-default-config" => write_config = true,
+            "--force" => force = true,
+            "-h" | "--help" => return Ok(CliAction::Help),
+            "-V" | "--version" => return Ok(CliAction::Version),
+            other => bail!("unknown argument: {other:?} (try --help)"),
+        }
+    }
+    if force && !write_config {
+        bail!("--force only makes sense with --write-default-config");
+    }
+    if write_config {
+        Ok(CliAction::WriteDefaultConfig { force })
+    } else {
+        Ok(CliAction::Run)
+    }
+}
+
+fn help_text() -> String {
+    format!(
+        "shoestring-bar {ver} — lightweight Wayland status bar.
+
+Usage: shoestring-bar [OPTIONS]
+
+Options:
+      --write-default-config   Write the bundled default config to the
+                               user's config path and exit. Refuses to
+                               overwrite unless --force is also passed.
+      --force                  Allow --write-default-config to overwrite.
+  -h, --help                   Print this help and exit.
+  -V, --version                Print version and exit.
+
+Config file: $XDG_CONFIG_HOME/shoestring-bar/config.toml (defaults to
+~/.config/shoestring-bar/config.toml). Run without flags to start the bar.
+
+Environment: WAYLAND_DISPLAY (required), SHOESTRING_WM_SOCKET (optional,
+enables live workspace/focus updates), SHOESTRING_BAR_FONT (font path
+override), RUST_LOG (tracing filter).
+",
+        ver = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn write_default_config_to_disk(force: bool) -> Result<()> {
+    let target = default_config_path()
+        .ok_or_else(|| anyhow!("no config path resolvable: set $HOME or $XDG_CONFIG_HOME"))?;
+    if target.exists() && !force {
+        bail!(
+            "{} already exists; pass --force to overwrite",
+            target.display()
+        );
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(&target, default_config_toml())
+        .with_context(|| format!("writing {}", target.display()))?;
+    println!("wrote default config to {}", target.display());
+    Ok(())
+}
+
+/// Hand-rolled event loop: wake on wayland fd readability OR a 1-second
+/// poll timeout (whichever first), then dispatch + repaint if needed.
+/// Using poll(2) keeps the bar's dep count at zero added crates for
+/// timing — pulling calloop would add ~6 transitive deps for what
+/// amounts to a 30-line loop.
+fn event_loop(
+    conn: Connection,
+    queue: &mut wayland_client::EventQueue<State>,
+    qh: &QueueHandle<State>,
+    state: &mut State,
+    mut event_stream: Option<&mut ipc_client::EventStream>,
+) -> Result<()> {
+    while state.running {
+        // 1. Repaint if the clock string has changed since the last paint.
+        //    Comparing the rendered string (rather than a minute counter)
+        //    means sub-minute formats like `iso` redraw every second
+        //    without any extra plumbing, while minute formats stay cheap
+        //    (string equality is fast, and we still only allocate one
+        //    String per tick).
+        let now_clock = format_clock_now(&state.cfg.clock_format);
+        if state.last_clock != now_clock {
+            state.last_clock = now_clock;
+            state.dirty = true;
+        }
+
+        // Re-poll the battery at most once per second. The poll() call
+        // below caps at 1000ms, so this naturally rate-limits to ~1Hz
+        // without any timer plumbing. Only mark dirty when the reading
+        // actually changed — otherwise a static 85% battery would
+        // force a full redraw every tick.
+        if let Some(src) = state.battery_source.as_ref() {
+            let due = state
+                .last_battery_poll
+                .elapsed()
+                .map(|e| e.as_secs() >= 1)
+                .unwrap_or(true);
+            if due {
+                state.last_battery_poll = SystemTime::now();
+                let new_reading = src.read();
+                if state.battery_reading != new_reading {
+                    state.battery_reading = new_reading;
+                    state.dirty = true;
+                }
+            }
+        }
+        if state.dirty {
+            if let Some((w, h)) = state.size {
+                state.dirty = false;
+                if let Err(e) = redraw(state, qh, w, h) {
+                    tracing::error!(error = ?e, "redraw failed");
+                }
+            }
+        }
+
+        // 2. Flush any queued requests, then prepare to read.
+        conn.flush()?;
+        let guard = conn.prepare_read();
+        let wayland_fd = guard.as_ref().map(|g| g.connection_fd().as_raw_fd());
+        let ipc_fd = event_stream.as_ref().map(|s| s.as_raw_fd());
+
+        // Build a 1- or 2-entry pollfd array depending on which of
+        // wayland / ipc are present.
+        let mut pfds: [libc::pollfd; 2] = unsafe { std::mem::zeroed() };
+        let mut nfds: libc::nfds_t = 0;
+        let mut wayland_idx: Option<usize> = None;
+        let mut ipc_idx: Option<usize> = None;
+        if let Some(fd) = wayland_fd {
+            pfds[nfds as usize] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            wayland_idx = Some(nfds as usize);
+            nfds += 1;
+        }
+        if let Some(fd) = ipc_fd {
+            pfds[nfds as usize] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            ipc_idx = Some(nfds as usize);
+            nfds += 1;
+        }
+
+        // Sleep until any fd is readable or the next second ticks.
+        // 1s granularity is fine for minute-resolution clock.
+        let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, 1000) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err.into());
+        }
+
+        if let Some(guard) = guard {
+            let idx = wayland_idx.expect("wayland_idx must be set if guard exists");
+            if n > 0 && pfds[idx].revents & libc::POLLIN != 0 {
+                if let Err(e) = guard.read() {
+                    // WouldBlock here is benign — POLLIN can fire after the
+                    // wayland-rs library already drained the fd inside
+                    // prepare_read.
+                    if !matches!(&e, wayland_client::backend::WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        tracing::warn!(error = ?e, "wayland read failed");
+                    }
+                }
+            } else {
+                drop(guard);
+            }
+        }
+
+        if let (Some(idx), Some(stream)) = (ipc_idx, event_stream.as_deref_mut()) {
+            if pfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                match stream.drain_events() {
+                    Ok(events) => {
+                        for ev in events {
+                            apply_ipc_event(state, ev);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "ipc stream read failed; closing");
+                        event_stream = None;
+                    }
+                }
+            }
+        }
+
+        // 3. Dispatch any events we got from `read()` above OR events
+        //    that wayland-rs already had buffered (prepare_read returned None).
+        queue.dispatch_pending(state)?;
+    }
+    Ok(())
+}
+
+fn apply_ipc_event(state: &mut State, event: IpcEvent) {
+    match event {
+        IpcEvent::WorkspaceChanged { active } => {
+            if state.active_workspace != active {
+                state.active_workspace = active;
+                state.dirty = true;
+            }
+        }
+        IpcEvent::WindowFocused { id } => {
+            if state.focused_id != id {
+                state.focused_id = id;
+                state.dirty = true;
+            }
+        }
+        // ext-foreign-toplevel-list carries title/app_id and open/close
+        // already, but it does *not* expose workspace. Track that
+        // separately so the visible window list can be filtered to the
+        // active workspace.
+        IpcEvent::WindowOpened { id, workspace, .. } => {
+            state.window_workspaces.insert(id, workspace);
+            state.dirty = true;
+        }
+        IpcEvent::WindowClosed { id } => {
+            state.window_workspaces.remove(&id);
+            // ext-FT's `closed` already pulled the Toplevel entry and
+            // marked dirty; nothing extra to do for the visible list.
+        }
+        IpcEvent::WindowMovedToWorkspace { id, workspace } => {
+            state.window_workspaces.insert(id, workspace);
+            state.dirty = true;
+        }
+        IpcEvent::AutomationChanged { enabled } => {
+            if state.automation_enabled != enabled {
+                state.automation_enabled = enabled;
+                state.dirty = true;
+            }
+        }
+        IpcEvent::WindowTitleChanged { .. }
+        | IpcEvent::OutputAdded(_)
+        | IpcEvent::OutputRemoved { .. }
+        | IpcEvent::ConfigReloaded => {}
+    }
+}
+
+/// Resolve a font in priority order: explicit config path, then
+/// $SHOESTRING_BAR_FONT, then the built-in candidate list. Returning the
+/// first one that successfully loads.
+fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
+    if let Some(p) = cfg_path {
+        let bytes =
+            fs::read(p).with_context(|| format!("bar.font: cannot read {}", p.display()))?;
+        return Font::from_bytes(bytes, FontSettings::default())
+            .map_err(|e| anyhow::anyhow!("font parse: {e}"));
+    }
+    if let Some(path) = std::env::var_os("SHOESTRING_BAR_FONT") {
+        let bytes = fs::read(&path).context("$SHOESTRING_BAR_FONT unreadable")?;
+        return Font::from_bytes(bytes, FontSettings::default())
+            .map_err(|e| anyhow::anyhow!("font parse: {e}"));
+    }
+    for path in FONT_CANDIDATES {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            let bytes = fs::read(&p)?;
+            return Font::from_bytes(bytes, FontSettings::default())
+                .map_err(|e| anyhow::anyhow!("font parse: {e}"));
+        }
+    }
+    anyhow::bail!("no font found in candidates: {FONT_CANDIDATES:?}")
+}
+
+// ---- Drawing -------------------------------------------------------------
+
+/// Compose the bar into a freshly-allocated wl_buffer and attach it.
+/// Re-runs on every configure event (and, later, on state changes).
+fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
+    let surface = state.surface.as_ref().expect("surface missing in redraw");
+
+    let stride = w as i32 * 4;
+    let size = (stride as usize) * h as usize;
+
+    let bg = state.cfg.background;
+    let fg = state.cfg.foreground;
+    let font_px = state.cfg.font_size;
+
+    let mut tmp = tempfile::tempfile()?;
+    tmp.set_len(size as u64)?;
+    // Pre-fill the file so the wl_shm buffer is valid even if the compositor
+    // peeks at it before our mmap stamp.
+    let row_bytes = bg.to_ne_bytes().repeat(w as usize);
+    for _ in 0..h {
+        tmp.write_all(&row_bytes)?;
+    }
+
+    let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
+
+    // We re-fill via the mmap (faster than seek+write) so subsequent draws
+    // can mutate in place. Background first, then text on top.
+    fill_bg(&mut mmap, w, h, bg);
+
+    // Right: clock. Drawn first so we know how much horizontal space
+    // remains for the (truncatable) window list in the middle.
+    let clock = format_clock_now(&state.cfg.clock_format);
+    let clock_w = measure_text(&state.font, font_px, &clock);
+    let clock_x = w as i32 - PADDING_X - clock_w;
+    draw_text(&mut mmap, w, h, &state.font, font_px, clock_x, &clock, fg);
+
+    // Automation indicator chip: drawn immediately left of the clock when
+    // the WM's automation gate is ON. Hidden when off — the user should
+    // always be able to tell at a glance that injected input / remote
+    // commands are currently allowed. Same accent-fill + fg-text shape
+    // as the focused-entry highlight in the window list, so the visual
+    // grammar matches across the bar.
+    let auto_chip_left = if state.automation_enabled {
+        const AUTO_LABEL: &str = "AUTO";
+        const AUTO_PAD: i32 = 4;
+        const AUTO_CLOCK_GAP: i32 = 8;
+        let label_w = measure_text(&state.font, font_px, AUTO_LABEL);
+        let chip_w = label_w + AUTO_PAD * 2;
+        let chip_right = clock_x - AUTO_CLOCK_GAP;
+        let chip_left = chip_right - chip_w;
+        fill_rect(&mut mmap, w, h, chip_left, 2, chip_w, h as i32 - 4, ACCENT);
+        draw_text(
+            &mut mmap,
+            w,
+            h,
+            &state.font,
+            font_px,
+            chip_left + AUTO_PAD,
+            AUTO_LABEL,
+            fg,
+        );
+        Some(chip_left)
+    } else {
+        None
+    };
+
+    // Battery indicator: drawn immediately left of the AUTO chip (or
+    // left of the clock when AUTO is hidden). Skipped when no source
+    // was detected or `battery_show = false` (which short-circuits
+    // detection up in main).
+    let battery_left = match (state.battery_source.as_ref(), state.battery_reading) {
+        (Some(_), Some(reading)) => {
+            const BAT_GAP: i32 = 8;
+            let text = battery::format_reading(&reading, &state.cfg.battery_format);
+            let text_w = measure_text(&state.font, font_px, &text);
+            let right_anchor = auto_chip_left.unwrap_or(clock_x);
+            let bat_x = right_anchor - BAT_GAP - text_w;
+            let color = battery::pick_color(
+                &reading,
+                fg,
+                BAT_LOW,
+                state.cfg.battery_low_threshold,
+                BAT_CRITICAL,
+                state.cfg.battery_critical_threshold,
+            );
+            draw_text(&mut mmap, w, h, &state.font, font_px, bat_x, &text, color);
+            Some(bat_x)
+        }
+        _ => None,
+    };
+
+    // Far left: workspace cluster. Active box in accent color, the rest
+    // dimmed. Suppressed entirely when `cfg.show_workspaces` is false,
+    // in which case the window list slides to the left edge.
+    let list_start_x = if state.cfg.show_workspaces {
+        let ws_cluster_w =
+            state.workspace_count as i32 * WS_BOX_W + (state.workspace_count as i32 - 1) * WS_GAP;
+        let ws_y = (h as i32 - WS_BOX_H) / 2;
+        for i in 0..state.workspace_count {
+            let bx = PADDING_X + i as i32 * (WS_BOX_W + WS_GAP);
+            let color = if i + 1 == state.active_workspace {
+                ACCENT
+            } else {
+                DIM
+            };
+            fill_rect(&mut mmap, w, h, bx, ws_y, WS_BOX_W, WS_BOX_H, color);
+        }
+        // Active workspace's display name, drawn immediately right of
+        // the box cluster. Skipped when the user hasn't named the
+        // active slot — boxes alone are enough in that case.
+        // WS_LIST_GAP separates the name from the window list.
+        let mut after_ws_x = PADDING_X + ws_cluster_w;
+        let active_name = state
+            .workspace_names
+            .get(state.active_workspace.saturating_sub(1) as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if !active_name.is_empty() {
+            const NAME_GAP: i32 = 8;
+            let name_x = after_ws_x + NAME_GAP;
+            let name_w = measure_text(&state.font, font_px, active_name);
+            draw_text(
+                &mut mmap,
+                w,
+                h,
+                &state.font,
+                font_px,
+                name_x,
+                active_name,
+                fg,
+            );
+            after_ws_x = name_x + name_w;
+        }
+        after_ws_x + WS_LIST_GAP
+    } else {
+        PADDING_X
+    };
+
+    // Middle: window list, drawn per-entry so we can paint a background
+    // accent behind the focused entry. Entries are deterministically
+    // ordered by FT identifier (stable across renders). When no window
+    // exists on the active workspace the slot stays empty — `--version`
+    // is the supported channel for reading the build version.
+    let list_end_x = battery_left.or(auto_chip_left).unwrap_or(clock_x) - PADDING_X;
+    let list_budget = (list_end_x - list_start_x).max(0);
+    // draw_window_list also fills `entry_rects`, which the pointer
+    // button handler reads on the next click to hit-test entries.
+    let mut entry_rects: Vec<(i32, i32, String)> = Vec::new();
+    draw_window_list(
+        &mut mmap,
+        w,
+        h,
+        state,
+        list_start_x,
+        list_budget,
+        font_px,
+        fg,
+        &mut entry_rects,
+    );
+    state.window_entry_rects = entry_rects;
+
+    let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
+    let buffer: WlBuffer =
+        pool.create_buffer(0, w as i32, h as i32, stride, Format::Argb8888, qh, ());
+    pool.destroy();
+    // The mmap-backed file lives until tmp drops at end of scope; the
+    // compositor reads pixels via the fd-backed pool's wl_buffer above.
+    drop(mmap);
+
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, w as i32, h as i32);
+    surface.commit();
+    Ok(())
+}
+
+/// Total horizontal advance for rendering `text` at `size_px`. Doesn't
+/// account for kerning, but neither does our renderer — values match.
+fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
+    let mut w = 0.0_f32;
+    for ch in text.chars() {
+        w += font.metrics(ch, size_px).advance_width;
+    }
+    w.ceil() as i32
+}
+
+/// Local-time clock formatted via `libc::strftime`. `format` is a
+/// strftime(3) pattern (aliases like `iso` / `24h-short` are pre-expanded
+/// at config-load time). Uses libc to avoid pulling in chrono/time —
+/// already in our tree via tempfile, so this is zero added deps.
+fn format_clock_now(format: &str) -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // localtime_r is thread-safe and reentrant; the version of glibc we
+    // care about supports it unconditionally.
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    // strftime needs a NUL-terminated format. An embedded NUL in the
+    // user's config is a config bug; surface a recognizable placeholder
+    // rather than panicking out of the render loop.
+    let Ok(fmt) = CString::new(format) else {
+        return "[bad clock format]".into();
+    };
+    let mut buf = [0u8; 256];
+    let n = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            fmt.as_ptr(),
+            &tm,
+        )
+    };
+    // n == 0 means either the result was empty (legitimate, e.g. empty
+    // format string) OR the buffer was too small. 256 bytes is plenty for
+    // any reasonable clock format, so we treat both cases the same.
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// Draw the window list entries, painting an accent backdrop behind the
+/// focused entry. Truncates the visible set with ".." if the cumulative
+/// width exceeds `budget_px`. The focused entry, when present, is drawn
+/// first in width-budget order so it always survives truncation.
+fn draw_window_list(
+    mmap: &mut MmapMut,
+    w: u32,
+    h: u32,
+    state: &State,
+    start_x: i32,
+    budget_px: i32,
+    font_px: f32,
+    fg: u32,
+    entry_rects: &mut Vec<(i32, i32, String)>,
+) {
+    let font = &state.font;
+    // Filter to windows on the active workspace. Entries without a
+    // mapping yet (announced via ext-FT before the matching
+    // `window_opened` IPC arrived) stay hidden until the workspace is
+    // known — the two arrive close enough in practice that the gap
+    // is invisible.
+    let mut entries: Vec<&Toplevel> = state
+        .toplevels
+        .values()
+        .filter(|t| {
+            state.window_workspaces.get(&t.identifier).copied() == Some(state.active_workspace)
+        })
+        .collect();
+    entries.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+
+    let label_of = |t: &Toplevel| -> String {
+        if !t.title.is_empty() {
+            t.title.clone()
+        } else if !t.app_id.is_empty() {
+            t.app_id.clone()
+        } else {
+            "(untitled)".to_string()
+        }
+    };
+
+    // First pass: compute widths and decide which entries fit. `id` is
+    // `Some` for real entries (clickable) and `None` for the truncation
+    // ".." marker (not clickable, no FT identifier to route a click to).
+    let mut visible: Vec<(String, i32, bool, Option<String>)> = Vec::new();
+    let mut used = 0;
+    for t in &entries {
+        let label = label_of(t);
+        let lw = measure_text(font, font_px, &label);
+        let needed = if visible.is_empty() {
+            lw
+        } else {
+            lw + ENTRY_GAP
+        };
+        if used + needed > budget_px {
+            // Out of room; signal truncation with a trailing ".." if it fits.
+            let ellipsis_w = measure_text(font, font_px, "..");
+            let ellipsis_needed = if visible.is_empty() {
+                ellipsis_w
+            } else {
+                ellipsis_w + ENTRY_GAP
+            };
+            if used + ellipsis_needed <= budget_px {
+                visible.push(("..".into(), ellipsis_w, false, None));
+            }
+            break;
+        }
+        let focused = state.focused_id.as_deref() == Some(t.identifier.as_str());
+        visible.push((label, lw, focused, Some(t.identifier.clone())));
+        used += needed;
+    }
+
+    let mut x = start_x;
+    for (i, (label, lw, focused, id)) in visible.iter().enumerate() {
+        if i > 0 {
+            x += ENTRY_GAP;
+        }
+        if *focused {
+            // Pad the highlight a couple of pixels around the label so the
+            // background reads cleanly against the bar bg.
+            let pad = 4;
+            fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, ACCENT);
+        }
+        draw_text(mmap, w, h, font, font_px, x, label, fg);
+        if let Some(id) = id {
+            entry_rects.push((x, *lw, id.clone()));
+        }
+        x += lw;
+    }
+}
+
+/// Solid-color rectangle (no alpha blending). Clamped to the buffer.
+fn fill_rect(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) {
+    let bytes = color.to_ne_bytes();
+    let stride = dst_w as usize * 4;
+    let x0 = x.max(0) as usize;
+    let x1 = (x + w).min(dst_w as i32).max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let y1 = (y + h).min(dst_h as i32).max(0) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let row: Vec<u8> = bytes.repeat(x1 - x0);
+    for yy in y0..y1 {
+        let off = yy * stride + x0 * 4;
+        mmap[off..off + row.len()].copy_from_slice(&row);
+    }
+}
+
+fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
+    let bytes = color.to_ne_bytes();
+    let stride = w as usize * 4;
+    let row = bytes.repeat(w as usize);
+    for y in 0..h as usize {
+        let off = y * stride;
+        mmap[off..off + stride].copy_from_slice(&row);
+    }
+}
+
+/// Vertically-centered single-line text. `x_start` is the left edge (in
+/// pixels). Glyphs are alpha-blended onto whatever's already in the buffer.
+fn draw_text(
+    mmap: &mut MmapMut,
+    w: u32,
+    h: u32,
+    font: &Font,
+    size_px: f32,
+    x_start: i32,
+    text: &str,
+    color: u32,
+) {
+    // Use the font's line metrics to baseline-align: ascent above baseline,
+    // descent below. Vertical-center the (ascent+descent) band inside the bar.
+    let line_metrics = font.horizontal_line_metrics(size_px).unwrap_or_else(|| {
+        // Fallback if the font doesn't expose horizontal metrics.
+        fontdue::LineMetrics {
+            ascent: size_px * 0.8,
+            descent: -size_px * 0.2,
+            line_gap: 0.0,
+            new_line_size: size_px,
+        }
+    });
+    let band = line_metrics.ascent - line_metrics.descent;
+    let baseline_y = ((h as f32 - band) / 2.0 + line_metrics.ascent).round() as i32;
+
+    let mut pen_x = x_start as f32;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, size_px);
+        let gx = (pen_x + metrics.xmin as f32).round() as i32;
+        // fontdue's ymin is the *bottom* of the glyph relative to baseline,
+        // measured upward (positive = above baseline). The top-edge y for
+        // blitting is therefore baseline_y - (ymin + height).
+        let gy = baseline_y - (metrics.ymin + metrics.height as i32);
+        blit_alpha(
+            mmap,
+            w,
+            h,
+            gx,
+            gy,
+            metrics.width as u32,
+            metrics.height as u32,
+            &bitmap,
+            color,
+        );
+        pen_x += metrics.advance_width;
+    }
+}
+
+/// Blit a single-channel coverage bitmap as `color`, alpha-blending against
+/// whatever ARGB is already in the destination.
+fn blit_alpha(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    dst_x: i32,
+    dst_y: i32,
+    src_w: u32,
+    src_h: u32,
+    src: &[u8],
+    color: u32,
+) {
+    if src_w == 0 || src_h == 0 {
+        return;
+    }
+    let [fb, fg, fr, _fa] = color.to_le_bytes();
+    let stride = dst_w as usize * 4;
+    for sy in 0..src_h as i32 {
+        let dy = dst_y + sy;
+        if dy < 0 || dy >= dst_h as i32 {
+            continue;
+        }
+        for sx in 0..src_w as i32 {
+            let dx = dst_x + sx;
+            if dx < 0 || dx >= dst_w as i32 {
+                continue;
+            }
+            let coverage = src[(sy as u32 * src_w + sx as u32) as usize];
+            if coverage == 0 {
+                continue;
+            }
+            let off = dy as usize * stride + dx as usize * 4;
+            let a = coverage as i32; // 0..=255
+                                     // out = bg + a/255 * (fg - bg) for each channel. Signed math
+                                     // so darker-foreground-on-lighter-background still works.
+            for (i, fg_chan) in [fb, fg, fr].iter().enumerate() {
+                let bg = mmap[off + i] as i32;
+                let out = bg + (a * (*fg_chan as i32 - bg)) / 255;
+                mmap[off + i] = out.clamp(0, 255) as u8;
+            }
+            mmap[off + 3] = 0xFF; // keep the bar fully opaque
+        }
+    }
+}
+
+// ---- Wayland dispatch impls ---------------------------------------------
+
+impl Dispatch<WlRegistry, GlobalListContents> for State {
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: <WlRegistry as wayland_client::Proxy>::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        layer_surface: &ZwlrLayerSurfaceV1,
+        event: <ZwlrLayerSurfaceV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                layer_surface.ack_configure(serial);
+                let w = if width == 0 { 1 } else { width };
+                let h = if height == 0 {
+                    state.cfg.height
+                } else {
+                    height
+                };
+                state.size = Some((w, h));
+                state.dirty = true;
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                tracing::info!("layer surface closed by compositor; exiting");
+                state.running = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtForeignToplevelListV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ExtForeignToplevelListV1,
+        event: <ExtForeignToplevelListV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_list_v1::Event::Toplevel { .. } => {
+                // The new ExtForeignToplevelHandleV1 child is created
+                // automatically via event_created_child! below. We don't
+                // need to do anything else here — handle events arrive
+                // on the child's own dispatch.
+            }
+            ext_foreign_toplevel_list_v1::Event::Finished => {
+                // Compositor stopped sending toplevels. We could drop the
+                // list, but it's harmless to leave it bound.
+            }
+            _ => {}
+        }
+    }
+
+    // Tell wayland-rs how to construct child resources announced via the
+    // `toplevel` event so they land on State's Dispatch impl below.
+    event_created_child!(State, ExtForeignToplevelListV1, [
+        EVT_TOPLEVEL_OPCODE => (ExtForeignToplevelHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        handle: &ExtForeignToplevelHandleV1,
+        event: <ExtForeignToplevelHandleV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let id = handle.id();
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.toplevels.entry(id).or_default().title = title;
+            }
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.toplevels.entry(id).or_default().app_id = app_id;
+            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                state.toplevels.entry(id).or_default().identifier = identifier;
+            }
+            ext_foreign_toplevel_handle_v1::Event::Done => {
+                // `done` marks a consistent snapshot per the protocol.
+                // The main loop polls dirty and repaints on next wakeup.
+                state.dirty = true;
+            }
+            ext_foreign_toplevel_handle_v1::Event::Closed => {
+                state.toplevels.remove(&id);
+                state.dirty = true;
+                handle.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+macro_rules! noop_dispatch {
+    ($($proxy:ty),* $(,)?) => {
+        $(impl Dispatch<$proxy, ()> for State {
+            fn event(
+                _: &mut Self,
+                _: &$proxy,
+                _: <$proxy as wayland_client::Proxy>::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {}
+        })*
+    };
+}
+noop_dispatch!(
+    WlCompositor,
+    WlShm,
+    WlShmPool,
+    WlBuffer,
+    WlSurface,
+    WlOutput,
+    ZwlrLayerShellV1,
+);
+
+impl Dispatch<WlSeat, ()> for State {
+    fn event(
+        state: &mut Self,
+        seat: &WlSeat,
+        event: <WlSeat as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+        {
+            let has_pointer = caps.contains(Capability::Pointer);
+            if has_pointer && state.pointer.is_none() {
+                state.pointer = Some(seat.get_pointer(qh, ()));
+                tracing::debug!("seat advertised pointer; bound");
+            } else if !has_pointer {
+                if let Some(p) = state.pointer.take() {
+                    p.release();
+                    state.pointer_x = None;
+                    tracing::debug!("seat dropped pointer capability");
+                }
+            }
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _pointer: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { surface_x, .. } => {
+                state.pointer_x = Some(surface_x);
+            }
+            wl_pointer::Event::Motion { surface_x, .. } => {
+                state.pointer_x = Some(surface_x);
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_x = None;
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(ButtonState::Pressed),
+                ..
+            } => {
+                // BTN_LEFT == 0x110 (Linux input event code). Right /
+                // middle clicks are ignored for now — could be wired to
+                // close / move-to-workspace later.
+                const BTN_LEFT: u32 = 0x110;
+                if button != BTN_LEFT {
+                    return;
+                }
+                let Some(x) = state.pointer_x else {
+                    return;
+                };
+                let xi = x.floor() as i32;
+                // Hit-test against the entry rects captured during the
+                // last redraw. Linear scan — count is small (<20 in
+                // realistic use).
+                let hit = state
+                    .window_entry_rects
+                    .iter()
+                    .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+                    .map(|(_, _, id)| id.clone());
+                if let Some(id) = hit {
+                    if let Err(e) = ipc_client::request_focus_window(&id) {
+                        tracing::warn!(error = ?e, %id, "focus_window ipc failed");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strftime_short_24h_produces_hhmm() {
+        let s = format_clock_now("%H:%M");
+        // Five characters, ASCII digits separated by ':'.
+        assert_eq!(s.len(), 5, "expected HH:MM, got {s:?}");
+        let bytes = s.as_bytes();
+        assert!(bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit());
+        assert_eq!(bytes[2], b':');
+        assert!(bytes[3].is_ascii_digit() && bytes[4].is_ascii_digit());
+    }
+
+    #[test]
+    fn strftime_iso_includes_dashes_and_colons() {
+        let s = format_clock_now("%Y-%m-%d %H:%M:%S");
+        assert_eq!(s.len(), 19, "expected YYYY-MM-DD HH:MM:SS, got {s:?}");
+        assert_eq!(s.as_bytes()[4], b'-');
+        assert_eq!(s.as_bytes()[7], b'-');
+        assert_eq!(s.as_bytes()[13], b':');
+    }
+
+    #[test]
+    fn strftime_handles_embedded_nul_without_panicking() {
+        let s = format_clock_now("%H\0:%M");
+        assert_eq!(s, "[bad clock format]");
+    }
+}
