@@ -1,0 +1,46 @@
+[package]
+name = "shoestring-notify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A lightweight desktop notification daemon for shoestring-wm."
+repository = "https://github.com/szarta/shoestring-notify"
+
+[[bin]]
+name = "shoestring-notify"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland client + the layer-shell protocol bindings. Versions match
+# shoestring-bar so resolved deps on disk stay shared.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# Software font rasterizer. Pure Rust, no fontconfig/freetype.
+fontdue = "0.9"
+
+# wl_shm pool: mmap an anon tempfile, hand the fd to the compositor,
+# draw into the mapping directly.
+memmap2 = "0.9"
+tempfile = "3"
+
+# org.freedesktop.Notifications session-bus service. Pure-Rust DBus
+# stack — no libdbus/zbus async runtime.
+rustbus = "0.19"
+
+# Lightweight error type for `main`.
+anyhow = "1"
+
+# `poll`, `pipe2`, `sigaction` for the hand-rolled event loop. Already in
+# our transitive tree via rustbus, so this adds zero new crates.
+libc = "0.2"
+
+# TOML config parser. Versions match shoestring-bar to keep the
+# resolved dep set shared across the two binaries.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Structured logs (env-filterable). Match shoestring-wm/bar so RUST_LOG
+# works the same way.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
