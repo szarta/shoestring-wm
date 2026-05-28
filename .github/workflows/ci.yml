@@ -1,0 +1,56 @@
+name: CI
+
+# Same checks the local pre-commit hook runs (fmt + clippy + test),
+# plus a release build to catch anything that only breaks under -O.
+# Runs on every push to main and on every pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # System deps mirror the Debian/Ubuntu list in docs/install.rst.
+      # libseat-dev + libdisplay-info-dev land in 24.04; older runners
+      # would need an explicit PPA.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev \
+            libpam0g-dev
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo/{registry,git} + target/. Keyed on Cargo.lock,
+      # so dep churn invalidates cleanly.
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo build (release)
+        run: cargo build --workspace --release

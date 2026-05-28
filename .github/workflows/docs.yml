@@ -1,0 +1,59 @@
+name: Docs
+
+# Build the Sphinx user guide and publish to GitHub Pages. Triggers on
+# every push to main (so the public docs match what's on the default
+# branch) and on-demand via workflow_dispatch.
+#
+# Requires repo Settings → Pages → "Source: GitHub Actions" to be
+# enabled. First run will fail otherwise with a permissions error.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages deployment requires these specific token grants.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Don't queue up concurrent deploys — only one in-flight at a time.
+# `cancel-in-progress: false` lets the current build finish before
+# the next one starts (cancelling a publish mid-upload is messy).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # The docs use only sphinx + the bundled alabaster theme
+      # (see docs/conf.py). No extensions, no custom theme — keeps
+      # the docs build standalone.
+      - name: Install Sphinx
+        run: pip install sphinx
+
+      - name: Build HTML
+        run: make -C docs html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
