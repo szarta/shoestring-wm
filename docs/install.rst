@@ -1,11 +1,15 @@
 Install
 =======
 
-shoestring-wm is built from source with cargo. The runtime needs a small
-set of native libraries (DRM, GBM, EGL, udev, libinput, libseat,
-libdisplay-info, wayland, xkbcommon, plus PAM for ``shoestring-lock``).
-Per-distro install commands for the development headers are below; on
-most distros the matching runtime packages are pulled in automatically.
+On Debian/Ubuntu and Fedora, install a prebuilt package (see `Prebuilt
+packages`_ below) — it pulls in the runtime libraries for you and wires
+shoestring-wm into your login screen. Everywhere else, build from source.
+
+When building from source the runtime needs a small set of native
+libraries (DRM, GBM, EGL, udev, libinput, libseat, libdisplay-info,
+wayland, xkbcommon, plus PAM for ``shoestring-lock``). Per-distro install
+commands for the development headers are below; on most distros the
+matching runtime packages are pulled in automatically.
 
 The TTY backend (the daily-driver path) needs all of the libraries below.
 If you only want the winit dev backend you can build with
@@ -19,6 +23,38 @@ You also need:
 - A working DRM/KMS-capable GPU driver if you want to run on a TTY
   (open-source ``amdgpu`` / ``i915`` / ``nouveau`` work out of the box;
   proprietary nvidia is untested and not a v1 target).
+
+Prebuilt packages
+-----------------
+
+Tagged releases ship a Debian/Ubuntu ``.deb`` and a Fedora ``.rpm`` on the
+`GitHub releases page <https://github.com/szarta/shoestring-wm/releases>`_.
+Each bundles every binary (WM plus helpers), the man pages, a session
+wrapper, and the Wayland **session file** — so once installed,
+shoestring-wm shows up in your display manager's session menu (GDM / SDDM /
+LightDM) at the login screen. Pick it there and log in.
+
+Debian / Ubuntu::
+
+    sudo apt install ./shoestring-wm_<version>_amd64.deb
+
+Fedora::
+
+    sudo dnf install ./shoestring-wm-<version>-1.x86_64.rpm
+
+The leading ``./`` matters: it tells the package manager to treat the file
+as a local package and resolve the runtime library dependencies recorded
+inside it. Then generate a starter config::
+
+    shoestring-wm --write-default-config
+
+.. note::
+
+   shoestring-wm is **not** published to crates.io, so
+   ``cargo install shoestring-wm`` will not work. Its smithay dependency
+   tracks a git revision newer than any crates.io release, which crates.io
+   does not allow. On distros without a prebuilt package — notably FreeBSD,
+   which has no port yet — build from source as below.
 
 Build
 -----
@@ -41,6 +77,20 @@ you want on ``$PATH``:
     install -Dm755 -t ~/.local/bin/ \
         target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
     shoestring-wm --write-default-config
+
+To get a source build into your login screen's session menu, install the
+binaries to a *system* path (the display manager launches sessions with a
+minimal ``$PATH`` that won't include ``~/.local/bin``, and the WM spawns
+its helpers by bare name), then add the session file and its wrapper::
+
+    sudo install -Dm755 -t /usr/local/bin/ \
+        target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
+    sudo install -Dm755 resources/shoestring-wm-session \
+        /usr/local/bin/shoestring-wm-session
+    sudo install -Dm644 resources/shoestring-wm.desktop \
+        /usr/share/wayland-sessions/shoestring-wm.desktop
+
+(The ``.deb`` / ``.rpm`` packages do all of this for you.)
 
 Distro packages
 ---------------

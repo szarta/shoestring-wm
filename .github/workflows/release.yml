@@ -1,0 +1,147 @@
+name: Release
+
+# Build a Debian/Ubuntu .deb and attach it to a GitHub Release whenever a
+# version tag is pushed:
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# The package bundles the WM, every helper binary, the Wayland session
+# file (so it appears in the login-screen session menu), and the man
+# pages. Install on the target machine with:
+#
+#   sudo apt install ./shoestring-wm_0.1.0_amd64.deb
+#
+# `apt install ./file.deb` (note the ./) pulls in the runtime library
+# dependencies that cargo-deb recorded via dpkg-shlibdeps.
+
+on:
+  push:
+    tags: ["v*"]
+  # Allow a manual dry-run that builds the .deb without publishing.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Needed to create the release and upload the .deb asset.
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same dev headers as ci.yml — cargo-deb links the same runtime libs.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev \
+            libpam0g-dev
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # cargo-deb's asset list references docs/_build/man/*, so build the
+      # man pages before packaging (matches docs.yml's Sphinx setup).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build man pages
+        run: |
+          pip install sphinx
+          make -C docs man
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      # --no-build: package the target/release binaries we just built
+      # (cargo-deb on its own would only build the shoestring-wm crate,
+      # not the helper crates in the workspace).
+      - name: Build .deb
+        run: cargo deb --no-build -p shoestring-wm
+
+      - name: Upload .deb as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoestring-wm-deb
+          path: target/debian/*.deb
+
+      # Only publish to a Release on an actual tag push, not on a manual
+      # workflow_dispatch dry-run.
+      - name: Attach .deb to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/debian/*.deb
+
+  rpm:
+    runs-on: ubuntu-24.04
+    # Build inside a Fedora container so cargo-generate-rpm's find-requires
+    # records Fedora library packages (mesa-libgbm, mesa-libEGL, pam, ...)
+    # rather than the Ubuntu sonames the host runner would carry. Without
+    # this the .rpm installs but its dependencies don't resolve on Fedora.
+    container:
+      image: fedora:41
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fedora dev headers — mirrors the Fedora/RHEL list in
+      # docs/install.rst. rpm-build provides find-requires; rust/cargo
+      # come from the distro repos; python3-sphinx + make build the man
+      # pages; git is needed for the smithay git dependency.
+      - name: Install build deps
+        run: |
+          dnf install -y \
+            gcc pkgconf-pkg-config rpm-build git make \
+            rust cargo \
+            python3-sphinx \
+            wayland-devel libxkbcommon-devel \
+            libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
+            systemd-devel libinput-devel \
+            libseat-devel libdisplay-info-devel \
+            pam-devel
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build man pages
+        run: make -C docs man
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+
+      # --auto-req auto runs rpm's find-requires over the binaries; it's
+      # the default, but we're explicit. Packages the already-built
+      # target/release artifacts referenced in Cargo.toml's assets.
+      - name: Build .rpm
+        run: cargo generate-rpm
+
+      - name: Upload .rpm as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoestring-wm-rpm
+          path: target/generate-rpm/*.rpm
+
+      - name: Attach .rpm to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/generate-rpm/*.rpm

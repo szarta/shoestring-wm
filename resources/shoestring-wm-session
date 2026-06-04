@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Session wrapper launched by the display manager (GDM/SDDM/LightDM) when
+# you pick "shoestring-wm" from the login screen. The .desktop file's
+# Exec= points here, not at the bare compositor, so we can set up the
+# session environment first.
+#
+# Why a wrapper and not Exec=shoestring-wm directly:
+#   - Advertises the session to apps/portals via XDG_CURRENT_DESKTOP.
+#   - Pushes our environment into the systemd user manager and the D-Bus
+#     activation environment, so dbus-activated services (the notify
+#     daemon, xdg-desktop-portal, ...) and `systemctl --user` units
+#     inherit WAYLAND_DISPLAY and friends.
+#   - Cleans that state back up on exit.
+set -euo pipefail
+
+export XDG_CURRENT_DESKTOP=shoestring-wm
+export XDG_SESSION_TYPE=wayland
+
+# Variables worth exporting to the user session bus once the compositor
+# has set WAYLAND_DISPLAY. The compositor sets it on its own socket at
+# startup; we re-import after it's up via the autostart hook instead, so
+# here we just seed the static ones.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PATH || true
+fi
+
+# Hand off to the compositor. exec so the session lifetime == the WM's:
+# when shoestring-wm exits, the display manager returns to the greeter.
+# Backend auto-detects to `tty` here (no WAYLAND_DISPLAY/DISPLAY set).
+exec shoestring-wm "$@"

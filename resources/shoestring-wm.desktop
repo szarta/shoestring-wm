@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=shoestring-wm
+Comment=A lightweight Rust Wayland window manager
+Exec=shoestring-wm-session
+Type=Application
+DesktopNames=shoestring-wm
+Keywords=tiling;wayland;compositor;
