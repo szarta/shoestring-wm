@@ -28,8 +28,33 @@ permissions:
   contents: write
 
 jobs:
+  # The package version comes from Cargo.toml's [workspace.package] version,
+  # NOT the git tag — cargo-deb / cargo-generate-rpm read the manifest. If
+  # you tag v0.1.1 but forget to bump Cargo.toml, you'd ship a package still
+  # versioned 0.1.0 (apt won't see it as an upgrade). This job fails the
+  # release fast when the tag and the manifest disagree. Skipped on manual
+  # workflow_dispatch dry-runs, which have no tag.
+  version-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match Cargo.toml version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "not a tag push (workflow_dispatch dry-run) — skipping version check"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag  manifest=$manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag v$tag != Cargo.toml version $manifest — bump [workspace.package] version before tagging"
+            exit 1
+          fi
+
   deb:
     runs-on: ubuntu-24.04
+    needs: version-check
 
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +115,7 @@ jobs:
 
   rpm:
     runs-on: ubuntu-24.04
+    needs: version-check
     # Build inside a Fedora container so cargo-generate-rpm's find-requires
     # records Fedora library packages (mesa-libgbm, mesa-libEGL, pam, ...)
     # rather than the Ubuntu sonames the host runner would carry. Without
