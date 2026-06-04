@@ -36,7 +36,7 @@ LightDM) at the login screen. Pick it there and log in.
 
 Debian / Ubuntu::
 
-    sudo apt install ./shoestring-wm_<version>_amd64.deb
+    sudo apt install ./shoestring-wm_<version>-1_amd64.deb
 
 Fedora::
 
