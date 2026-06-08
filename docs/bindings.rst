@@ -39,6 +39,11 @@ Workspaces 10..16 exist (when ``[workspaces].count`` allows them) but
 have no default keybind; bind them with ``focus-workspace`` /
 ``move-window-to-workspace`` actions as needed.
 
+Scrolling the mouse wheel over the bare desktop — with no window or
+panel under the pointer — also switches workspaces: wheel up moves to the
+next workspace, wheel down to the previous, clamping at the first and
+last. This is a built-in pointer behavior, not a rebindable key.
+
 Launchers and shell
 -------------------
 
