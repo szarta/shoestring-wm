@@ -562,16 +562,24 @@ fn connector_connected(
     );
     let global = output.create_global::<ShoestringWm>(&state.display_handle);
 
-    // Lay outputs left-to-right in the order they arrive. M9 will add a
-    // config-driven arrangement.
-    let x = state.space.outputs().fold(0, |acc, o| {
-        acc + state
-            .space
-            .output_geometry(o)
-            .map(|g| g.size.w)
-            .unwrap_or(0)
-    });
-    let position = (x, 0).into();
+    // Use the configured position if set; otherwise lay outputs left-to-right.
+    let position = if let Some([px, py]) = state
+        .config
+        .outputs
+        .get(&output_name)
+        .and_then(|oc| oc.position)
+    {
+        (px, py).into()
+    } else {
+        let x = state.space.outputs().fold(0, |acc, o| {
+            acc + state
+                .space
+                .output_geometry(o)
+                .map(|g| g.size.w)
+                .unwrap_or(0)
+        });
+        (x, 0).into()
+    };
     let scale_val = state
         .config
         .outputs

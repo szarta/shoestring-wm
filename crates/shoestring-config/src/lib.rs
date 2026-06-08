@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Per-output overrides keyed by connector name (e.g. `"DP-1"`, `"HDMI-A-1"`).
 /// All fields are optional; unset fields fall back to the matching `[general]`
-/// default. Extend this struct for item 8 (position) without breaking
-/// existing configs.
+/// default.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
@@ -24,6 +23,11 @@ pub struct OutputConfig {
     /// fractional values use `wp_fractional_scale_v1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f64>,
+    /// Fixed compositor-space position `[x, y]` for this output. When set,
+    /// overrides the automatic left-to-right layout. Use this to declare a
+    /// stable multi-monitor arrangement independent of plug-in order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[i32; 2]>,
 }
 
 /// Top-level config. Sections are all optional; missing sections take defaults.
@@ -661,6 +665,22 @@ mod tests {
     fn per_output_scale_absent_gives_empty_map() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.outputs.is_empty());
+    }
+
+    #[test]
+    fn per_output_position_parses() {
+        let toml_src = "[outputs.DP-1]\nposition = [1920, 0]\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.outputs.get("DP-1").and_then(|o| o.position), Some([1920, 0]));
+    }
+
+    #[test]
+    fn per_output_scale_and_position_together() {
+        let toml_src = "[outputs.eDP-1]\nscale = 2.0\nposition = [0, 0]\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let oc = cfg.outputs.get("eDP-1").unwrap();
+        assert_eq!(oc.scale, Some(2.0));
+        assert_eq!(oc.position, Some([0, 0]));
     }
 
     #[test]

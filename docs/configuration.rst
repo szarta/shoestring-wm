@@ -146,17 +146,27 @@ are optional; unset fields fall back to the matching ``[general]`` default.
        ``general.output_scale`` — whole values use integer scaling,
        fractional values use ``wp_fractional_scale_v1``. Useful on a
        mixed-DPI setup where one monitor is HiDPI and another is not.
+   * - ``position``
+     - ``[x, y]`` integer array
+     - auto (left-to-right)
+     - Fixed compositor-space position for this output. Overrides the
+       automatic left-to-right stacking that occurs when no position is
+       set. Use this to declare a stable multi-monitor arrangement that
+       is independent of plug-in order. Coordinates are in logical pixels
+       (before scaling).
 
-Example — a HiDPI laptop panel at 2× alongside a 1× external monitor::
+Example — a HiDPI laptop panel at 2× on the left, 1× external on the right::
 
     [general]
     output_scale = 1.0      # fallback for any unspecified output
 
     [outputs.eDP-1]
     scale = 2.0
+    position = [0, 0]
 
     [outputs.DP-1]
     scale = 1.0
+    position = [1920, 0]
 
 .. note::
 
