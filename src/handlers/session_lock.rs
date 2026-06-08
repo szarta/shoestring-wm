@@ -127,10 +127,23 @@ impl ShoestringWm {
         let Some(lock) = self.lock_session.as_ref() else {
             return;
         };
-        let surface = lock
-            .surfaces
-            .values()
-            .next()
+        // Prefer the lock surface on the output under the pointer so focus
+        // lands on the screen the user is looking at. The locker reads keys
+        // globally, so any surface works, but a deterministic choice (vs an
+        // arbitrary HashMap entry) keeps multi-output behavior stable.
+        let pointer_pos = self.seat.get_pointer().map(|p| p.current_location());
+        let surface = pointer_pos
+            .and_then(|pos| {
+                self.space
+                    .outputs()
+                    .find(|o| {
+                        self.space
+                            .output_geometry(o)
+                            .is_some_and(|geo| geo.to_f64().contains(pos))
+                    })
+                    .and_then(|o| lock.surfaces.get(o))
+            })
+            .or_else(|| lock.surfaces.values().next())
             .map(|s| s.wl_surface().clone());
         let Some(surface) = surface else {
             return;

@@ -410,6 +410,13 @@ impl ShoestringWm {
     /// Raise + keyboard-focus + activate `window`, deactivating every other
     /// element. Mirrors what click-to-focus does in [`input::process_input_event`].
     pub fn focus_window(&mut self, window: &Window) {
+        // While the session is locked, only a lock surface may hold
+        // keyboard focus (see [`focus_lock_surface`]). Auto-focus-on-map
+        // and other focus paths must not steal it, or the locker's
+        // password field silently goes dead while the maze keeps running.
+        if self.is_locked() {
+            return;
+        }
         use smithay::utils::SERIAL_COUNTER;
         self.space.raise_element(window, true);
         let serial = SERIAL_COUNTER.next_serial();
@@ -436,6 +443,10 @@ impl ShoestringWm {
     /// reordering the stack, so passive hover doesn't reshuffle windows
     /// behind the user.
     pub fn focus_window_no_raise(&mut self, window: &Window) {
+        // See [`focus_window`]: the lock surface owns focus while locked.
+        if self.is_locked() {
+            return;
+        }
         use smithay::utils::SERIAL_COUNTER;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {
@@ -458,6 +469,11 @@ impl ShoestringWm {
     /// Clear keyboard focus and deactivate every mapped window. Used when
     /// switching to an empty workspace or minimizing the last window.
     pub fn clear_focus(&mut self) {
+        // Don't drop the lock surface's focus while locked (see
+        // [`focus_window`]); unlock restores focus explicitly.
+        if self.is_locked() {
+            return;
+        }
         use smithay::utils::SERIAL_COUNTER;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {

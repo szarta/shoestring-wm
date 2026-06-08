@@ -453,11 +453,23 @@ impl ShoestringWm {
                         if key_state != KeyState::Pressed {
                             return FilterResult::Forward;
                         }
-                        // Suppress all binds while a session lock is up so
-                        // the user can't Quit / VT-switch / Spawn out of the
-                        // lock. Everything is forwarded to the lock surface
-                        // (which currently holds keyboard focus).
+                        // Suppress binds while a session lock is up so the
+                        // user can't Quit / Spawn out of the lock — with one
+                        // exception: VT switching stays live as an escape
+                        // hatch, so a misbehaving locker can never hard-lock
+                        // the machine. Switching VT doesn't weaken the lock
+                        // (the Wayland session stays locked; switching back
+                        // shows the locker still up). Everything else is
+                        // forwarded to the lock surface, which holds focus.
                         if state.is_locked() {
+                            if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
+                                let mask = ModMask::from_state(mods);
+                                if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
+                                    if matches!(a, Action::ChangeVt { .. }) {
+                                        return FilterResult::Intercept(a.clone());
+                                    }
+                                }
+                            }
                             return FilterResult::Forward;
                         }
                         // Use the keysym *before* shift/caps are applied so that

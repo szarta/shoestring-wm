@@ -36,6 +36,10 @@ sudo apt install build-essential pkg-config \
     libudev-dev libinput-dev libseat-dev libdisplay-info-dev \
     libpam0g-dev
 
+# Optional: XWayland support at runtime (only if you run X11 tools such as
+# GIMP or Inkscape). Install the Xwayland binary; the WM spawns it on demand.
+#   sudo apt install xwayland
+
 # Build (release; all workspace binaries land in target/release/).
 # `--workspace` rebuilds the helper crates too, not just the WM.
 cargo build --release --workspace
