@@ -61,6 +61,9 @@ const DIM: u32 = 0xFF_55_55_55;
 /// Accent: focused workspace box and focused window's highlight backdrop.
 /// Not currently user-configurable.
 const ACCENT: u32 = 0xFF_55_77_BB;
+/// Unfocused window-list entry chip background. Matches DIM so it uses the
+/// same visual grammar as the inactive workspace boxes on the left.
+const ENTRY_BG: u32 = DIM;
 /// Battery indicator color at or below `battery_low_threshold`. Orange.
 const BAT_LOW: u32 = 0xFF_FF_AA_55;
 /// Battery indicator color at or below `battery_critical_threshold`. Red.
@@ -945,11 +948,13 @@ fn draw_window_list(
         if i > 0 {
             x += ENTRY_GAP;
         }
-        if *focused {
-            // Pad the highlight a couple of pixels around the label so the
-            // background reads cleanly against the bar bg.
+        // Every real entry (not the ".." overflow marker) gets a chip
+        // background so entries are visually separated. Focused = accent,
+        // unfocused = dim dark bg.
+        if id.is_some() {
             let pad = 4;
-            fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, ACCENT);
+            let chip_color = if *focused { ACCENT } else { ENTRY_BG };
+            fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, chip_color);
         }
         draw_text(mmap, w, h, font, font_px, x, label, fg);
         if let Some(id) = id {
