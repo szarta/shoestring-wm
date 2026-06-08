@@ -15,6 +15,7 @@ mod layout;
 mod picker;
 mod remote_command;
 mod remote_screenshot;
+mod output_management;
 mod screencopy;
 mod state;
 mod window_ext;

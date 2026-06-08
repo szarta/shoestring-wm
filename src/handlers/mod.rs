@@ -1,5 +1,6 @@
 mod compositor;
 mod layer_shell;
+mod output_management;
 mod screencopy;
 pub(crate) mod session_lock;
 mod xdg_decoration;

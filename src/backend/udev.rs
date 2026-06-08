@@ -24,7 +24,7 @@ use std::{collections::HashMap, path::Path, time::Duration};
 // directly on the fd after a VT switch, even in unprivileged (logind-managed)
 // mode.  After the initial ResumeDevice from logind, was_master is set on
 // the file description, so SET_MASTER succeeds again without CAP_SYS_ADMIN.
-use smithay::reexports::drm::Device as DrmBasicDevice;
+use smithay::reexports::drm::{control::Device as DrmControlDevice, Device as DrmBasicDevice};
 
 use anyhow::Result;
 use smithay::{
@@ -653,6 +653,100 @@ fn connector_disconnected(
         }
         state.emit_ipc(shoestring_ipc::Event::OutputRemoved { name });
         tracing::info!(?node, ?crtc, conn = ?connector.handle(), "connector disconnected");
+    }
+}
+
+/// Apply a DRM mode change to `output`, called from the wlr-output-management
+/// apply path.  Returns `true` on success, `false` if no matching DRM mode was
+/// found or the kernel rejected the change.
+///
+/// Only the DRM kernel mode is changed here; the smithay `Output` state
+/// (`change_current_state`) is updated by the caller so that transform /
+/// scale / position changes can be batched into a single call.
+pub fn change_output_mode(
+    state: &mut ShoestringWm,
+    output: &Output,
+    req_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    req_refresh: i32,
+) -> bool {
+    let Some(udev_id) = output.user_data().get::<UdevOutputId>() else {
+        tracing::warn!(output = output.name(), "change_output_mode: no UdevOutputId");
+        return false;
+    };
+    let node = udev_id.device_id;
+    let crtc = udev_id.crtc;
+
+    // Collect connector handles from the surface compositor.
+    let connector_handles: Vec<connector::Handle> = {
+        let Some(udev) = state.udev.as_ref() else { return false; };
+        let Some(device) = udev.backends.get(&node) else { return false; };
+        let Some(surface) = device.surfaces.get(&crtc) else { return false; };
+        surface
+            .drm_output
+            .with_compositor(|c| c.surface().current_connectors().into_iter().collect())
+    };
+
+    // Find the DRM mode that matches the requested (size, refresh).
+    let drm_mode: Option<smithay::reexports::drm::control::Mode> = (|| {
+        let udev = state.udev.as_ref()?;
+        let device = udev.backends.get(&node)?;
+        let dev = device.drm_output_manager.device().device_fd();
+        for &conn_handle in &connector_handles {
+            if let Ok(info) = dev.get_connector(conn_handle, false) {
+                for &m in info.modes() {
+                    let wl = WlMode::from(m);
+                    if wl.size == req_size && wl.refresh == req_refresh {
+                        return Some(m);
+                    }
+                }
+            }
+        }
+        None
+    })();
+
+    let Some(drm_mode) = drm_mode else {
+        tracing::warn!(
+            output = output.name(),
+            ?req_size,
+            req_refresh,
+            "change_output_mode: no matching DRM mode"
+        );
+        return false;
+    };
+
+    let render_node = {
+        let Some(udev) = state.udev.as_ref() else { return false; };
+        let Some(device) = udev.backends.get(&node) else { return false; };
+        device.render_node.unwrap_or(udev.primary_gpu)
+    };
+
+    let Some(udev) = state.udev.as_mut() else { return false; };
+    let mut renderer: UdevRenderer<'_> = match udev.gpus.single_renderer(&render_node) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(output = output.name(), error = ?e, "change_output_mode: renderer unavailable");
+            return false;
+        }
+    };
+    let Some(device) = udev.backends.get_mut(&node) else { return false; };
+    let Some(surface) = device.surfaces.get_mut(&crtc) else { return false; };
+
+    let elements: DrmOutputRenderElements<
+        UdevRenderer<'_>,
+        crate::drawing::PointerRenderElement<UdevRenderer<'_>>,
+    > = DrmOutputRenderElements::new();
+
+    match surface.drm_output.use_mode(drm_mode, &mut renderer, &elements) {
+        Ok(()) => {
+            let wl_mode = WlMode::from(drm_mode);
+            output.change_current_state(Some(wl_mode), None, None, None);
+            tracing::info!(output = output.name(), ?req_size, req_refresh, "DRM mode changed");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(output = output.name(), error = ?e, "change_output_mode: use_mode failed");
+            false
+        }
     }
 }
 

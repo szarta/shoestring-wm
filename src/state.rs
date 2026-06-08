@@ -87,6 +87,7 @@ pub struct ShoestringWm {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
+    pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
     pub session_lock_state: SessionLockManagerState,
     /// `Some` while a session lock is active. See
@@ -200,6 +201,14 @@ impl ShoestringWm {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let output_management = crate::output_management::OutputManagementState {
+            global: dh.create_global::<Self, _, _>(
+                4,
+                crate::output_management::OutputManagerData,
+            ),
+            serial: 0,
+            managers: Vec::new(),
+        };
         let screencopy = crate::screencopy::ScreencopyState {
             manager_global: dh
                 .create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData),
@@ -261,6 +270,7 @@ impl ShoestringWm {
             output_manager_state,
             seat_state,
             data_device_state,
+            output_management,
             screencopy,
             session_lock_state,
             lock_session: None,
