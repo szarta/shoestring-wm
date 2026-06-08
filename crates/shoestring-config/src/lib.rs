@@ -12,6 +12,20 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// Per-output overrides keyed by connector name (e.g. `"DP-1"`, `"HDMI-A-1"`).
+/// All fields are optional; unset fields fall back to the matching `[general]`
+/// default. Extend this struct for item 8 (position) without breaking
+/// existing configs.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputConfig {
+    /// Per-output scale factor. Overrides `general.output_scale` for this
+    /// connector only. Same semantics: whole values use integer scaling,
+    /// fractional values use `wp_fractional_scale_v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+}
+
 /// Top-level config. Sections are all optional; missing sections take defaults.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +41,10 @@ pub struct Config {
     /// fields all match wins; rules are evaluated in declaration order.
     #[serde(default, rename = "window_rules")]
     pub window_rules: Vec<WindowRule>,
+    /// Per-output overrides. Keys are connector names as reported by the WM
+    /// (e.g. `"DP-1"`, `"HDMI-A-1"`). Omit entirely to use global defaults.
+    #[serde(default, rename = "outputs", skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, OutputConfig>,
 }
 
 /// Workspace layout. `count` controls how many workspaces exist (and
@@ -130,11 +148,11 @@ pub struct General {
     /// Repeats-per-second once repeat kicks in.
     #[serde(default = "default_repeat_rate")]
     pub repeat_rate: i32,
-    /// Scale factor advertised to clients via `wl_output.scale`. Whole values
-    /// (1.0, 2.0, …) are sent as integer scales; non-integer values use
-    /// fractional scaling (clients supporting `wp_fractional_scale_v1` get
-    /// the exact value, others round up). Match this to the `Xft.dpi`
-    /// equivalent in the user's X session so text size carries over.
+    /// Global scale factor fallback, used for any output that does not have a
+    /// per-output `scale` entry in `[outputs.<name>]`. Whole values (1.0,
+    /// 2.0, …) are sent as integer scales; non-integer values use fractional
+    /// scaling (`wp_fractional_scale_v1`). Match this to your `Xft.dpi`
+    /// equivalent so text size carries over from an X session.
     #[serde(default = "default_output_scale")]
     pub output_scale: f64,
     /// Command spawned for `Action::Lock` and the `Lock` IPC request. The
@@ -481,6 +499,7 @@ impl Config {
             workspaces: Workspaces::default(),
             bindings,
             window_rules: Vec::new(),
+            outputs: BTreeMap::new(),
         }
     }
 }
@@ -627,6 +646,27 @@ mod tests {
     fn output_scale_parses_fractional() {
         let cfg: Config = toml::from_str("[general]\noutput_scale = 1.5\n").unwrap();
         assert_eq!(cfg.general.output_scale, 1.5);
+    }
+
+    #[test]
+    fn per_output_scale_overrides_general() {
+        let toml_src = "[general]\noutput_scale = 1.0\n\n[outputs.DP-1]\nscale = 2.0\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.outputs.get("DP-1").and_then(|o| o.scale), Some(2.0));
+        assert_eq!(cfg.outputs.get("HDMI-A-1").and_then(|o| o.scale), None);
+        assert_eq!(cfg.general.output_scale, 1.0);
+    }
+
+    #[test]
+    fn per_output_scale_absent_gives_empty_map() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.outputs.is_empty());
+    }
+
+    #[test]
+    fn default_config_toml_no_outputs_section() {
+        let dumped = default_config_toml();
+        assert!(!dumped.contains("[outputs]"), "empty outputs must not appear in default config");
     }
 
     #[test]

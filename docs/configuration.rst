@@ -13,9 +13,9 @@ Bootstrap a starter file:
     $ shoestring-wm --write-default-config
     wrote default config to /home/you/.config/shoestring-wm/config.toml
 
-The file has four sections — ``[general]``, ``[workspaces]``,
-``[[bindings]]``, and ``[[window_rules]]`` — all optional. Missing
-sections take built-in defaults.
+The file has five sections — ``[general]``, ``[workspaces]``,
+``[[bindings]]``, ``[[window_rules]]``, and ``[outputs.<name>]`` — all
+optional. Missing sections take built-in defaults.
 
 The ``[general]`` section
 -------------------------
@@ -51,7 +51,8 @@ The ``[general]`` section
    * - ``output_scale``
      - float
      - ``1.0``
-     - Scale factor advertised to clients via ``wl_output.scale``.
+     - Global scale factor fallback, used for any output that does not
+       have a per-output ``scale`` entry under ``[outputs.<name>]``.
        Whole values (``1.0``, ``2.0``, …) are sent as integer scales;
        non-integer values use fractional scaling (clients supporting
        ``wp_fractional_scale_v1`` see the exact value, others round up).
@@ -122,6 +123,46 @@ Example::
     [workspaces]
     count = 8
     names = { 1 = "main", 2 = "web", 8 = "chat" }
+
+The ``[outputs.<name>]`` section
+--------------------------------
+
+Per-output overrides. ``<name>`` is the connector name the WM logs when an
+output is connected (e.g. ``DP-1``, ``HDMI-A-1``, ``eDP-1``). All fields
+are optional; unset fields fall back to the matching ``[general]`` default.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 8 8 74
+
+   * - Key
+     - Type
+     - Default
+     - Meaning
+   * - ``scale``
+     - float
+     - ``general.output_scale``
+     - Scale factor for this output only. Same semantics as
+       ``general.output_scale`` — whole values use integer scaling,
+       fractional values use ``wp_fractional_scale_v1``. Useful on a
+       mixed-DPI setup where one monitor is HiDPI and another is not.
+
+Example — a HiDPI laptop panel at 2× alongside a 1× external monitor::
+
+    [general]
+    output_scale = 1.0      # fallback for any unspecified output
+
+    [outputs.eDP-1]
+    scale = 2.0
+
+    [outputs.DP-1]
+    scale = 1.0
+
+.. note::
+
+   Connector names are printed at WM startup in the log (``tracing``
+   at ``INFO`` level) and in the ``output-added`` IPC event. Running
+   ``shoestring-ctl outputs`` shows the current list.
 
 Bindings
 --------

@@ -35,6 +35,9 @@ pub struct OutputManagementState {
     /// All currently-bound manager objects.  We need to broadcast `head` /
     /// `done` events to every manager when outputs change.
     pub managers: Vec<ZwlrOutputManagerV1>,
+    /// All live head objects across all managers.  Used to send `finished`
+    /// when a connector is unplugged.
+    pub heads: Vec<ZwlrOutputHeadV1>,
 }
 
 impl OutputManagementState {
@@ -107,6 +110,8 @@ pub struct ConfigHeadData {
 
 // ── Broadcast helpers ─────────────────────────────────────────────────────────
 
+use smithay::reexports::wayland_server::Resource;
+
 /// Send the current state of `output` as a `head` event (plus all per-head
 /// sub-events) on `manager`, then return the head object so callers can store
 /// it if needed.  The caller is responsible for sending `done` after all heads
@@ -115,12 +120,12 @@ pub fn announce_head(
     manager: &ZwlrOutputManagerV1,
     output: &Output,
     dh: &smithay::reexports::wayland_server::DisplayHandle,
-) {
+) -> Option<ZwlrOutputHeadV1> {
     use smithay::reexports::wayland_server::Resource;
 
     let client = match dh.get_client(manager.id()) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     let head: ZwlrOutputHeadV1 = match client
@@ -132,7 +137,7 @@ pub fn announce_head(
             },
         ) {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     manager.head(&head);
@@ -196,6 +201,58 @@ pub fn announce_head(
 
     let scale = output.current_scale().fractional_scale();
     head.scale(scale);
+
+    Some(head)
+}
+
+/// Bump the serial, then send `done(serial)` to every bound manager.
+/// Call this after any output layout change (connector plug/unplug, apply).
+pub fn broadcast_done(state: &mut crate::state::ShoestringWm) {
+    let serial = state.output_management.next_serial();
+    let managers: Vec<_> = state.output_management.managers.clone();
+    for manager in managers {
+        if manager.is_alive() {
+            manager.done(serial);
+        }
+    }
+}
+
+/// Announce a newly-connected output to every bound manager and bump the
+/// serial.  Call this after the output is fully initialised and mapped.
+pub fn broadcast_head_added(state: &mut crate::state::ShoestringWm, output: &Output) {
+    let dh = state.display_handle.clone();
+    let managers: Vec<_> = state.output_management.managers.clone();
+    for manager in managers {
+        if manager.is_alive() {
+            if let Some(head) = announce_head(&manager, output, &dh) {
+                state.output_management.heads.push(head);
+            }
+        }
+    }
+    broadcast_done(state);
+}
+
+/// Send `finished` on every head that belongs to `output`, remove them from
+/// the tracking list, and bump the serial.  Call this before unmapping the
+/// output.
+pub fn broadcast_head_removed(state: &mut crate::state::ShoestringWm, output: &Output) {
+    let heads = std::mem::take(&mut state.output_management.heads);
+    let mut kept = Vec::with_capacity(heads.len());
+    for head in heads {
+        let is_match = head
+            .data::<HeadData>()
+            .map(|d| d.output.name() == output.name())
+            .unwrap_or(false);
+        if is_match {
+            if head.is_alive() {
+                head.finished();
+            }
+        } else {
+            kept.push(head);
+        }
+    }
+    state.output_management.heads = kept;
+    broadcast_done(state);
 }
 
 fn wl_transform(t: Transform) -> smithay::reexports::wayland_server::protocol::wl_output::Transform {

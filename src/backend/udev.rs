@@ -3,7 +3,7 @@
 //!
 //! Aggressively stripped vs. anvil's reference:
 //! - single primary GPU only (no multi-GPU fallback paths)
-//! - one scale across all outputs (from `general.output_scale` in config)
+//! - per-output scale via `[outputs.<name>].scale`; falls back to `general.output_scale`
 //! - no XWayland, dmabuf-feedback, syncobj, DRM lease, screencopy
 //! - no cursor plane (cursor sprite is composited into the framebuffer
 //!   from an xcursor theme; see [`crate::cursor`] and [`crate::drawing`])
@@ -572,7 +572,13 @@ fn connector_connected(
             .unwrap_or(0)
     });
     let position = (x, 0).into();
-    let scale = crate::backend::scale_from_config(state.config.general.output_scale);
+    let scale_val = state
+        .config
+        .outputs
+        .get(&output_name)
+        .and_then(|oc| oc.scale)
+        .unwrap_or(state.config.general.output_scale);
+    let scale = crate::backend::scale_from_config(scale_val);
     output.set_preferred(wl_mode);
     output.change_current_state(Some(wl_mode), None, Some(scale), Some(position));
     state.space.map_output(&output, position);
@@ -621,9 +627,11 @@ fn connector_connected(
             name: output.name(),
             width: wl_mode.size.w,
             height: wl_mode.size.h,
-            scale: state.config.general.output_scale,
+            scale: scale_val,
         },
     ));
+
+    crate::output_management::broadcast_head_added(state, &output);
 
     // First render is scheduled as an idle task so we return out of this
     // event handler before touching the surface again.
@@ -645,6 +653,7 @@ fn connector_disconnected(
 
     if let Some(surface) = device.surfaces.remove(&crtc) {
         let name = surface.output.name();
+        crate::output_management::broadcast_head_removed(state, &surface.output);
         state.space.unmap_output(&surface.output);
         state.space.refresh();
         surface.output.leave_all();
@@ -654,6 +663,51 @@ fn connector_disconnected(
         state.emit_ipc(shoestring_ipc::Event::OutputRemoved { name });
         tracing::info!(?node, ?crtc, conn = ?connector.handle(), "connector disconnected");
     }
+}
+
+/// Disable `output` in response to a wlr-output-management `disable_head`
+/// request.  Tears down the `DrmOutput` (releasing the CRTC), removes the
+/// output from the compositor space, and notifies IPC / output-management
+/// clients.  The connector stays physically plugged in; a future
+/// `connector_connected` (or re-enable) will bring it back.
+///
+/// Returns `true` on success, `false` if the output has no `UdevOutputId`
+/// (e.g. winit backend) or was already torn down.
+pub fn disable_output(state: &mut ShoestringWm, output: &Output) -> bool {
+    let Some(udev_id) = output.user_data().get::<UdevOutputId>() else {
+        tracing::warn!(output = output.name(), "disable_output: no UdevOutputId");
+        return false;
+    };
+    let node = udev_id.device_id;
+    let crtc = udev_id.crtc;
+
+    let surface = {
+        let Some(udev) = state.udev.as_mut() else { return false; };
+        let Some(device) = udev.backends.get_mut(&node) else { return false; };
+        device.surfaces.remove(&crtc)
+    };
+
+    let Some(surface) = surface else {
+        tracing::warn!(output = output.name(), "disable_output: surface already gone");
+        return false;
+    };
+
+    // Notify wlr-output-management clients *before* unmapping so they still
+    // see a valid output object in the finished event.
+    let name = surface.output.name();
+    crate::output_management::broadcast_head_removed(state, &surface.output);
+    state.space.unmap_output(&surface.output);
+    state.space.refresh();
+    surface.output.leave_all();
+    if let Some(global) = surface.global {
+        state.display_handle.remove_global::<ShoestringWm>(global);
+    }
+    // DrmOutput is dropped here, releasing the CRTC.
+    drop(surface.drm_output);
+
+    state.emit_ipc(shoestring_ipc::Event::OutputRemoved { name: name.clone() });
+    tracing::info!(%name, ?node, ?crtc, "output disabled (CRTC released)");
+    true
 }
 
 /// Apply a DRM mode change to `output`, called from the wlr-output-management

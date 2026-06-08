@@ -107,6 +107,8 @@ priority = "optional"
 # lives in that package (present by default on desktops, but not on
 # minimal installs).
 depends = "$auto, libpam-modules"
+# xwayland is optional — only needed to run X11 apps (GIMP, Inkscape, etc.)
+recommends = "xwayland"
 extended-description = """\
 A lightweight Rust Wayland window manager built on Smithay, shipped with \
 its companion tools: a status bar, dmenu-style launcher, notification \

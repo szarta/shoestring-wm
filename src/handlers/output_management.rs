@@ -39,10 +39,12 @@ impl GlobalDispatch2<ZwlrOutputManagerV1, ShoestringWm> for OutputManagerData {
     ) {
         let manager = data_init.init(resource, OutputManagerData);
 
-        // Announce every current output as a head.
+        // Announce every current output as a head and track the objects.
         let outputs: Vec<_> = state.space.outputs().cloned().collect();
         for output in &outputs {
-            crate::output_management::announce_head(&manager, output, dh);
+            if let Some(head) = crate::output_management::announce_head(&manager, output, dh) {
+                state.output_management.heads.push(head);
+            }
         }
 
         let serial = state.output_management.serial;
@@ -320,7 +322,17 @@ fn apply_configuration(
 
     for (output, intent) in &heads {
         if !intent.enabled {
-            tracing::info!(output = output.name(), "output disable requested (not yet implemented)");
+            #[cfg(feature = "tty")]
+            {
+                if !crate::backend::udev::disable_output(state, output) {
+                    tracing::warn!(output = output.name(), "output disable failed");
+                    any_failed = true;
+                }
+            }
+            #[cfg(not(feature = "tty"))]
+            {
+                tracing::debug!(output = output.name(), "output disable ignored (winit backend)");
+            }
             continue;
         }
 
@@ -385,19 +397,7 @@ fn apply_configuration(
         config.failed();
     } else {
         config.succeeded();
-        broadcast_done(state);
-    }
-}
-
-/// Bump the serial, then send `done(serial)` to every bound manager.
-/// Call this after any output layout change (connector plug/unplug, apply).
-pub fn broadcast_done(state: &mut ShoestringWm) {
-    let serial = state.output_management.next_serial();
-    let managers: Vec<_> = state.output_management.managers.clone();
-    for manager in managers {
-        if manager.is_alive() {
-            manager.done(serial);
-        }
+        crate::output_management::broadcast_done(state);
     }
 }
 

@@ -208,6 +208,7 @@ impl ShoestringWm {
             ),
             serial: 0,
             managers: Vec::new(),
+            heads: Vec::new(),
         };
         let screencopy = crate::screencopy::ScreencopyState {
             manager_global: dh
