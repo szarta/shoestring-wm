@@ -21,6 +21,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// What the caller wants done with the captured PNG bytes.
+enum Destination {
+    /// Save to this path (and print it).
+    File(PathBuf),
+    /// Pipe to `wl-copy --type image/png`; print nothing.
+    Clipboard,
+    /// Save to path AND copy to clipboard.
+    Both(PathBuf),
+}
+
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use memmap2::MmapMut;
@@ -73,6 +83,13 @@ struct Cli {
     /// already known.
     #[arg(long, value_name = "X,Y,W,H", requires = "output")]
     region_rect: Option<String>,
+
+    /// Copy the captured PNG to the clipboard via `wl-copy` instead of (or
+    /// in addition to) saving a file. When combined with `--file` the image
+    /// is both saved and copied; when used alone no file is written and
+    /// nothing is printed to stdout.
+    #[arg(short = 'c', long)]
+    clipboard: bool,
 }
 
 /// One rectangle on a named output, in that output's logical coords.
@@ -86,10 +103,11 @@ struct Region {
 
 fn main() -> ExitCode {
     match run() {
-        Ok(path) => {
+        Ok(Some(path)) => {
             println!("{}", path.display());
             ExitCode::SUCCESS
         }
+        Ok(None) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("shoestring-screenshot: {e:#}");
             ExitCode::FAILURE
@@ -97,7 +115,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<PathBuf> {
+fn run() -> Result<Option<PathBuf>> {
     let cli = Cli::parse();
 
     // Region picker runs *before* we touch wayland. The picker has its own
@@ -225,29 +243,36 @@ fn run() -> Result<PathBuf> {
     frame.destroy();
     buffer.destroy();
 
-    // Map the buffer and encode to PNG.
+    // Map the buffer and encode to PNG bytes.
     let mmap = unsafe { MmapMut::map_mut(&tmp).context("mmap shm pool")? };
-    let path = cli.file.unwrap_or_else(default_path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).context("create destination dir")?;
-        }
-    }
-    write_png(
-        &path,
-        &mmap,
-        width,
-        height,
-        stride,
-        format,
-        flags.contains(Flags::YInvert),
-    )?;
+    let png_bytes = encode_png(&mmap, width, height, stride, format, flags.contains(Flags::YInvert))?;
     drop(mmap);
     drop(tmp);
-    // queue keeps wayland resources alive — drop after PNG write.
+    // queue keeps wayland resources alive — drop after PNG encode.
     drop(queue);
 
-    Ok(path)
+    let dest = match (cli.file, cli.clipboard) {
+        (Some(p), true) => Destination::Both(p),
+        (Some(p), false) => Destination::File(p),
+        (None, true) => Destination::Clipboard,
+        (None, false) => Destination::File(default_path()),
+    };
+
+    match dest {
+        Destination::File(path) => {
+            write_png_file(&path, &png_bytes)?;
+            Ok(Some(path))
+        }
+        Destination::Clipboard => {
+            copy_to_clipboard(&png_bytes)?;
+            Ok(None)
+        }
+        Destination::Both(path) => {
+            write_png_file(&path, &png_bytes)?;
+            copy_to_clipboard(&png_bytes)?;
+            Ok(Some(path))
+        }
+    }
 }
 
 // ---------------- Region picker ----------------
@@ -401,15 +426,14 @@ fn unix_to_civil(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 
 // ---------------- PNG encoding ----------------
 
-fn write_png(
-    path: &std::path::Path,
+fn encode_png(
     src: &[u8],
     width: u32,
     height: u32,
     stride: u32,
     format: wl_shm::Format,
     y_invert: bool,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     // The WM advertises Argb8888 — that's little-endian BGRA in memory.
     // For PNG output we want RGBA. Swap channels per pixel.
     if !matches!(format, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888) {
@@ -442,15 +466,48 @@ fn write_png(
         }
     }
 
-    let mut file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut buf = Vec::new();
     {
-        let mut enc = png::Encoder::new(&mut file, width, height);
+        let mut enc = png::Encoder::new(&mut buf, width, height);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
         let mut writer = enc.write_header()?;
         writer.write_image_data(&rgba)?;
     }
+    Ok(buf)
+}
+
+fn write_png_file(path: &std::path::Path, png_bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).context("create destination dir")?;
+        }
+    }
+    let mut file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    file.write_all(png_bytes)
+        .with_context(|| format!("write {}", path.display()))?;
     file.flush().ok();
+    Ok(())
+}
+
+fn copy_to_clipboard(png_bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("wl-copy")
+        .arg("--type")
+        .arg("image/png")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn wl-copy (is wl-clipboard installed?)")?;
+    child
+        .stdin
+        .take()
+        .expect("stdin piped")
+        .write_all(png_bytes)
+        .context("write PNG to wl-copy stdin")?;
+    let status = child.wait().context("wait for wl-copy")?;
+    if !status.success() {
+        anyhow::bail!("wl-copy exited with status {status}");
+    }
     Ok(())
 }
 

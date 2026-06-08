@@ -206,6 +206,24 @@ FreeBSD        ``xwayland`` (port: ``x11-servers/xwayland``)
 NixOS          ``xwayland``
 ============== =============================
 
+Optional: wl-clipboard
+~~~~~~~~~~~~~~~~~~~~~~
+
+``wl-clipboard`` provides the ``wl-copy`` binary used by
+``shoestring-screenshot --clipboard`` to copy a capture directly to the
+Wayland clipboard. Only needed if you use that flag.
+
+============== ================
+Distro         Package
+============== ================
+Debian/Ubuntu  ``wl-clipboard``
+Fedora/RHEL    ``wl-clipboard``
+Arch/Manjaro   ``wl-clipboard``
+Alpine         ``wl-clipboard``
+FreeBSD        ``wl-clipboard`` (port: ``x11/wl-clipboard``)
+NixOS          ``wl-clipboard``
+============== ================
+
 After installing
 ----------------
 
