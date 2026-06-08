@@ -59,6 +59,9 @@ const FG: u32 = 0xFF_66_CC_CC;
 const SEL_BG: u32 = 0xFF_FF_FF_FF;
 /// Selected-row text color. Matches dmenu `-sf black`.
 const SEL_FG: u32 = 0xFF_00_00_00;
+/// Alternating-row background — slightly lighter than BG so rows are visually
+/// separated without needing divider lines.
+const ALT_BG: u32 = 0xFF_1A_1A_1A;
 /// Font size in pixels.
 const FONT_PX: f32 = 14.0;
 /// Horizontal text inset from the strip edges.
@@ -551,18 +554,23 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
     for (row_idx, cand_idx) in state.matches.iter().copied().enumerate() {
         let row_top = INPUT_HEIGHT as i32 + (row_idx as i32) * ROW_HEIGHT as i32;
         let selected = row_idx == state.selected;
-        if selected {
-            fill_rect(
-                &mut mmap,
-                w,
-                h,
-                0,
-                row_top,
-                w as i32,
-                ROW_HEIGHT as i32,
-                SEL_BG,
-            );
-        }
+        let row_bg = if selected {
+            SEL_BG
+        } else if row_idx % 2 == 1 {
+            ALT_BG
+        } else {
+            BG
+        };
+        fill_rect(
+            &mut mmap,
+            w,
+            h,
+            0,
+            row_top,
+            w as i32,
+            ROW_HEIGHT as i32,
+            row_bg,
+        );
         let label = &state.candidates[cand_idx].display;
         draw_text_at(
             &mut mmap,
