@@ -44,6 +44,12 @@ This is the user guide. For source-level architecture notes see
    man/shoestring-bar.1
    man/shoestring-menu.1
    man/shoestring-ctl.1
+   man/shoestring-confirm.1
+   man/shoestring-kill.1
+   man/shoestring-lock.1
+   man/shoestring-notify.1
+   man/shoestring-region.1
+   man/shoestring-screenshot.1
 
 Indices
 -------

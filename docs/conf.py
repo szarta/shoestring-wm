@@ -28,5 +28,11 @@ man_pages = [
     ("man/shoestring-bar.1",    "shoestring-bar",    "status bar for shoestring-wm",            [author], 1),
     ("man/shoestring-menu.1",   "shoestring-menu",   "dmenu-style launcher for shoestring-wm",  [author], 1),
     ("man/shoestring-ctl.1",    "shoestring-ctl",    "reference IPC client for shoestring-wm",  [author], 1),
+    ("man/shoestring-confirm.1",    "shoestring-confirm",    "modal yes/no confirmation dialog for shoestring-wm", [author], 1),
+    ("man/shoestring-kill.1",       "shoestring-kill",       "click-to-close window picker for shoestring-wm",     [author], 1),
+    ("man/shoestring-lock.1",       "shoestring-lock",       "screen locker for shoestring-wm",                    [author], 1),
+    ("man/shoestring-notify.1",     "shoestring-notify",     "desktop notification daemon for shoestring-wm",      [author], 1),
+    ("man/shoestring-region.1",     "shoestring-region",     "interactive region picker for shoestring-wm",        [author], 1),
+    ("man/shoestring-screenshot.1", "shoestring-screenshot", "screenshot tool for shoestring-wm",                  [author], 1),
 ]
 man_show_urls = True
