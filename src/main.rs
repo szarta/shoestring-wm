@@ -210,31 +210,35 @@ fn write_default_config(path: Option<&std::path::Path>, force: bool) -> Result<(
     Ok(())
 }
 
-/// Tell the kernel to auto-reap exited children so they never become
-/// zombies. We spawn helpers (bar, menu, autostart, IPC-spawned apps,
-/// the confirm modal, ...) with `Command::spawn` and intentionally
-/// drop the `Child`; without this every helper that exits sits on a
-/// PID-table slot and shows up as `<defunct>` in `ps` forever.
+/// Reap exited helper children (autostart, bar, menus, ...) so they never
+/// become zombies. We spawn these with `Command::spawn` and drop the
+/// `Child`; without reaping they sit as `<defunct>` in `ps` forever.
 ///
-/// Trade-off: we no longer learn the exit status of any spawned
-/// child. That's fine for the helpers we run — their only failure
-/// modes are "didn't spawn at all" (handled by Command::spawn's
-/// Result) and "crashed after spawn" (visible via the child's own
-/// stderr captured by launch_wm.sh, not via exit code).
+/// Implementation: a SIGCHLD handler that calls `waitpid(-1, WNOHANG)` in a
+/// loop. This reaps any child that has already exited without blocking, and
+/// crucially does NOT break `waitpid(specific_pid, 0)` calls in smithay's
+/// XWayland supervisor — those calls still see the child while it is alive.
 ///
-/// Implementation: SIGCHLD with SA_NOCLDWAIT makes the kernel reap
-/// automatically without delivering the signal at all. No handler
-/// needed, no async-signal-safety concerns.
+/// The previous SA_NOCLDWAIT approach caused POSIX-specified breakage:
+/// with SA_NOCLDWAIT set, *any* waitpid() call returns ECHILD immediately,
+/// which panicked inside smithay when it waited on the XWayland process.
 fn install_sigchld_autoreap() {
+    // SAFETY: the handler only calls waitpid and is async-signal-safe.
+    // We install it once before children are spawned.
+    unsafe extern "C" fn sigchld_handler(_: libc::c_int) {
+        loop {
+            let ret = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+            if ret <= 0 {
+                break;
+            }
+        }
+    }
+
     use std::mem::MaybeUninit;
-    // SAFETY: writing a fresh sigaction with SA_NOCLDWAIT + SIG_DFL is
-    // the documented kernel idiom for opting out of zombie creation;
-    // no preconditions on libc state and we run it once before any
-    // children are spawned.
     unsafe {
         let mut sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
-        sa.sa_sigaction = libc::SIG_DFL;
-        sa.sa_flags = libc::SA_NOCLDWAIT;
+        sa.sa_sigaction = sigchld_handler as libc::sighandler_t;
+        sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
         libc::sigemptyset(&mut sa.sa_mask);
         if libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut()) != 0 {
             let err = std::io::Error::last_os_error();

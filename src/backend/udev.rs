@@ -226,9 +226,21 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
                         if let Err(e) = backend.drm_output_manager.lock().activate(false) {
                             tracing::error!(?node, error = ?e, "drm activate failed");
                         }
+                        // The other VT may have clobbered our framebuffers. Reset the
+                        // swapchain so damage tracking sees the whole screen as dirty,
+                        // guaranteeing render_frame returns a non-empty frame and
+                        // queue_frame is called — otherwise the VBlank-driven render
+                        // loop never restarts and the screen stays black.
+                        for surface in backend.surfaces.values() {
+                            surface.drm_output.reset_buffers();
+                        }
                     }
                 }
                 // Kick a render on every surface so the screen comes back.
+                // Deferred via insert_idle so calloop finishes processing the
+                // session activation event before we submit DRM commits —
+                // calling render inside the session event handler can cause
+                // the atomic commit to race with libseat's master handover.
                 for node in nodes {
                     let crtcs: Vec<crtc::Handle> = state
                         .udev
@@ -237,7 +249,9 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
                         .map(|b| b.surfaces.keys().copied().collect())
                         .unwrap_or_default();
                     for crtc in crtcs {
-                        state.render_surface(node, crtc);
+                        state.loop_handle.insert_idle(move |state| {
+                            state.render_surface(node, crtc);
+                        });
                     }
                 }
             }
@@ -684,6 +698,11 @@ impl ShoestringWm {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(?crtc, error = ?e, "no renderer for render_surface");
+                let timer = Timer::from_duration(Duration::from_millis(16));
+                let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                    state.render_surface(node, crtc);
+                    TimeoutAction::Drop
+                });
                 return;
             }
         };
@@ -790,6 +809,14 @@ impl ShoestringWm {
         if rendered {
             if let Err(e) = surface.drm_output.queue_frame(()) {
                 tracing::warn!(?crtc, error = ?e, "queue_frame failed");
+                // The DRM commit failed (e.g. TestFailed after a VT switch).
+                // Reschedule so the render loop keeps running; the next attempt
+                // may succeed once the display state settles.
+                let timer = Timer::from_duration(Duration::from_millis(16));
+                let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                    state.render_surface(node, crtc);
+                    TimeoutAction::Drop
+                });
             }
         }
 
