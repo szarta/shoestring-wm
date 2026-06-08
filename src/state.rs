@@ -310,10 +310,12 @@ impl ShoestringWm {
 
         loop_handle
             .insert_source(listening_socket, move |client_stream, _, state| {
-                state
+                if let Err(e) = state
                     .display_handle
                     .insert_client(client_stream, Arc::new(ClientState::default()))
-                    .unwrap();
+                {
+                    tracing::warn!("failed to insert wayland client: {e}");
+                }
             })
             .expect("failed to insert wayland listening socket");
 
@@ -324,7 +326,9 @@ impl ShoestringWm {
                     // SAFETY: we never drop the display while the source is registered.
                     unsafe {
                         let d = display.get_mut();
-                        d.dispatch_clients(state).unwrap();
+                        if let Err(e) = d.dispatch_clients(state) {
+                            tracing::error!("dispatch_clients error: {e}");
+                        }
                         // Flush eagerly so clients receive replies even when no
                         // redraw is firing (e.g. nested winit window not visible).
                         let _ = d.flush_clients();
