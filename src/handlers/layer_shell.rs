@@ -165,7 +165,11 @@ pub fn handle_commit(state: &mut ShoestringWm, surface: &WlSurface) -> bool {
     // to the previously-focused window when the layer goes away. Skip
     // if focus is already on this surface so commits during typing
     // don't churn the focus serial.
-    if interactivity == KeyboardInteractivity::Exclusive {
+    // ...but never while locked: the lock surface owns keyboard focus
+    // then, and an exclusive layer surface (e.g. a menu/notification)
+    // committing after the lock must not steal it out from under the
+    // locker's password prompt.
+    if interactivity == KeyboardInteractivity::Exclusive && !state.is_locked() {
         if let Some(kb) = state.seat.get_keyboard() {
             let already = kb.current_focus().as_ref() == Some(surface);
             if !already {
