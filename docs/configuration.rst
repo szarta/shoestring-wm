@@ -48,6 +48,14 @@ The ``[general]`` section
      - integer
      - ``25``
      - Key-repeat rate in repeats per second once repeat kicks in.
+   * - ``desktop_scroll_notches``
+     - integer
+     - ``1``
+     - Mouse-wheel detents required to switch one workspace when scrolling
+       the bare desktop (no window under the pointer). ``1`` switches per
+       notch; higher values slow it down. High-resolution wheels are
+       accumulated so a single notch never overshoots. Touchpad scrolling
+       is unaffected.
    * - ``output_scale``
      - float
      - ``1.0``

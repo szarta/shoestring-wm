@@ -667,11 +667,46 @@ impl ShoestringWm {
                     if !pointer.is_grabbed()
                         && self.surface_under(pointer.current_location()).is_none()
                     {
+                        // Accumulate wheel travel in v120 units (120 per
+                        // physical detent) and only step once a full
+                        // `desktop_scroll_notches` worth has built up. This
+                        // collapses the several sub-detent events a high-res
+                        // wheel emits per notch into one switch, and lets the
+                        // user dial in a slower feel. Fall back to scaling the
+                        // continuous amount if the backend gave no v120.
+                        let v120 = vertical_discrete
+                            .filter(|d| *d != 0.0)
+                            .unwrap_or(vertical_amount * 120.0 / 15.0);
+                        // Reset on direction reversal so a change of direction
+                        // starts fresh rather than first cancelling leftover
+                        // travel from the prior gesture.
+                        if self.desktop_scroll_accum != 0.0
+                            && (v120 > 0.0) != (self.desktop_scroll_accum > 0.0)
+                        {
+                            self.desktop_scroll_accum = 0.0;
+                        }
+                        self.desktop_scroll_accum += v120;
+
+                        let threshold =
+                            self.config.general.desktop_scroll_notches.max(1) as f64 * 120.0;
                         // Wayland axis convention: positive vertical is
-                        // downward, so wheel up (negative) advances forward.
-                        let delta = if vertical_amount < 0.0 { 1 } else { -1 };
-                        let target = self.workspaces.shifted(self.workspaces.active(), delta);
-                        if target != self.workspaces.active() {
+                        // downward, so wheel up (negative accum) advances
+                        // forward (delta +1), wheel down steps back (-1).
+                        while self.desktop_scroll_accum.abs() >= threshold {
+                            let delta = if self.desktop_scroll_accum < 0.0 {
+                                self.desktop_scroll_accum += threshold;
+                                1
+                            } else {
+                                self.desktop_scroll_accum -= threshold;
+                                -1
+                            };
+                            let target = self.workspaces.shifted(self.workspaces.active(), delta);
+                            if target == self.workspaces.active() {
+                                // Clamped at an end — drop leftover travel so
+                                // it doesn't spill into the next gesture.
+                                self.desktop_scroll_accum = 0.0;
+                                break;
+                            }
                             tracing::debug!(
                                 delta,
                                 target = target.one_based(),

@@ -18,6 +18,7 @@ sections (all optional):
     focus_mode          = "click-to-focus"  # click-to-focus | follows-mouse | sloppy
     repeat_delay        = 600               # ms before key repeat kicks in
     repeat_rate         = 25                # repeats per second
+    desktop_scroll_notches = 1              # wheel detents per desktop-scroll workspace switch
     output_scale        = 1.0               # wl_output.scale (whole or fractional)
     lock_command        = "shoestring-lock"
     autostart           = ["shoestring-bar"]
@@ -53,6 +54,14 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
 
 **repeat_rate** (integer, default ``25``)
     Key-repeat rate in repeats per second.
+
+**desktop_scroll_notches** (integer, default ``1``)
+    Mouse-wheel detents required to switch one workspace when scrolling the
+    bare desktop (no window or layer surface under the pointer). ``1``
+    switches one workspace per physical notch; higher values slow it down.
+    High-resolution wheels that emit several sub-detent events per notch are
+    accumulated, so one notch never overshoots. Touchpad scrolling is
+    unaffected. Treated as at least ``1``.
 
 **output_scale** (float, default ``1.0``)
     Scale advertised on ``wl_output.scale``. Whole numbers send an

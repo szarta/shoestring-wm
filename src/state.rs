@@ -142,6 +142,14 @@ pub struct ShoestringWm {
     /// press; cleared on the matching release. See [`crate::input`].
     pub key_repeat: Option<crate::input::KeyRepeat>,
 
+    /// Accumulated mouse-wheel travel (in v120 units, 120 per physical
+    /// detent) while scrolling the bare desktop to switch workspaces.
+    /// Lets high-resolution wheels — which emit several sub-detent events
+    /// per notch — and the configurable `general.desktop_scroll_notches`
+    /// threshold coexist without overshooting. Reset on direction reversal.
+    /// See [`crate::input`].
+    pub desktop_scroll_accum: f64,
+
     /// Windows that have already had `[[window_rules]]` evaluated.
     /// Evaluation runs once per window — on the first commit after
     /// map. Entries are removed in `toplevel_destroyed`.
@@ -284,6 +292,7 @@ impl ShoestringWm {
             edge_drag_window: None,
             edge_drag_repeat_token: None,
             key_repeat: None,
+            desktop_scroll_accum: 0.0,
             rules_applied: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),

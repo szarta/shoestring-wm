@@ -156,6 +156,15 @@ pub struct General {
     /// Repeats-per-second once repeat kicks in.
     #[serde(default = "default_repeat_rate")]
     pub repeat_rate: i32,
+    /// Mouse-wheel detents required to switch one workspace when scrolling
+    /// the bare desktop (no window/layer surface under the pointer). `1`
+    /// switches one workspace per physical notch; higher values slow it
+    /// down (e.g. `2` = two notches per switch). High-resolution wheels
+    /// that emit several sub-detent events per notch are accumulated, so a
+    /// single notch never overshoots regardless of this value. Touchpad
+    /// scrolling is unaffected. Treated as at least `1`.
+    #[serde(default = "default_desktop_scroll_notches")]
+    pub desktop_scroll_notches: u32,
     /// Global scale factor fallback, used for any output that does not have a
     /// per-output `scale` entry in `[outputs.<name>]`. Whole values (1.0,
     /// 2.0, …) are sent as integer scales; non-integer values use fractional
@@ -193,6 +202,9 @@ fn default_repeat_delay() -> i32 {
 fn default_repeat_rate() -> i32 {
     25
 }
+fn default_desktop_scroll_notches() -> u32 {
+    1
+}
 fn default_output_scale() -> f64 {
     1.0
 }
@@ -209,6 +221,7 @@ impl Default for General {
             focus_mode: FocusMode::default(),
             repeat_delay: default_repeat_delay(),
             repeat_rate: default_repeat_rate(),
+            desktop_scroll_notches: default_desktop_scroll_notches(),
             output_scale: default_output_scale(),
             lock_command: default_lock_command(),
             autostart: default_autostart(),
@@ -562,6 +575,18 @@ mod tests {
     fn output_scale_defaults_to_one() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.general.output_scale, 1.0);
+    }
+
+    #[test]
+    fn desktop_scroll_notches_defaults_to_one() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.general.desktop_scroll_notches, 1);
+    }
+
+    #[test]
+    fn desktop_scroll_notches_user_override() {
+        let cfg: Config = toml::from_str("[general]\ndesktop_scroll_notches = 3\n").unwrap();
+        assert_eq!(cfg.general.desktop_scroll_notches, 3);
     }
 
     #[test]
