@@ -20,6 +20,12 @@
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
+// Bring acquire_master_lock() into scope so we can reclaim DRM master
+// directly on the fd after a VT switch, even in unprivileged (logind-managed)
+// mode.  After the initial ResumeDevice from logind, was_master is set on
+// the file description, so SET_MASTER succeeds again without CAP_SYS_ADMIN.
+use smithay::reexports::drm::Device as DrmBasicDevice;
+
 use anyhow::Result;
 use smithay::{
     backend::{
@@ -28,7 +34,7 @@ use smithay::{
             Fourcc,
         },
         drm::{
-            compositor::FrameFlags,
+            compositor::{FrameError, FrameFlags, RenderFrameError},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
             CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType,
@@ -100,6 +106,15 @@ pub(crate) struct UdevOutputId {
 
 pub struct UdevData {
     pub session: LibSeatSession,
+    /// libinput context — stored here so the VT watchdog can call resume()
+    /// without needing a closure-captured copy.
+    pub libinput: smithay::reexports::input::Libinput,
+    /// Our own session-active flag.  Set true at startup and by every
+    /// successful activation (ActivateSession handler or VT watchdog), set
+    /// false in PauseSession.  Using this instead of session.is_active() lets
+    /// the watchdog path mark the session active before libseat's AtomicBool
+    /// is updated.
+    pub vt_active: bool,
     primary_gpu: DrmNode,
     gpus: GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
     backends: HashMap<DrmNode, BackendData>,
@@ -169,8 +184,24 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
     }))
     .map_err(|e| anyhow::anyhow!("GpuManager init failed: {e}"))?;
 
+    // libinput: keyboard, pointer, touch.  Build before UdevData so we can
+    // store the context in the struct — the VT watchdog needs it for resume().
+    let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
+        session.clone().into(),
+    );
+    libinput_context
+        .udev_assign_seat(&seat_name)
+        .map_err(|_| anyhow::anyhow!("libinput could not assign seat {seat_name}"))?;
+    let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
+
+    // Record the active VT at startup — we are the foreground, so the current
+    let vt_active = session.is_active();
+    tracing::info!(vt_active, "session active at startup");
+
     state.udev = Some(UdevData {
         session,
+        libinput: libinput_context,
+        vt_active,
         primary_gpu,
         gpus,
         backends: HashMap::new(),
@@ -180,16 +211,6 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
     let udev_backend = UdevBackend::new(&seat_name)
         .map_err(|e| anyhow::anyhow!("udev backend init failed: {e}"))?;
 
-    // libinput: keyboard, pointer, touch. libseat hands fds out via the
-    // SessionInterface so we keep working across VT switches.
-    let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
-        state.udev.as_ref().unwrap().session.clone().into(),
-    );
-    libinput_context
-        .udev_assign_seat(&seat_name)
-        .map_err(|_| anyhow::anyhow!("libinput could not assign seat {seat_name}"))?;
-    let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
-
     event_loop
         .handle()
         .insert_source(libinput_backend, move |event, _, state| {
@@ -197,63 +218,81 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
         })
         .map_err(|e| anyhow::anyhow!("insert libinput source: {e}"))?;
 
-    // Session pause/resume on VT switch. We drop libinput when paused so we
-    // don't fight whoever owns the foreground VT, then reactivate every drm
+    // Session pause/resume on VT switch.  We suspend libinput when paused so
+    // we don't fight whoever owns the foreground VT, then reactivate every drm
     // device on resume and re-render once.
+    //
+    // Problem: when running under LightDM whose own logind session lives on a
+    // *different* VT from the one this compositor drives, logind's ResumeDevice
+    // signal is never delivered for our VT.  ActivateSession therefore never
+    // fires.  As a fallback we install a 200 ms timer in PauseSession that
+    // polls /sys/class/tty/tty0/active; when it matches our home VT we call
+    // do_activate_session() directly.
     event_loop
         .handle()
         .insert_source(session_notifier, move |event, &mut (), state| match event {
             SessionEvent::PauseSession => {
                 tracing::info!("session paused (vt switch away)");
-                libinput_context.suspend();
                 if let Some(udev) = state.udev.as_mut() {
-                    for backend in udev.backends.values_mut() {
+                    udev.vt_active = false;
+                    udev.libinput.suspend();
+                    for (node, backend) in udev.backends.iter_mut() {
+                        tracing::debug!(?node, surfaces = backend.surfaces.len(), "pausing drm device");
                         backend.drm_output_manager.pause();
                     }
+                }
+                // Start the VT watchdog.  It drops itself once vt_active goes true.
+                //
+                // Problem: when the compositor session lives on a different VT
+                // (e.g. tty8 under LightDM) from the one the user expects to
+                // return to (e.g. tty7), logind never sends ResumeDevice and
+                // ActivateSession never fires.
+                //
+                // Fix: record the VT the user just switched *to* (away_vt).
+                // Poll every 200 ms.  The moment the active VT is anything other
+                // than away_vt the user has moved toward the compositor; fire
+                // do_activate_session() immediately so the WM reclaims DRM master
+                // before the display blanks.
+                let away_vt = std::fs::read_to_string("/sys/class/tty/tty0/active")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                tracing::info!(away_vt, "VT watchdog armed");
+                if away_vt.is_empty() {
+                    tracing::warn!("away_vt unknown; VT watchdog disabled");
+                } else {
+                    let _ = state.loop_handle.insert_source(
+                        Timer::from_duration(Duration::from_millis(200)),
+                        move |_, _, state| {
+                            if state.udev.as_ref().map_or(false, |u| u.vt_active) {
+                                return TimeoutAction::Drop;
+                            }
+                            let current = std::fs::read_to_string("/sys/class/tty/tty0/active")
+                                .map(|s| s.trim().to_string())
+                                .unwrap_or_default();
+                            // Still on the away VT — keep waiting.
+                            if current == away_vt || current.is_empty() {
+                                return TimeoutAction::ToDuration(Duration::from_millis(200));
+                            }
+                            // User has moved to a different VT (presumably back
+                            // toward the compositor).  Self-activate immediately.
+                            tracing::warn!(
+                                current,
+                                away_vt,
+                                "VT watchdog: user left away-VT; self-activating"
+                            );
+                            do_activate_session(state);
+                            TimeoutAction::Drop
+                        },
+                    );
                 }
             }
             SessionEvent::ActivateSession => {
                 tracing::info!("session activated (vt switch in)");
-                if let Err(e) = libinput_context.resume() {
-                    tracing::warn!(error = ?e, "libinput resume failed");
-                }
-                let Some(udev) = state.udev.as_mut() else {
+                if state.udev.as_ref().map_or(false, |u| u.vt_active) {
+                    tracing::debug!("ActivateSession: already active (watchdog fired first), skipping");
                     return;
-                };
-                let nodes: Vec<DrmNode> = udev.backends.keys().copied().collect();
-                for node in &nodes {
-                    if let Some(backend) = udev.backends.get_mut(node) {
-                        if let Err(e) = backend.drm_output_manager.lock().activate(false) {
-                            tracing::error!(?node, error = ?e, "drm activate failed");
-                        }
-                        // The other VT may have clobbered our framebuffers. Reset the
-                        // swapchain so damage tracking sees the whole screen as dirty,
-                        // guaranteeing render_frame returns a non-empty frame and
-                        // queue_frame is called — otherwise the VBlank-driven render
-                        // loop never restarts and the screen stays black.
-                        for surface in backend.surfaces.values() {
-                            surface.drm_output.reset_buffers();
-                        }
-                    }
                 }
-                // Kick a render on every surface so the screen comes back.
-                // Deferred via insert_idle so calloop finishes processing the
-                // session activation event before we submit DRM commits —
-                // calling render inside the session event handler can cause
-                // the atomic commit to race with libseat's master handover.
-                for node in nodes {
-                    let crtcs: Vec<crtc::Handle> = state
-                        .udev
-                        .as_ref()
-                        .and_then(|u| u.backends.get(&node))
-                        .map(|b| b.surfaces.keys().copied().collect())
-                        .unwrap_or_default();
-                    for crtc in crtcs {
-                        state.loop_handle.insert_idle(move |state| {
-                            state.render_surface(node, crtc);
-                        });
-                    }
-                }
+                do_activate_session(state);
             }
         })
         .map_err(|e| anyhow::anyhow!("insert session notifier: {e}"))?;
@@ -617,6 +656,74 @@ fn connector_disconnected(
     }
 }
 
+/// Shared activation logic for both the `ActivateSession` event path and the
+/// VT watchdog path.  Resumes libinput, reactivates every DRM backend, resets
+/// framebuffer age tracking, and kicks an idle render on each surface.
+fn do_activate_session(state: &mut ShoestringWm) {
+    {
+        let Some(udev) = state.udev.as_mut() else {
+            tracing::error!("do_activate_session: udev is None");
+            return;
+        };
+        if let Err(e) = udev.libinput.resume() {
+            tracing::warn!(error = ?e, "libinput resume failed");
+        }
+        let nodes: Vec<DrmNode> = udev.backends.keys().copied().collect();
+        tracing::debug!(node_count = nodes.len(), "activating drm backends");
+        for node in &nodes {
+            if let Some(backend) = udev.backends.get_mut(node) {
+                // Explicitly reclaim DRM master before asking smithay to
+                // activate the device.  Smithay only calls SET_MASTER when
+                // the fd is "privileged" (it acquired master at open-time),
+                // but we run unprivileged — logind manages master via
+                // ResumeDevice.  After the initial ResumeDevice, was_master
+                // is set on the file description, so SET_MASTER succeeds
+                // again after a DROP_MASTER even without CAP_SYS_ADMIN.
+                let device_fd = backend.drm_output_manager.device().device_fd().clone();
+                match device_fd.acquire_master_lock() {
+                    Ok(()) => tracing::info!(?node, "DRM master re-acquired"),
+                    Err(e) => tracing::warn!(?node, error = ?e, "DRM master re-acquire failed; rendering may fail"),
+                }
+                tracing::debug!(?node, surfaces = backend.surfaces.len(), "calling drm activate");
+                match backend.drm_output_manager.lock().activate(false) {
+                    Ok(()) => tracing::debug!(?node, "drm activate ok"),
+                    Err(e) => tracing::error!(?node, error = ?e, "drm activate failed"),
+                }
+                // Reset swapchain age so damage tracking considers the whole
+                // screen dirty, guaranteeing a non-empty frame and that
+                // queue_frame is called — without this the VBlank-driven loop
+                // never restarts after a VT switch.
+                for (crtc, surface) in backend.surfaces.iter() {
+                    tracing::debug!(?node, ?crtc, "reset_buffers");
+                    surface.drm_output.reset_buffers();
+                }
+            }
+        }
+        udev.vt_active = true;
+    }
+    // Kick a render on every surface.  Deferred via insert_idle so calloop
+    // finishes the current event before we submit DRM commits.
+    let nodes: Vec<DrmNode> = state
+        .udev
+        .as_ref()
+        .map(|u| u.backends.keys().copied().collect())
+        .unwrap_or_default();
+    for node in nodes {
+        let crtcs: Vec<crtc::Handle> = state
+            .udev
+            .as_ref()
+            .and_then(|u| u.backends.get(&node))
+            .map(|b| b.surfaces.keys().copied().collect())
+            .unwrap_or_default();
+        for crtc in crtcs {
+            tracing::debug!(?node, ?crtc, "scheduling post-activate render_surface via insert_idle");
+            state.loop_handle.insert_idle(move |state| {
+                state.render_surface(node, crtc);
+            });
+        }
+    }
+}
+
 impl ShoestringWm {
     /// VBlank handler: the GPU just finished presenting a frame on `crtc`.
     /// Acknowledge it and schedule the next render one frame later.
@@ -624,6 +731,15 @@ impl ShoestringWm {
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
+
+        // VBlank events keep arriving on the DRM fd even while we are paused
+        // (the CRTC keeps running for the TTY console). If we schedule a render
+        // timer here while inactive, that timer fires, fails with DeviceInactive,
+        // reschedules another timer — and VBlank creates yet another. After even
+        // a few seconds away, hundreds of timers pile up and race each other on
+        // session resume, preventing a clean takeover of the display.
+        let session_active = udev.vt_active;
+
         let Some(device) = udev.backends.get_mut(&node) else {
             return;
         };
@@ -633,6 +749,11 @@ impl ShoestringWm {
 
         if let Err(e) = surface.drm_output.frame_submitted() {
             tracing::warn!(?crtc, error = ?e, "frame_submitted failed");
+        }
+
+        if !session_active {
+            tracing::debug!(?node, ?crtc, "frame_finish: session inactive, suppressing render timer");
+            return;
         }
 
         // Frame interval from the output's current mode.
@@ -653,6 +774,13 @@ impl ShoestringWm {
 
     /// Compose `space` onto `crtc` and queue the resulting frame.
     pub(crate) fn render_surface(&mut self, node: DrmNode, crtc: crtc::Handle) {
+        // Read session state before taking any borrows. If the session is
+        // paused (we switched to a TTY), all reschedule paths must be skipped
+        // — rescheduling while paused builds up a storm of pending timers that
+        // race each other on resume. The activate-triggered render runs with
+        // is_active() already true, so that path is unaffected.
+        let session_active = self.udev.as_ref().map(|u| u.vt_active).unwrap_or(false);
+
         // Snapshot the output for send_frame, since the borrow on `udev`
         // below precludes touching `self.space` while holding it.
         let output = {
@@ -703,11 +831,13 @@ impl ShoestringWm {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(?crtc, error = ?e, "no renderer for render_surface");
-                let timer = Timer::from_duration(Duration::from_millis(16));
-                let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
-                    state.render_surface(node, crtc);
-                    TimeoutAction::Drop
-                });
+                if session_active {
+                    let timer = Timer::from_duration(Duration::from_millis(16));
+                    let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                        state.render_surface(node, crtc);
+                        TimeoutAction::Drop
+                    });
+                }
                 return;
             }
         };
@@ -810,29 +940,45 @@ impl ShoestringWm {
         let rendered = match result {
             Ok(frame) => !frame.is_empty,
             Err(e) => {
-                tracing::warn!(?crtc, error = ?e, "render_frame failed");
-                // Best-effort: reschedule one frame later so we can try again
-                // (e.g. PermissionDenied during a brief VT race).
-                let timer = Timer::from_duration(Duration::from_millis(16));
-                let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
-                    state.render_surface(node, crtc);
-                    TimeoutAction::Drop
-                });
+                let is_test_failed = matches!(
+                    e,
+                    RenderFrameError::PrepareFrame(FrameError::DrmError(DrmError::TestFailed(_)))
+                );
+                tracing::warn!(?crtc, ?e, is_test_failed, session_active, "render_frame failed");
+                // TestFailed means the kernel's DRM state diverged from what
+                // we have cached — most likely because the TTY took DRM master
+                // and rearranged CRTC/connector/plane bindings while we were
+                // away. Reset the device to a blank state so the next render
+                // can do a full modeset from scratch; without this, every retry
+                // also fails with TestFailed and we never recover.
+                if is_test_failed {
+                    drop(renderer);
+                    match device.drm_output_manager.device_mut().reset_state() {
+                        Ok(()) => tracing::info!(?node, "DRM device reset_state ok after TestFailed"),
+                        Err(re) => tracing::warn!(?node, error = ?re, "DRM device reset_state failed after TestFailed"),
+                    }
+                }
+                if session_active {
+                    let timer = Timer::from_duration(Duration::from_millis(16));
+                    let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                        state.render_surface(node, crtc);
+                        TimeoutAction::Drop
+                    });
+                }
                 return;
             }
         };
 
         if rendered {
             if let Err(e) = surface.drm_output.queue_frame(()) {
-                tracing::warn!(?crtc, error = ?e, "queue_frame failed");
-                // The DRM commit failed (e.g. TestFailed after a VT switch).
-                // Reschedule so the render loop keeps running; the next attempt
-                // may succeed once the display state settles.
-                let timer = Timer::from_duration(Duration::from_millis(16));
-                let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
-                    state.render_surface(node, crtc);
-                    TimeoutAction::Drop
-                });
+                tracing::warn!(?crtc, ?e, session_active, "queue_frame failed");
+                if session_active {
+                    let timer = Timer::from_duration(Duration::from_millis(16));
+                    let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                        state.render_surface(node, crtc);
+                        TimeoutAction::Drop
+                    });
+                }
             }
         }
 
@@ -850,7 +996,7 @@ impl ShoestringWm {
 
         // If we didn't actually render (no damage), no VBlank will come — so
         // schedule another check after a frame.
-        if !rendered {
+        if !rendered && session_active {
             let refresh_mhz = output.current_mode().map(|m| m.refresh).unwrap_or(60_000);
             let frame_us = 1_000_000_000u64 / refresh_mhz as u64;
             let timer = Timer::from_duration(Duration::from_micros(frame_us));

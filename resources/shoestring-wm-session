@@ -31,6 +31,25 @@ for d in "${HOME}/.local/bin" "${CARGO_HOME:-$HOME/.cargo}/bin"; do
 done
 export PATH
 
+# Log to a file so GDM's stdout=/dev/null redirect doesn't swallow diagnostics.
+# Set RUST_LOG=shoestring_wm=info (default) or =debug for verbose output.
+# The log rotates every session: previous run is kept as .log.old.
+# If the old log is suspiciously large (>10 MB — shouldn't happen at info
+# level but guards against a runaway debug session), drop it instead of
+# keeping it so we don't fill the XDG_RUNTIME_DIR tmpfs.
+_logdir="${XDG_RUNTIME_DIR:-/tmp}"
+_logfile="${_logdir}/shoestring-wm.log"
+if [ -f "${_logfile}" ]; then
+    _logsize=$(wc -c < "${_logfile}" 2>/dev/null || echo 0)
+    if [ "${_logsize}" -gt $((10 * 1024 * 1024)) ]; then
+        rm -f "${_logfile}"
+    else
+        mv -f "${_logfile}" "${_logfile}.old"
+    fi
+fi
+export SHOESTRING_WM_LOG="${_logfile}"
+export RUST_LOG="${RUST_LOG:-shoestring_wm=info,smithay=warn}"
+
 # Variables worth exporting to the user session bus once the compositor
 # has set WAYLAND_DISPLAY. The compositor sets it on its own socket at
 # startup; we re-import after it's up via the autostart hook instead, so
