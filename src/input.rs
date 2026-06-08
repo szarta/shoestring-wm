@@ -650,6 +650,39 @@ impl ShoestringWm {
                 let horizontal_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_discrete = event.amount_v120(Axis::Vertical);
 
+                // Desktop scroll: a mouse wheel over the bare desktop — no
+                // window or layer-shell surface under the pointer — switches
+                // workspaces (wheel up to the next, down to the previous),
+                // the way Openbox scrolls the root window. Restricted to real
+                // wheels so touchpad scrolling isn't hijacked, and skipped
+                // mid-grab, mid-pick, or while locked. The event is then
+                // consumed (there is no client under the pointer to deliver
+                // it to anyway).
+                if source == AxisSource::Wheel
+                    && vertical_amount != 0.0
+                    && self.pending_picker.is_none()
+                    && !self.is_locked()
+                {
+                    let pointer = self.seat.get_pointer().unwrap();
+                    if !pointer.is_grabbed()
+                        && self.surface_under(pointer.current_location()).is_none()
+                    {
+                        // Wayland axis convention: positive vertical is
+                        // downward, so wheel up (negative) advances forward.
+                        let delta = if vertical_amount < 0.0 { 1 } else { -1 };
+                        let target = self.workspaces.shifted(self.workspaces.active(), delta);
+                        if target != self.workspaces.active() {
+                            tracing::debug!(
+                                delta,
+                                target = target.one_based(),
+                                "desktop scroll → workspace"
+                            );
+                            self.focus_workspace_id(target);
+                        }
+                        return;
+                    }
+                }
+
                 let mut frame = AxisFrame::new(event.time_msec()).source(source);
                 if horizontal_amount != 0.0 {
                     frame = frame.value(Axis::Horizontal, horizontal_amount);
