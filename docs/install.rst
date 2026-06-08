@@ -188,6 +188,24 @@ A development shell that brings in everything needed:
 The packaging story for shoestring-wm itself (a Nix derivation under
 ``nixpkgs``) is not yet upstream.
 
+Optional: XWayland
+~~~~~~~~~~~~~~~~~~
+
+XWayland is a **runtime** dependency, and only needed if you run X11 tools
+(e.g. GIMP, Inkscape). It is not required to build. The WM spawns the
+``Xwayland`` binary on demand, so just install your distro's package:
+
+============== =============================
+Distro         Package
+============== =============================
+Debian/Ubuntu  ``xwayland``
+Fedora/RHEL    ``xorg-x11-server-Xwayland``
+Arch/Manjaro   ``xorg-xwayland``
+Alpine         ``xwayland``
+FreeBSD        ``xwayland`` (port: ``x11-servers/xwayland``)
+NixOS          ``xwayland``
+============== =============================
+
 After installing
 ----------------
 
