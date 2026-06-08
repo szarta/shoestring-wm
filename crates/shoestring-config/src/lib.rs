@@ -47,7 +47,11 @@ pub struct Config {
     pub window_rules: Vec<WindowRule>,
     /// Per-output overrides. Keys are connector names as reported by the WM
     /// (e.g. `"DP-1"`, `"HDMI-A-1"`). Omit entirely to use global defaults.
-    #[serde(default, rename = "outputs", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        rename = "outputs",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub outputs: BTreeMap<String, OutputConfig>,
 }
 
@@ -671,7 +675,10 @@ mod tests {
     fn per_output_position_parses() {
         let toml_src = "[outputs.DP-1]\nposition = [1920, 0]\n";
         let cfg: Config = toml::from_str(toml_src).unwrap();
-        assert_eq!(cfg.outputs.get("DP-1").and_then(|o| o.position), Some([1920, 0]));
+        assert_eq!(
+            cfg.outputs.get("DP-1").and_then(|o| o.position),
+            Some([1920, 0])
+        );
     }
 
     #[test]
@@ -686,7 +693,10 @@ mod tests {
     #[test]
     fn default_config_toml_no_outputs_section() {
         let dumped = default_config_toml();
-        assert!(!dumped.contains("[outputs]"), "empty outputs must not appear in default config");
+        assert!(
+            !dumped.contains("[outputs]"),
+            "empty outputs must not appear in default config"
+        );
     }
 
     #[test]

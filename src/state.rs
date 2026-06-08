@@ -202,10 +202,7 @@ impl ShoestringWm {
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let output_management = crate::output_management::OutputManagementState {
-            global: dh.create_global::<Self, _, _>(
-                4,
-                crate::output_management::OutputManagerData,
-            ),
+            global: dh.create_global::<Self, _, _>(4, crate::output_management::OutputManagerData),
             serial: 0,
             managers: Vec::new(),
             heads: Vec::new(),

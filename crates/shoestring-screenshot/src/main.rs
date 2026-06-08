@@ -245,7 +245,14 @@ fn run() -> Result<Option<PathBuf>> {
 
     // Map the buffer and encode to PNG bytes.
     let mmap = unsafe { MmapMut::map_mut(&tmp).context("mmap shm pool")? };
-    let png_bytes = encode_png(&mmap, width, height, stride, format, flags.contains(Flags::YInvert))?;
+    let png_bytes = encode_png(
+        &mmap,
+        width,
+        height,
+        stride,
+        format,
+        flags.contains(Flags::YInvert),
+    )?;
     drop(mmap);
     drop(tmp);
     // queue keeps wayland resources alive — drop after PNG encode.

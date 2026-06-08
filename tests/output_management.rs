@@ -71,10 +71,14 @@ impl Dispatch<WlRegistry, ()> for State {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             if interface == "zwlr_output_manager_v1" {
-                let mgr = registry
-                    .bind::<ZwlrOutputManagerV1, _, _>(name, version.min(4), qh, ());
+                let mgr = registry.bind::<ZwlrOutputManagerV1, _, _>(name, version.min(4), qh, ());
                 state.manager = Some(mgr);
             }
         }
@@ -135,7 +139,9 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        let Some(info) = state.heads.get_mut(&head.id()) else { return };
+        let Some(info) = state.heads.get_mut(&head.id()) else {
+            return;
+        };
         match event {
             zwlr_output_head_v1::Event::Name { name } => info.name = name,
             zwlr_output_head_v1::Event::Enabled { enabled } => info.enabled = enabled != 0,
@@ -234,7 +240,8 @@ fn connect_and_enumerate() -> State {
         if state.done_serial > 0 {
             break;
         }
-        eq.roundtrip(&mut state).expect("head-enumeration roundtrip failed");
+        eq.roundtrip(&mut state)
+            .expect("head-enumeration roundtrip failed");
     }
 
     state
@@ -247,7 +254,9 @@ fn connect_and_enumerate() -> State {
 #[test]
 #[ignore]
 fn manager_announces_heads_and_done() {
-    let Some(_display) = wayland_display_or_skip() else { return };
+    let Some(_display) = wayland_display_or_skip() else {
+        return;
+    };
 
     let state = connect_and_enumerate();
 
@@ -261,10 +270,7 @@ fn manager_announces_heads_and_done() {
     );
 
     for (id, info) in &state.heads {
-        assert!(
-            !info.name.is_empty(),
-            "head {id:?} has an empty name"
-        );
+        assert!(!info.name.is_empty(), "head {id:?} has an empty name");
         assert!(
             info.mode_count > 0,
             "head {:?} ({}) has no modes",
@@ -279,10 +285,11 @@ fn manager_announces_heads_and_done() {
 #[test]
 #[ignore]
 fn noop_configuration_succeeds() {
-    let Some(_display) = wayland_display_or_skip() else { return };
+    let Some(_display) = wayland_display_or_skip() else {
+        return;
+    };
 
-    let conn = Connection::connect_to_env()
-        .expect("failed to connect to Wayland compositor");
+    let conn = Connection::connect_to_env().expect("failed to connect to Wayland compositor");
     let mut eq = conn.new_event_queue::<State>();
     let qh = eq.handle();
 
@@ -293,7 +300,8 @@ fn noop_configuration_succeeds() {
         if state.done_serial > 0 {
             break;
         }
-        eq.roundtrip(&mut state).expect("head-enumeration roundtrip failed");
+        eq.roundtrip(&mut state)
+            .expect("head-enumeration roundtrip failed");
     }
 
     let serial = state.done_serial;

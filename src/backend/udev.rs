@@ -186,9 +186,8 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
 
     // libinput: keyboard, pointer, touch.  Build before UdevData so we can
     // store the context in the struct — the VT watchdog needs it for resume().
-    let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
-        session.clone().into(),
-    );
+    let mut libinput_context =
+        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
     libinput_context
         .udev_assign_seat(&seat_name)
         .map_err(|_| anyhow::anyhow!("libinput could not assign seat {seat_name}"))?;
@@ -237,7 +236,11 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
                     udev.vt_active = false;
                     udev.libinput.suspend();
                     for (node, backend) in udev.backends.iter_mut() {
-                        tracing::debug!(?node, surfaces = backend.surfaces.len(), "pausing drm device");
+                        tracing::debug!(
+                            ?node,
+                            surfaces = backend.surfaces.len(),
+                            "pausing drm device"
+                        );
                         backend.drm_output_manager.pause();
                     }
                 }
@@ -263,7 +266,7 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
                     let _ = state.loop_handle.insert_source(
                         Timer::from_duration(Duration::from_millis(200)),
                         move |_, _, state| {
-                            if state.udev.as_ref().map_or(false, |u| u.vt_active) {
+                            if state.udev.as_ref().is_some_and(|u| u.vt_active) {
                                 return TimeoutAction::Drop;
                             }
                             let current = std::fs::read_to_string("/sys/class/tty/tty0/active")
@@ -288,8 +291,10 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
             }
             SessionEvent::ActivateSession => {
                 tracing::info!("session activated (vt switch in)");
-                if state.udev.as_ref().map_or(false, |u| u.vt_active) {
-                    tracing::debug!("ActivateSession: already active (watchdog fired first), skipping");
+                if state.udev.as_ref().is_some_and(|u| u.vt_active) {
+                    tracing::debug!(
+                        "ActivateSession: already active (watchdog fired first), skipping"
+                    );
                     return;
                 }
                 do_activate_session(state);
@@ -690,13 +695,20 @@ pub fn disable_output(state: &mut ShoestringWm, output: &Output) -> bool {
     let crtc = udev_id.crtc;
 
     let surface = {
-        let Some(udev) = state.udev.as_mut() else { return false; };
-        let Some(device) = udev.backends.get_mut(&node) else { return false; };
+        let Some(udev) = state.udev.as_mut() else {
+            return false;
+        };
+        let Some(device) = udev.backends.get_mut(&node) else {
+            return false;
+        };
         device.surfaces.remove(&crtc)
     };
 
     let Some(surface) = surface else {
-        tracing::warn!(output = output.name(), "disable_output: surface already gone");
+        tracing::warn!(
+            output = output.name(),
+            "disable_output: surface already gone"
+        );
         return false;
     };
 
@@ -732,7 +744,10 @@ pub fn change_output_mode(
     req_refresh: i32,
 ) -> bool {
     let Some(udev_id) = output.user_data().get::<UdevOutputId>() else {
-        tracing::warn!(output = output.name(), "change_output_mode: no UdevOutputId");
+        tracing::warn!(
+            output = output.name(),
+            "change_output_mode: no UdevOutputId"
+        );
         return false;
     };
     let node = udev_id.device_id;
@@ -740,9 +755,15 @@ pub fn change_output_mode(
 
     // Collect connector handles from the surface compositor.
     let connector_handles: Vec<connector::Handle> = {
-        let Some(udev) = state.udev.as_ref() else { return false; };
-        let Some(device) = udev.backends.get(&node) else { return false; };
-        let Some(surface) = device.surfaces.get(&crtc) else { return false; };
+        let Some(udev) = state.udev.as_ref() else {
+            return false;
+        };
+        let Some(device) = udev.backends.get(&node) else {
+            return false;
+        };
+        let Some(surface) = device.surfaces.get(&crtc) else {
+            return false;
+        };
         surface
             .drm_output
             .with_compositor(|c| c.surface().current_connectors().into_iter().collect())
@@ -777,12 +798,18 @@ pub fn change_output_mode(
     };
 
     let render_node = {
-        let Some(udev) = state.udev.as_ref() else { return false; };
-        let Some(device) = udev.backends.get(&node) else { return false; };
+        let Some(udev) = state.udev.as_ref() else {
+            return false;
+        };
+        let Some(device) = udev.backends.get(&node) else {
+            return false;
+        };
         device.render_node.unwrap_or(udev.primary_gpu)
     };
 
-    let Some(udev) = state.udev.as_mut() else { return false; };
+    let Some(udev) = state.udev.as_mut() else {
+        return false;
+    };
     let mut renderer: UdevRenderer<'_> = match udev.gpus.single_renderer(&render_node) {
         Ok(r) => r,
         Err(e) => {
@@ -790,19 +817,31 @@ pub fn change_output_mode(
             return false;
         }
     };
-    let Some(device) = udev.backends.get_mut(&node) else { return false; };
-    let Some(surface) = device.surfaces.get_mut(&crtc) else { return false; };
+    let Some(device) = udev.backends.get_mut(&node) else {
+        return false;
+    };
+    let Some(surface) = device.surfaces.get_mut(&crtc) else {
+        return false;
+    };
 
     let elements: DrmOutputRenderElements<
         UdevRenderer<'_>,
         crate::drawing::PointerRenderElement<UdevRenderer<'_>>,
     > = DrmOutputRenderElements::new();
 
-    match surface.drm_output.use_mode(drm_mode, &mut renderer, &elements) {
+    match surface
+        .drm_output
+        .use_mode(drm_mode, &mut renderer, &elements)
+    {
         Ok(()) => {
             let wl_mode = WlMode::from(drm_mode);
             output.change_current_state(Some(wl_mode), None, None, None);
-            tracing::info!(output = output.name(), ?req_size, req_refresh, "DRM mode changed");
+            tracing::info!(
+                output = output.name(),
+                ?req_size,
+                req_refresh,
+                "DRM mode changed"
+            );
             true
         }
         Err(e) => {
@@ -838,9 +877,15 @@ fn do_activate_session(state: &mut ShoestringWm) {
                 let device_fd = backend.drm_output_manager.device().device_fd().clone();
                 match device_fd.acquire_master_lock() {
                     Ok(()) => tracing::info!(?node, "DRM master re-acquired"),
-                    Err(e) => tracing::warn!(?node, error = ?e, "DRM master re-acquire failed; rendering may fail"),
+                    Err(e) => {
+                        tracing::warn!(?node, error = ?e, "DRM master re-acquire failed; rendering may fail")
+                    }
                 }
-                tracing::debug!(?node, surfaces = backend.surfaces.len(), "calling drm activate");
+                tracing::debug!(
+                    ?node,
+                    surfaces = backend.surfaces.len(),
+                    "calling drm activate"
+                );
                 match backend.drm_output_manager.lock().activate(false) {
                     Ok(()) => tracing::debug!(?node, "drm activate ok"),
                     Err(e) => tracing::error!(?node, error = ?e, "drm activate failed"),
@@ -872,7 +917,11 @@ fn do_activate_session(state: &mut ShoestringWm) {
             .map(|b| b.surfaces.keys().copied().collect())
             .unwrap_or_default();
         for crtc in crtcs {
-            tracing::debug!(?node, ?crtc, "scheduling post-activate render_surface via insert_idle");
+            tracing::debug!(
+                ?node,
+                ?crtc,
+                "scheduling post-activate render_surface via insert_idle"
+            );
             state.loop_handle.insert_idle(move |state| {
                 state.render_surface(node, crtc);
             });
@@ -908,7 +957,11 @@ impl ShoestringWm {
         }
 
         if !session_active {
-            tracing::debug!(?node, ?crtc, "frame_finish: session inactive, suppressing render timer");
+            tracing::debug!(
+                ?node,
+                ?crtc,
+                "frame_finish: session inactive, suppressing render timer"
+            );
             return;
         }
 
@@ -1100,7 +1153,13 @@ impl ShoestringWm {
                     e,
                     RenderFrameError::PrepareFrame(FrameError::DrmError(DrmError::TestFailed(_)))
                 );
-                tracing::warn!(?crtc, ?e, is_test_failed, session_active, "render_frame failed");
+                tracing::warn!(
+                    ?crtc,
+                    ?e,
+                    is_test_failed,
+                    session_active,
+                    "render_frame failed"
+                );
                 // TestFailed means the kernel's DRM state diverged from what
                 // we have cached — most likely because the TTY took DRM master
                 // and rearranged CRTC/connector/plane bindings while we were
@@ -1110,8 +1169,12 @@ impl ShoestringWm {
                 if is_test_failed {
                     drop(renderer);
                     match device.drm_output_manager.device_mut().reset_state() {
-                        Ok(()) => tracing::info!(?node, "DRM device reset_state ok after TestFailed"),
-                        Err(re) => tracing::warn!(?node, error = ?re, "DRM device reset_state failed after TestFailed"),
+                        Ok(()) => {
+                            tracing::info!(?node, "DRM device reset_state ok after TestFailed")
+                        }
+                        Err(re) => {
+                            tracing::warn!(?node, error = ?re, "DRM device reset_state failed after TestFailed")
+                        }
                     }
                 }
                 if session_active {

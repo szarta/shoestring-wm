@@ -17,8 +17,7 @@ use smithay::{
 };
 
 use smithay::reexports::wayland_protocols_wlr::output_management::v1::server::{
-    zwlr_output_head_v1::ZwlrOutputHeadV1,
-    zwlr_output_manager_v1::ZwlrOutputManagerV1,
+    zwlr_output_head_v1::ZwlrOutputHeadV1, zwlr_output_manager_v1::ZwlrOutputManagerV1,
     zwlr_output_mode_v1::ZwlrOutputModeV1,
 };
 
@@ -255,7 +254,9 @@ pub fn broadcast_head_removed(state: &mut crate::state::ShoestringWm, output: &O
     broadcast_done(state);
 }
 
-fn wl_transform(t: Transform) -> smithay::reexports::wayland_server::protocol::wl_output::Transform {
+fn wl_transform(
+    t: Transform,
+) -> smithay::reexports::wayland_server::protocol::wl_output::Transform {
     use smithay::reexports::wayland_server::protocol::wl_output::Transform as WlT;
     match t {
         Transform::Normal => WlT::Normal,

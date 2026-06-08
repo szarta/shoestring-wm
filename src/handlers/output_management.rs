@@ -105,10 +105,7 @@ impl Dispatch2<ZwlrOutputHeadV1, ShoestringWm> for HeadData {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, ShoestringWm>,
     ) {
-        match request {
-            zwlr_output_head_v1::Request::Release => {}
-            _ => {}
-        }
+        if let zwlr_output_head_v1::Request::Release = request {}
     }
 }
 
@@ -124,10 +121,7 @@ impl Dispatch2<ZwlrOutputModeV1, ShoestringWm> for ModeData {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, ShoestringWm>,
     ) {
-        match request {
-            zwlr_output_mode_v1::Request::Release => {}
-            _ => {}
-        }
+        if let zwlr_output_mode_v1::Request::Release = request {}
     }
 }
 
@@ -228,17 +222,17 @@ impl Dispatch2<ZwlrOutputConfigurationHeadV1, ShoestringWm> for ConfigHeadData {
                 refresh,
             } => {
                 intent.mode = Some(ModeChoice::Custom {
-                    size: (width as i32, height as i32).into(),
+                    size: (width, height).into(),
                     refresh,
                 });
             }
             zwlr_output_configuration_head_v1::Request::SetPosition { x, y } => {
                 intent.position = Some(Point::<i32, Logical>::from((x, y)));
             }
-            zwlr_output_configuration_head_v1::Request::SetTransform { transform } => {
-                if let smithay::reexports::wayland_server::WEnum::Value(t) = transform {
-                    intent.transform = Some(smithay_transform(t));
-                }
+            zwlr_output_configuration_head_v1::Request::SetTransform {
+                transform: smithay::reexports::wayland_server::WEnum::Value(t),
+            } => {
+                intent.transform = Some(smithay_transform(t));
             }
             zwlr_output_configuration_head_v1::Request::SetScale { scale } => {
                 intent.scale = Some(scale);
@@ -298,12 +292,14 @@ fn apply_configuration(
                 enabled: i.enabled,
                 mode: match &i.mode {
                     None => None,
-                    Some(ModeChoice::Named { size, refresh }) => {
-                        Some(ModeChoice::Named { size: *size, refresh: *refresh })
-                    }
-                    Some(ModeChoice::Custom { size, refresh }) => {
-                        Some(ModeChoice::Custom { size: *size, refresh: *refresh })
-                    }
+                    Some(ModeChoice::Named { size, refresh }) => Some(ModeChoice::Named {
+                        size: *size,
+                        refresh: *refresh,
+                    }),
+                    Some(ModeChoice::Custom { size, refresh }) => Some(ModeChoice::Custom {
+                        size: *size,
+                        refresh: *refresh,
+                    }),
                 },
                 position: i.position,
                 transform: i.transform,
@@ -331,7 +327,10 @@ fn apply_configuration(
             }
             #[cfg(not(feature = "tty"))]
             {
-                tracing::debug!(output = output.name(), "output disable ignored (winit backend)");
+                tracing::debug!(
+                    output = output.name(),
+                    "output disable ignored (winit backend)"
+                );
             }
             continue;
         }
@@ -354,15 +353,16 @@ fn apply_configuration(
             #[cfg(not(feature = "tty"))]
             {
                 let _ = (req_size, req_refresh);
-                tracing::debug!(output = output.name(), "mode change ignored (winit backend)");
+                tracing::debug!(
+                    output = output.name(),
+                    "mode change ignored (winit backend)"
+                );
             }
         }
 
         // ── Transform / scale / position (compositor-space) ─────────────────
         let new_transform = intent.transform;
-        let new_scale = intent
-            .scale
-            .map(smithay::output::Scale::Fractional);
+        let new_scale = intent.scale.map(smithay::output::Scale::Fractional);
         let new_position = intent.position;
 
         output.change_current_state(None, new_transform, new_scale, new_position);

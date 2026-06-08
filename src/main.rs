@@ -12,10 +12,10 @@ mod inject;
 mod input;
 mod ipc;
 mod layout;
+mod output_management;
 mod picker;
 mod remote_command;
 mod remote_screenshot;
-mod output_management;
 mod screencopy;
 mod state;
 mod window_ext;
@@ -245,7 +245,7 @@ fn install_sigchld_autoreap() {
     use std::mem::MaybeUninit;
     unsafe {
         let mut sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
-        sa.sa_sigaction = sigchld_handler as libc::sighandler_t;
+        sa.sa_sigaction = sigchld_handler as *const () as libc::sighandler_t;
         sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
         libc::sigemptyset(&mut sa.sa_mask);
         if libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut()) != 0 {

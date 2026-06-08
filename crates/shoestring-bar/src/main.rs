@@ -954,7 +954,16 @@ fn draw_window_list(
         if id.is_some() {
             let pad = 4;
             let chip_color = if *focused { ACCENT } else { ENTRY_BG };
-            fill_rect(mmap, w, h, x - pad, 2, lw + pad * 2, h as i32 - 4, chip_color);
+            fill_rect(
+                mmap,
+                w,
+                h,
+                x - pad,
+                2,
+                lw + pad * 2,
+                h as i32 - 4,
+                chip_color,
+            );
         }
         draw_text(mmap, w, h, font, font_px, x, label, fg);
         if let Some(id) = id {
