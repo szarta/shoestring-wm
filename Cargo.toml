@@ -175,3 +175,9 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 pam = "*"
+
+[dev-dependencies]
+# Used by tests/output_management.rs: speak the wlr-output-management
+# protocol as a Wayland client without requiring wlr-randr / kanshi installed.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client", "wayland-client"] }
