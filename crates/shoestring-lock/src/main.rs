@@ -5,8 +5,9 @@
 //! it via PAM, and unlocks on success.
 //!
 //! The MVP grabs the seat keyboard the moment the compositor focuses
-//! one of our lock surfaces and shows three lines centered on each
-//! output:
+//! one of our lock surfaces. A maze screensaver runs on every output;
+//! the password prompt stays hidden until the user starts typing and
+//! then shows three lines centered on each output:
 //!
 //! ```text
 //!     <hostname> · locked
@@ -14,10 +15,11 @@
 //!     (status / error)
 //! ```
 //!
-//! No idle trigger, no multi-output text positioning, no fade — just
-//! enough to keep an unattended workstation usable on a single-user
-//! desktop. Spawned by shoestring-wm via the `Action::Lock` /
-//! `shoestring-ctl lock` paths.
+//! The prompt auto-hides after [`PROMPT_TIMEOUT`] of inactivity, or
+//! immediately on Escape, discarding any half-typed password. No
+//! multi-output text positioning, no fade — just enough to keep an
+//! unattended workstation usable on a single-user desktop. Spawned by
+//! shoestring-wm via the `Action::Lock` / `shoestring-ctl lock` paths.
 
 mod maze;
 
@@ -78,6 +80,10 @@ const STEPS_PER_FRAME: u32 = 3;
 const PRE_SOLVE_DELAY: Duration = Duration::from_millis(800);
 /// Pause showing the fully-solved maze before regenerating.
 const POST_SOLVE_DELAY: Duration = Duration::from_millis(1800);
+/// How long the password prompt stays up after the last keystroke
+/// before fading back to the bare screensaver. Pressing Escape hides
+/// it immediately; either way the half-typed password is discarded.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(8);
 /// Target pixels per maze cell. Adjusted to whatever divides the
 /// output cleanly enough to fit at least [`MIN_CELLS`] in each axis.
 const TARGET_CELL_PX: u32 = 24;
@@ -275,6 +281,14 @@ struct State {
     password: String,
     /// Single-line message under the prompt (errors, "verifying…").
     status: String,
+    /// Whether the password prompt is currently drawn. Hidden until the
+    /// user starts typing; hidden again on Escape or after
+    /// [`PROMPT_TIMEOUT`] of inactivity. The maze runs underneath either
+    /// way.
+    prompt_visible: bool,
+    /// When the prompt should auto-hide. Only meaningful while
+    /// `prompt_visible`; bumped forward on every keystroke.
+    prompt_deadline: Instant,
     hostname: String,
     pam_service: String,
 }
@@ -357,6 +371,8 @@ fn run(cli: Cli) -> Result<()> {
         font_size: cli.font_size,
         password: String::new(),
         status: String::new(),
+        prompt_visible: false,
+        prompt_deadline: Instant::now(),
         hostname,
         pam_service,
     };
@@ -422,6 +438,12 @@ fn run(cli: Cli) -> Result<()> {
         if last_frame.elapsed() >= FRAME_INTERVAL {
             last_frame = Instant::now();
             tick_animations(&mut state, &qh);
+            // Auto-hide the prompt once it has been idle past its
+            // deadline, falling back to the bare screensaver.
+            if state.prompt_visible && Instant::now() >= state.prompt_deadline {
+                state.hide_prompt();
+                redraw_all(&mut state, &qh);
+            }
         }
     }
     // Final roundtrip so the unlock_and_destroy actually reaches the
@@ -649,6 +671,22 @@ impl Dispatch<WlSeat, ()> for State {
     }
 }
 
+impl State {
+    /// Register keyboard activity: reveal the prompt and push its
+    /// auto-hide deadline out by [`PROMPT_TIMEOUT`].
+    fn wake_prompt(&mut self) {
+        self.prompt_visible = true;
+        self.prompt_deadline = Instant::now() + PROMPT_TIMEOUT;
+    }
+
+    /// Hide the prompt and discard any half-typed password and status.
+    fn hide_prompt(&mut self) {
+        self.prompt_visible = false;
+        self.password.clear();
+        self.status.clear();
+    }
+}
+
 impl Dispatch<WlKeyboard, ()> for State {
     fn event(
         state: &mut Self,
@@ -701,27 +739,36 @@ impl Dispatch<WlKeyboard, ()> for State {
                 let xkb_code = key + 8;
                 let mut dirty = false;
                 let mut submit = false;
-                if let Some(xs) = state.xkb_state.as_ref() {
-                    let sym = xs.key_get_one_sym(xkb_code.into());
-                    let utf8 = xs.key_get_utf8(xkb_code.into());
+                // Pull the keysym + text out first so the xkb_state borrow
+                // ends before we touch `state` through &mut self helpers.
+                let parsed = state.xkb_state.as_ref().map(|xs| {
+                    (
+                        xs.key_get_one_sym(xkb_code.into()),
+                        xs.key_get_utf8(xkb_code.into()),
+                    )
+                });
+                if let Some((sym, utf8)) = parsed {
                     match sym {
                         xkb::Keysym::Return | xkb::Keysym::KP_Enter => submit = true,
                         xkb::Keysym::BackSpace => {
                             if state.password.pop().is_some() {
+                                state.wake_prompt();
                                 dirty = true;
                             }
                         }
                         xkb::Keysym::Escape => {
-                            if !state.password.is_empty() {
-                                state.password.clear();
-                                dirty = true;
-                            }
+                            // Dismiss the prompt immediately, dropping any
+                            // half-typed password. Always redraw to clear
+                            // the box.
+                            state.hide_prompt();
+                            dirty = true;
                         }
                         _ => {
                             // Skip control chars (BS/Tab/etc already
                             // handled above) and modifier-only events.
                             if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
                                 state.password.push_str(&utf8);
+                                state.wake_prompt();
                                 dirty = true;
                             }
                         }
@@ -729,6 +776,12 @@ impl Dispatch<WlKeyboard, ()> for State {
                 }
                 if submit {
                     verify_password(state);
+                    // Keep the prompt up (with a fresh deadline) so a
+                    // failure message stays visible; on success the loop
+                    // is already tearing down.
+                    if !state.finished {
+                        state.wake_prompt();
+                    }
                     dirty = true;
                 }
                 if dirty {
@@ -876,59 +929,62 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
     }
 
     // Prompt overlay: centered 3-line block with a solid backdrop
-    // so the text stays readable over the busy maze. Same text
-    // geometry as the pre-screensaver version; only the backdrop
-    // is new.
-    let title = format!("{} · locked", state.hostname);
-    let masked: String = "•".repeat(state.password.chars().count());
-    let prompt = format!("Password: {masked}");
-    let font_px = state.font_size;
-    let lines = [title.as_str(), prompt.as_str(), state.status.as_str()];
+    // so the text stays readable over the busy maze. Hidden until the
+    // user starts typing (see `prompt_visible`); the maze alone shows
+    // otherwise.
+    if state.prompt_visible {
+        let title = format!("{} · locked", state.hostname);
+        let masked: String = "•".repeat(state.password.chars().count());
+        let prompt = format!("Password: {masked}");
+        let font_px = state.font_size;
+        let lines = [title.as_str(), prompt.as_str(), state.status.as_str()];
 
-    let line_metrics =
-        state
-            .font
-            .horizontal_line_metrics(font_px)
-            .unwrap_or(fontdue::LineMetrics {
-                ascent: font_px * 0.8,
-                descent: -font_px * 0.2,
-                line_gap: font_px * 0.2,
-                new_line_size: font_px * 1.2,
-            });
-    let line_h = (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).max(font_px);
-    let total_h = line_h * lines.len() as f32;
-    let max_text_w = lines
-        .iter()
-        .map(|l| measure_text(&state.font, font_px, l))
-        .max()
-        .unwrap_or(0);
-    let pad_x = (font_px * 1.5).round() as i32;
-    let pad_y = (font_px * 0.8).round() as i32;
-    let box_w = max_text_w + pad_x * 2;
-    let box_h = total_h.round() as i32 + pad_y * 2;
-    let box_x = (w as i32 - box_w) / 2;
-    let box_y = ((h as f32 - total_h) / 2.0).round() as i32 - pad_y;
-    fill_rect(&mut mmap, w, h, box_x, box_y, box_w, box_h, COLOR_PROMPT_BG);
+        let line_metrics =
+            state
+                .font
+                .horizontal_line_metrics(font_px)
+                .unwrap_or(fontdue::LineMetrics {
+                    ascent: font_px * 0.8,
+                    descent: -font_px * 0.2,
+                    line_gap: font_px * 0.2,
+                    new_line_size: font_px * 1.2,
+                });
+        let line_h =
+            (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).max(font_px);
+        let total_h = line_h * lines.len() as f32;
+        let max_text_w = lines
+            .iter()
+            .map(|l| measure_text(&state.font, font_px, l))
+            .max()
+            .unwrap_or(0);
+        let pad_x = (font_px * 1.5).round() as i32;
+        let pad_y = (font_px * 0.8).round() as i32;
+        let box_w = max_text_w + pad_x * 2;
+        let box_h = total_h.round() as i32 + pad_y * 2;
+        let box_x = (w as i32 - box_w) / 2;
+        let box_y = ((h as f32 - total_h) / 2.0).round() as i32 - pad_y;
+        fill_rect(&mut mmap, w, h, box_x, box_y, box_w, box_h, COLOR_PROMPT_BG);
 
-    let text_top = box_y + pad_y;
-    for (i, line) in lines.iter().enumerate() {
-        if line.is_empty() {
-            continue;
+        let text_top = box_y + pad_y;
+        for (i, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let text_w = measure_text(&state.font, font_px, line);
+            let x = box_x + (box_w - text_w) / 2;
+            let baseline_y = text_top + (i as f32 * line_h + line_metrics.ascent).round() as i32;
+            draw_text(
+                &mut mmap,
+                w,
+                h,
+                &state.font,
+                font_px,
+                x,
+                baseline_y,
+                line,
+                0xFFE0E0E0,
+            );
         }
-        let text_w = measure_text(&state.font, font_px, line);
-        let x = box_x + (box_w - text_w) / 2;
-        let baseline_y = text_top + (i as f32 * line_h + line_metrics.ascent).round() as i32;
-        draw_text(
-            &mut mmap,
-            w,
-            h,
-            &state.font,
-            font_px,
-            x,
-            baseline_y,
-            line,
-            0xFFE0E0E0,
-        );
     }
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
