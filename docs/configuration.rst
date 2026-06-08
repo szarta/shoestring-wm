@@ -271,6 +271,12 @@ Each action type and its fields:
     Ask the focused window's client to close gracefully (the equivalent
     of clicking the window-manager close button).
 
+``cycle-windows``
+    Move keyboard focus to the next window on the active workspace,
+    raising it (the Alt+Tab switcher). Repeated presses round-robin
+    through every window and wrap around. Does nothing when the
+    workspace has fewer than two windows.
+
 ``focus-workspace``
     Switch every output to show workspace ``index`` (1-based, 1..=16).
     Example::

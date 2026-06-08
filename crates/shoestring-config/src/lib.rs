@@ -276,6 +276,10 @@ pub enum Action {
     Unminimize,
     /// Ask the focused window's client to close gracefully.
     Close,
+    /// Cycle keyboard focus to the next window on the active workspace,
+    /// raising it (Alt+Tab). Round-robins through every window and wraps;
+    /// a no-op when the workspace has fewer than two windows.
+    CycleWindows,
     /// Switch every output to show the windows on workspace `index`
     /// (1-based; valid range 1..=16).
     FocusWorkspace { index: u8 },
@@ -328,9 +332,10 @@ pub fn default_config_toml() -> String {
 #   shoestring-wm --write-default-config
 #
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
-# minimize, unminimize, close, focus-workspace, focus-workspace-relative,
-# move-window-to-workspace, move-window-to-workspace-relative, change-vt,
-# inject-key, inject-text, inject-click, lock.
+# minimize, unminimize, close, cycle-windows, focus-workspace,
+# focus-workspace-relative, move-window-to-workspace,
+# move-window-to-workspace-relative, change-vt, inject-key, inject-text,
+# inject-click, lock.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
@@ -439,6 +444,13 @@ impl Config {
                 mods: super_only(),
                 key: "x".into(),
                 action: Action::Close,
+            },
+            // Alt+Tab cycles focus through the active workspace's windows,
+            // raising each in turn — the conventional window switcher.
+            Binding {
+                mods: vec!["Alt".into()],
+                key: "Tab".into(),
+                action: Action::CycleWindows,
             },
             // Lock screen. Spawns `general.lock_command` (default
             // `shoestring-lock`) which binds ext-session-lock-v1.

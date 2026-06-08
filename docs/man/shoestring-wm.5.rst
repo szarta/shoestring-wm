@@ -136,6 +136,10 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
     ``close``
         Ask the client to close.
 
+    ``cycle-windows``
+        Focus and raise the next window on the active workspace (Alt+Tab),
+        round-robining through all of them. No-op below two windows.
+
     ``focus-workspace``
         Field ``index`` (1..=16).
 

@@ -147,6 +147,7 @@ impl ShoestringWm {
             }
             Action::Unminimize => self.unminimize_last(),
             Action::Close => self.close_focused(),
+            Action::CycleWindows => self.cycle_windows(),
             Action::FocusWorkspace { index } => {
                 tracing::debug!(index, "FocusWorkspace");
                 if let Some(ws) = self.workspaces.from_one_based(index) {
@@ -304,6 +305,35 @@ impl ShoestringWm {
             return;
         };
         crate::window_ext::send_close(&window);
+    }
+
+    /// Cycle keyboard focus to the next window on the active workspace,
+    /// raising it (the Alt+Tab switcher). The bottom-most window in the
+    /// stacking order — the one raised least recently — is focused and
+    /// rises to the top, so repeated presses round-robin through every
+    /// window and land back where they started. A no-op with fewer than
+    /// two windows.
+    ///
+    /// Everything mapped in the space belongs to the active workspace
+    /// (workspace switches map/unmap at the boundary) and minimized
+    /// windows are unmapped, so the space elements are exactly the cycle
+    /// candidates.
+    fn cycle_windows(&mut self) {
+        if self.space.elements().count() < 2 {
+            return;
+        }
+        let focused = self.focused_window();
+        // Bottom-to-top z-order: the first element that isn't already
+        // focused is the least-recently-raised window — the next in the
+        // round-robin. `focus_window` raises it back to the top.
+        let next = self
+            .space
+            .elements()
+            .find(|w| focused.as_ref() != Some(*w))
+            .cloned();
+        if let Some(next) = next {
+            self.focus_window(&next);
+        }
     }
 
     fn start_super_drag(
