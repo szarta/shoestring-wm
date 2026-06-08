@@ -678,6 +678,11 @@ impl ShoestringWm {
         let scale_int = self.config.general.output_scale.ceil().max(1.0) as u32;
         self.refresh_cursor_buffer(scale_int);
         let cursor_snapshot = self.cursor_render_snapshot();
+        // This output's place in the global logical layout, captured now so
+        // the `self.udev` re-borrow below doesn't preclude touching
+        // `self.space`. Used to scope the cursor to the output it sits on and
+        // to translate it into that output's local coordinate space.
+        let output_geometry = self.space.output_geometry(&output);
         // Capture lock state before re-borrowing self.udev — the renderer
         // borrow precludes calling &self methods further down.
         let locked = self.is_locked();
@@ -735,13 +740,24 @@ impl ShoestringWm {
                 &mut renderer,
                 scale,
             )
-        } else if let Some((pe, location, hotspot)) = cursor_snapshot {
+        } else if let Some((pe, location, hotspot)) = cursor_snapshot
+            // Only the output the pointer currently sits on draws the cursor.
+            // Without this every output renders it (each framebuffer's origin
+            // is its own top-left, so an un-scoped global location lands on
+            // them all), producing a ghost cursor on the other monitor.
+            .filter(|(_, location, _)| {
+                output_geometry.is_some_and(|geo| geo.to_f64().contains(*location))
+            })
+        {
             let scale: smithay::utils::Scale<f64> =
                 output.current_scale().fractional_scale().into();
+            // Translate from global logical space into this output's local
+            // space (subtract its origin) before scaling to physical pixels.
+            let origin = output_geometry.map(|g| g.loc).unwrap_or_default();
             let physical_location: smithay::utils::Point<i32, smithay::utils::Physical> =
                 smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-                    (location.x - hotspot.0 as f64) * scale.x,
-                    (location.y - hotspot.1 as f64) * scale.y,
+                    (location.x - origin.x as f64 - hotspot.0 as f64) * scale.x,
+                    (location.y - origin.y as f64 - hotspot.1 as f64) * scale.y,
                 ))
                 .to_i32_round();
             use smithay::backend::renderer::element::AsRenderElements;
