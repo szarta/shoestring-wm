@@ -159,6 +159,13 @@ fn main() -> Result<()> {
     // Point child processes at our socket.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
+    // Push WAYLAND_DISPLAY into the systemd user manager so D-Bus-activated
+    // services (xdg-desktop-portal, notification daemons, etc.) see it. The
+    // session wrapper already imported the static variables (XDG_CURRENT_DESKTOP,
+    // XDG_SESSION_TYPE, PATH); this covers the dynamic one set just above.
+    // DISPLAY is imported separately in xwayland.rs once XWayland is ready.
+    import_systemd_env(&["WAYLAND_DISPLAY"]);
+
     // IPC socket goes up after WAYLAND_DISPLAY is exported so
     // default_socket_path() can resolve it.
     state.start_ipc();
@@ -245,6 +252,19 @@ fn install_sigchld_autoreap() {
             let err = std::io::Error::last_os_error();
             tracing::warn!(error = %err, "install_sigchld_autoreap failed; expect <defunct> in ps");
         }
+    }
+}
+
+fn import_systemd_env(vars: &[&str]) {
+    match std::process::Command::new("systemctl")
+        .arg("--user")
+        .arg("import-environment")
+        .args(vars)
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => tracing::warn!(status = %s, "systemctl import-environment exited non-zero"),
+        Err(e) => tracing::warn!(error = %e, "systemctl import-environment failed"),
     }
 }
 

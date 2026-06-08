@@ -50,10 +50,9 @@ fi
 export SHOESTRING_WM_LOG="${_logfile}"
 export RUST_LOG="${RUST_LOG:-shoestring_wm=info,smithay=warn}"
 
-# Variables worth exporting to the user session bus once the compositor
-# has set WAYLAND_DISPLAY. The compositor sets it on its own socket at
-# startup; we re-import after it's up via the autostart hook instead, so
-# here we just seed the static ones.
+# Seed the static session variables into the systemd user manager now.
+# The compositor will import the dynamic runtime variables (WAYLAND_DISPLAY,
+# DISPLAY) via import_systemd_env() once it has set them up.
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PATH || true
 fi

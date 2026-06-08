@@ -102,6 +102,7 @@ impl ShoestringWm {
                     // spawn, run_command, etc.) inherit our env; setting
                     // $DISPLAY makes X11 clients find Xwayland.
                     std::env::set_var("DISPLAY", &display_str);
+                    crate::import_systemd_env(&["DISPLAY"]);
                     tracing::info!(display = %display_str, "xwayland ready");
                     state.refresh_xwayland_cursor();
                 }
