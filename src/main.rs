@@ -156,6 +156,14 @@ fn main() -> Result<()> {
     });
     tracing::info!(?backend, "starting backend");
 
+    // Only the real session compositor (TTY/udev) integrates with the
+    // surrounding session. The nested winit backend runs inside another
+    // compositor and must not push its WAYLAND_DISPLAY/DISPLAY into the
+    // shared systemd user manager — doing so retargets that session's
+    // socket-activated services (portals, ssh-tpm-agent, ...) at the
+    // nested instance's now-throwaway displays.
+    state.session_integration = matches!(backend, BackendKind::Tty);
+
     match backend {
         BackendKind::Winit => {
             #[cfg(feature = "winit")]
@@ -175,7 +183,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Point child processes at our socket.
+    // Point child processes at our socket. Process-env only, so this is
+    // safe even when nested — it affects this WM and its children, not the
+    // parent session.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
     // Push WAYLAND_DISPLAY into the systemd user manager so D-Bus-activated
@@ -183,7 +193,12 @@ fn main() -> Result<()> {
     // session wrapper already imported the static variables (XDG_CURRENT_DESKTOP,
     // XDG_SESSION_TYPE, PATH); this covers the dynamic one set just above.
     // DISPLAY is imported separately in xwayland.rs once XWayland is ready.
-    import_systemd_env(&["WAYLAND_DISPLAY"]);
+    // Skipped when nested so we don't clobber the host session's environment.
+    if state.session_integration {
+        import_systemd_env(&["WAYLAND_DISPLAY"]);
+    } else {
+        tracing::info!("nested backend: skipping systemd WAYLAND_DISPLAY import");
+    }
 
     // IPC socket goes up after WAYLAND_DISPLAY is exported so
     // default_socket_path() can resolve it.

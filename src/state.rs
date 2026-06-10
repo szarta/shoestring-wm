@@ -97,6 +97,14 @@ pub struct ShoestringWm {
     pub seat: Seat<Self>,
 
     pub ipc: Option<crate::ipc::Server>,
+    /// Whether this WM is the session compositor and may integrate with the
+    /// surrounding session — i.e. push `WAYLAND_DISPLAY` / `DISPLAY` into the
+    /// systemd user manager so D-Bus-activated services find them. True for
+    /// the TTY/udev backend; false for the nested winit backend, which runs
+    /// *inside* another session and must not clobber that session's
+    /// environment (or socket-activated services like ssh-tpm-agent). Set
+    /// from the chosen backend in `main`.
+    pub session_integration: bool,
     /// Runtime gate for remote-automation IPC methods (inject_key/text/click,
     /// future remote screenshot + command exec). Initialised from
     /// `general.automation_enabled` and overridable at runtime via
@@ -282,6 +290,9 @@ impl ShoestringWm {
             lock_session: None,
             seat,
             ipc: None,
+            // Default to the safe (non-integrating) stance; `main` flips this
+            // on for the real session backend once the backend is chosen.
+            session_integration: false,
             automation_enabled,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
