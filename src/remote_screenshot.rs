@@ -25,7 +25,7 @@ use std::{
     io::Read,
     os::fd::{AsFd, AsRawFd, BorrowedFd},
     path::PathBuf,
-    process::{Child, Stdio},
+    process::Stdio,
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -38,16 +38,23 @@ use smithay::reexports::calloop::{
 
 use crate::state::ShoestringWm;
 
-/// In-flight subprocess. Two pipe sources race to EOF; whichever fires
-/// last triggers `finalize`. We keep `child` here so we can `wait()` it
-/// after the pipes close (no zombies).
+/// In-flight subprocess. Completion needs two independent signals: both
+/// pipes reaching EOF (output fully drained) *and* the child's exit status
+/// arriving from the global SIGCHLD reaper (see `main::install_sigchld_autoreap`).
+/// Whichever lands last triggers `maybe_finalize`. We do not `wait()` the
+/// child ourselves — the reaper already collected it, so a direct wait would
+/// race to ECHILD; the status is delivered via `note_screenshot_reaped`.
 pub struct Pending {
     /// IPC client whose `Request::Screenshot` we're answering. Held by
     /// `Rc` so the connection stays alive across calloop iterations
     /// without being re-borrowed from the IPC server.
     pub client: Rc<RefCell<crate::ipc::Client>>,
     pub client_id: crate::ipc::ClientId,
-    child: Child,
+    /// PID of the spawned `shoestring-screenshot`, used to match the
+    /// reaped-status record from the SIGCHLD drain.
+    pid: i32,
+    /// Exit status, once the reaper has delivered it. `None` until then.
+    exit_status: Option<std::process::ExitStatus>,
     stdout_buf: Vec<u8>,
     stderr_buf: Vec<u8>,
     stdout_open: bool,
@@ -136,13 +143,19 @@ impl ShoestringWm {
             .stderr
             .take()
             .expect("piped stderr must exist on spawn");
+        let pid = child.id() as i32;
+        // The global SIGCHLD reaper owns reaping from here on; we only need
+        // the pid to match its status record. Dropping `child` without
+        // waiting is safe (std's Child::drop neither waits nor kills).
+        drop(child);
 
         let pending_id = self.next_remote_screenshot_id();
 
         let pending = Pending {
             client,
             client_id,
-            child,
+            pid,
+            exit_status: None,
             stdout_buf: Vec::new(),
             stderr_buf: Vec::new(),
             stdout_open: true,
@@ -170,27 +183,45 @@ impl ShoestringWm {
     }
 
     /// Called by the pipe sources when one of stdout/stderr hits EOF.
-    /// When both are drained, reap the child and reply.
+    /// Marks the stream closed, then attempts to finalize.
     fn on_pipe_closed(&mut self, pending_id: u64, kind: PipeKind) {
-        let done = match self.pending_screenshots.get_mut(&pending_id) {
-            Some(p) => {
-                match kind {
-                    PipeKind::Stdout => p.stdout_open = false,
-                    PipeKind::Stderr => p.stderr_open = false,
-                }
-                !p.stdout_open && !p.stderr_open
-            }
+        match self.pending_screenshots.get_mut(&pending_id) {
+            Some(p) => match kind {
+                PipeKind::Stdout => p.stdout_open = false,
+                PipeKind::Stderr => p.stderr_open = false,
+            },
             None => return,
-        };
-        if done {
-            self.finalize_remote_screenshot(pending_id);
         }
+        self.maybe_finalize_remote_screenshot(pending_id);
     }
 
-    fn finalize_remote_screenshot(&mut self, pending_id: u64) {
-        let Some(mut pending) = self.pending_screenshots.remove(&pending_id) else {
-            return;
+    /// Called by the SIGCHLD drain (`note_child_reaped`) when a reaped pid
+    /// matches an in-flight screenshot. Records the status, then attempts to
+    /// finalize. Returns `true` if the pid matched one of our children.
+    pub fn note_screenshot_reaped(&mut self, pid: i32, status: std::process::ExitStatus) -> bool {
+        let Some((&pending_id, _)) = self.pending_screenshots.iter().find(|(_, p)| p.pid == pid)
+        else {
+            return false;
         };
+        if let Some(p) = self.pending_screenshots.get_mut(&pending_id) {
+            p.exit_status = Some(status);
+        }
+        self.maybe_finalize_remote_screenshot(pending_id);
+        true
+    }
+
+    /// Reply only once both pipes have drained *and* the exit status has
+    /// arrived from the reaper. Whichever of `on_pipe_closed` /
+    /// `note_screenshot_reaped` lands last is the one that finalizes.
+    fn maybe_finalize_remote_screenshot(&mut self, pending_id: u64) {
+        let ready = match self.pending_screenshots.get(&pending_id) {
+            Some(p) => !p.stdout_open && !p.stderr_open && p.exit_status.is_some(),
+            None => return,
+        };
+        if !ready {
+            return;
+        }
+        let mut pending = self.pending_screenshots.remove(&pending_id).unwrap();
         if let Some(t) = pending.stdout_token.take() {
             self.loop_handle.remove(t);
         }
@@ -198,20 +229,7 @@ impl ShoestringWm {
             self.loop_handle.remove(t);
         }
 
-        let status = match pending.child.wait() {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "wait shoestring-screenshot failed");
-                let _ = crate::ipc::write_response(
-                    &pending.client,
-                    &Response::Error {
-                        message: format!("screenshot: wait failed: {e}"),
-                    },
-                );
-                self.drop_ipc_client(pending.client_id);
-                return;
-            }
-        };
+        let status = pending.exit_status.expect("ready implies status present");
 
         let response = if status.success() {
             // Path is the first non-empty line on stdout.

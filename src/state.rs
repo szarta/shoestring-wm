@@ -306,6 +306,16 @@ impl ShoestringWm {
         }
     }
 
+    /// Route a child reaped by the global SIGCHLD handler to whichever
+    /// in-flight remote request spawned it. Children we don't track
+    /// (autostart, bar, menus, XWayland, ...) match nothing and are simply
+    /// dropped — they only needed reaping to avoid zombies.
+    pub fn note_child_reaped(&mut self, pid: i32, status: std::process::ExitStatus) {
+        // Short-circuit: try screenshots first, then commands; a child that
+        // matches neither is a fire-and-forget helper we just let go.
+        let _ = self.note_screenshot_reaped(pid, status) || self.note_command_reaped(pid, status);
+    }
+
     fn init_wayland_listener(
         display: Display<Self>,
         event_loop: &mut EventLoop<'static, Self>,
