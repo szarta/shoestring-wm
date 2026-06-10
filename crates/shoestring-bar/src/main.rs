@@ -17,7 +17,6 @@ use std::{
     collections::HashMap,
     ffi::CString,
     fs,
-    io::Write,
     os::fd::{AsFd, AsRawFd},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
@@ -109,6 +108,13 @@ struct State {
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     size: Option<(u32, u32)>,
+    /// Reused `wl_shm` buffer. Allocated lazily and only reallocated when
+    /// the bar's pixel dimensions change; every redraw maps it afresh and
+    /// re-attaches the same `wl_buffer`. Allocating a new pool+buffer per
+    /// redraw (the previous behaviour) leaked one compositor-side fd each
+    /// frame — the pool's mapping is held until its `wl_buffer` is
+    /// destroyed, which the per-frame path never did.
+    buffer: Option<BarBuffer>,
     /// Live ext-foreign-toplevel-list entries, keyed by the handle's
     /// wayland object id. Updated incrementally on each `done` event;
     /// removed on `closed`. Activation state comes from the [`focused_id`]
@@ -380,6 +386,7 @@ fn run_session() -> Result<()> {
         surface: None,
         layer_surface: None,
         size: None,
+        buffer: None,
         toplevels: HashMap::new(),
         active_workspace,
         workspace_count,
@@ -721,28 +728,56 @@ fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
 
 // ---- Drawing -------------------------------------------------------------
 
-/// Compose the bar into a freshly-allocated wl_buffer and attach it.
-/// Re-runs on every configure event (and, later, on state changes).
-fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
-    let surface = state.surface.as_ref().expect("surface missing in redraw");
+/// A reused `wl_shm` buffer: a tempfile-backed pool whose `wl_buffer` we
+/// re-attach every frame. Recreated only when the bar's dimensions change.
+struct BarBuffer {
+    /// Backing tempfile, mapped afresh each redraw. The compositor holds
+    /// its own dup of this fd via the pool, so it stays valid for the
+    /// buffer's lifetime.
+    tmp: std::fs::File,
+    /// The attachable buffer. Destroying it releases the compositor-side
+    /// pool mapping; we only do that when reallocating for a new size.
+    buffer: WlBuffer,
+    /// Pixel dimensions this buffer was allocated for.
+    dims: (u32, u32),
+}
 
+/// Compose the bar into its reused wl_buffer and attach it.
+/// Re-runs on every configure event and on state changes.
+fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
     let stride = w as i32 * 4;
     let size = (stride as usize) * h as usize;
+
+    // (Re)allocate the shm buffer only when missing or the size changed.
+    // Destroying the old wl_buffer releases the compositor's pool fd —
+    // skipping this per frame is the entire fix (see `State::buffer`).
+    if state.buffer.as_ref().is_none_or(|b| b.dims != (w, h)) {
+        if let Some(old) = state.buffer.take() {
+            old.buffer.destroy();
+        }
+        let tmp = tempfile::tempfile()?;
+        tmp.set_len(size as u64)?;
+        let pool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
+        let buffer = pool.create_buffer(0, w as i32, h as i32, stride, Format::Argb8888, qh, ());
+        // The wl_buffer keeps the pool's mapping alive, so we can drop the
+        // pool object now and just hold onto the buffer.
+        pool.destroy();
+        state.buffer = Some(BarBuffer {
+            tmp,
+            buffer,
+            dims: (w, h),
+        });
+    }
 
     let bg = state.cfg.background;
     let fg = state.cfg.foreground;
     let font_px = state.cfg.font_size;
 
-    let mut tmp = tempfile::tempfile()?;
-    tmp.set_len(size as u64)?;
-    // Pre-fill the file so the wl_shm buffer is valid even if the compositor
-    // peeks at it before our mmap stamp.
-    let row_bytes = bg.to_ne_bytes().repeat(w as usize);
-    for _ in 0..h {
-        tmp.write_all(&row_bytes)?;
-    }
-
-    let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
+    // Map the persisted backing file for this frame. `map_mut` only borrows
+    // the file for the call; the returned mapping is independent, so the
+    // rest of the draw can freely borrow `state`.
+    let mut mmap =
+        unsafe { MmapMut::map_mut(&state.buffer.as_ref().expect("buffer ensured above").tmp)? };
 
     // We re-fill via the mmap (faster than seek+write) so subsequent draws
     // can mutate in place. Background first, then text on top.
@@ -880,15 +915,13 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     );
     state.window_entry_rects = entry_rects;
 
-    let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
-    let buffer: WlBuffer =
-        pool.create_buffer(0, w as i32, h as i32, stride, Format::Argb8888, qh, ());
-    pool.destroy();
-    // The mmap-backed file lives until tmp drops at end of scope; the
-    // compositor reads pixels via the fd-backed pool's wl_buffer above.
+    // Flush our writes and unmap before committing; the compositor reads
+    // the pixels through its own dup of the pool fd, not our mapping.
     drop(mmap);
 
-    surface.attach(Some(&buffer), 0, 0);
+    let buffer = &state.buffer.as_ref().expect("buffer ensured above").buffer;
+    let surface = state.surface.as_ref().expect("surface missing in redraw");
+    surface.attach(Some(buffer), 0, 0);
     surface.damage_buffer(0, 0, w as i32, h as i32);
     surface.commit();
     Ok(())
