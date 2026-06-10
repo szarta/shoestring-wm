@@ -23,6 +23,7 @@ use smithay::{
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
+        fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
         session_lock::SessionLockManagerState,
@@ -32,6 +33,7 @@ use smithay::{
         },
         shm::ShmState,
         socket::ListeningSocketSource,
+        viewporter::ViewporterState,
     },
 };
 
@@ -82,6 +84,14 @@ pub struct ShoestringWm {
     /// [`crate::handlers::compositor`]'s commit hook.
     pub foreign_toplevels: HashMap<Window, ForeignToplevelHandle>,
     pub shm_state: ShmState,
+    // Held for the lifetime of the WM so their globals stay registered with the
+    // display. wp_viewporter + wp_fractional_scale_manager_v1 let HiDPI clients
+    // render natively at the exact fractional output scale (see
+    // [`crate::scale::send_preferred_scale`]).
+    #[allow(dead_code)]
+    pub viewporter_state: ViewporterState,
+    #[allow(dead_code)]
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
     // Held for the lifetime of the WM so its globals stay registered with the display.
     #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
@@ -215,6 +225,8 @@ impl ShoestringWm {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let output_management = crate::output_management::OutputManagementState {
@@ -281,6 +293,8 @@ impl ShoestringWm {
             foreign_toplevel_list,
             foreign_toplevels: HashMap::new(),
             shm_state,
+            viewporter_state,
+            fractional_scale_manager_state,
             output_manager_state,
             seat_state,
             data_device_state,

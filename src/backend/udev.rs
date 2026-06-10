@@ -1201,6 +1201,10 @@ impl ShoestringWm {
             }
         }
 
+        // Keep wp_fractional_scale clients on this output in sync with its
+        // current scale (no-op when unchanged).
+        crate::scale::send_preferred_scale(&self.space, &output);
+
         // Send wl_surface.frame callbacks so clients know to draw the next
         // buffer; otherwise frame-callback-driven clients sit idle.
         let elapsed = self.start_time.elapsed();

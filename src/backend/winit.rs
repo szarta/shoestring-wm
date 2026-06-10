@@ -189,6 +189,10 @@ pub fn init_winit(
                 }
                 backend.submit(Some(&[damage])).unwrap();
 
+                // Keep wp_fractional_scale clients on this output in sync with
+                // its current scale (no-op when unchanged).
+                crate::scale::send_preferred_scale(&state.space, &output);
+
                 state.space.elements().for_each(|window| {
                     window.send_frame(
                         &output,

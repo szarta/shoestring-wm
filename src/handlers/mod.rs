@@ -12,9 +12,11 @@ use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::Serial;
+use smithay::wayland::compositor::{get_parent, with_states};
 use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelListHandler, ForeignToplevelListState,
 };
+use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
@@ -97,5 +99,34 @@ impl WaylandDndGrabHandler for ShoestringWm {
 }
 
 impl OutputHandler for ShoestringWm {}
+
+impl FractionalScaleHandler for ShoestringWm {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // A client just bound wp_fractional_scale for this surface. Seed it
+        // with the scale of the output it lives on so it can render natively
+        // from the first frame; [`crate::scale::send_preferred_scale`] keeps it
+        // current afterwards. Walk to the root so subsurfaces inherit the
+        // toplevel's output, and fall back to the first output when the surface
+        // isn't mapped yet (the value is still correct on a single-scale setup).
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let output = self
+            .space
+            .elements()
+            .find(|w| crate::window_ext::matches_surface(w, &root))
+            .and_then(|w| self.space.outputs_for_element(w).first().cloned())
+            .or_else(|| self.space.outputs().next().cloned());
+        if let Some(output) = output {
+            let scale = output.current_scale().fractional_scale();
+            with_states(&surface, |states| {
+                with_fractional_scale(states, |fractional| {
+                    fractional.set_preferred_scale(scale);
+                });
+            });
+        }
+    }
+}
 
 smithay::delegate_dispatch2!(ShoestringWm);

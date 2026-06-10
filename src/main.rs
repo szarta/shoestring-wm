@@ -16,6 +16,7 @@ mod output_management;
 mod picker;
 mod remote_command;
 mod remote_screenshot;
+mod scale;
 mod screencopy;
 mod state;
 mod window_ext;
