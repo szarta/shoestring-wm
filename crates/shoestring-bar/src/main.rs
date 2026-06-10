@@ -20,7 +20,7 @@ use std::{
     io::Write,
     os::fd::{AsFd, AsRawFd},
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -215,6 +215,72 @@ fn main() -> Result<()> {
         )
         .init();
 
+    run_with_reconnect()
+}
+
+/// Reconnect supervisor. A Wayland client cannot resurrect a severed
+/// `wl_display`, so when the compositor drops our connection — GPU reset,
+/// modeset on an AC<->battery power transition, compositor restart, VT
+/// switch — the only recovery is to tear everything down and connect
+/// afresh. We retry with capped exponential backoff, resetting the backoff
+/// once a session has stayed up long enough to count as stable so a brief
+/// glitch doesn't permanently inflate the delay. Errors that are *not* a
+/// lost connection (missing globals, no `$WAYLAND_DISPLAY`, a protocol
+/// violation) propagate out and stop the bar — reconnecting would only
+/// reproduce them.
+fn run_with_reconnect() -> Result<()> {
+    const BASE_DELAY: Duration = Duration::from_millis(200);
+    const MAX_DELAY: Duration = Duration::from_secs(5);
+    const STABLE_RUN: Duration = Duration::from_secs(30);
+
+    let mut delay = BASE_DELAY;
+    loop {
+        let started = Instant::now();
+        match run_session() {
+            Ok(()) => return Ok(()),
+            Err(e) if is_disconnect(&e) => {
+                if started.elapsed() >= STABLE_RUN {
+                    delay = BASE_DELAY;
+                }
+                tracing::warn!(
+                    error = ?e,
+                    backoff_ms = delay.as_millis() as u64,
+                    "wayland connection lost; reconnecting"
+                );
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(MAX_DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// True when `err` (anywhere in its cause chain) is a lost Wayland
+/// connection — an I/O-level failure such as `ConnectionReset` from the
+/// socket peer, or a raw `poll(2)` error. Protocol errors deliberately do
+/// *not* count: those signal a client bug that a reconnect would only
+/// reproduce, so they should surface loudly instead of flapping.
+fn is_disconnect(err: &anyhow::Error) -> bool {
+    use wayland_client::backend::WaylandError;
+    use wayland_client::DispatchError;
+    err.chain().any(|cause| {
+        if let Some(w) = cause.downcast_ref::<WaylandError>() {
+            return matches!(w, WaylandError::Io(_));
+        }
+        if let Some(d) = cause.downcast_ref::<DispatchError>() {
+            return matches!(d, DispatchError::Backend(WaylandError::Io(_)));
+        }
+        cause.downcast_ref::<std::io::Error>().is_some()
+    })
+}
+
+/// Establish and run one Wayland session: connect, bind globals, build
+/// state, create the layer surface, then drive the event loop until either
+/// a clean shutdown (`Ok`) or a connection loss / fatal error (`Err`).
+/// Called once per (re)connect by [`run_with_reconnect`]; everything it
+/// allocates is dropped when it returns, so a reconnect starts from a clean
+/// slate (fresh `Connection`, surfaces, IPC stream, and battery source).
+fn run_session() -> Result<()> {
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
