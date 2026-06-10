@@ -6,6 +6,7 @@ Synopsis
 
 | **shoestring-wm** [**-c** *FILE*] [**-b** winit|tty] [**-C** *CMD*] [**--enable-automation**]
 | **shoestring-wm** **--write-default-config** [**--force**] [**-c** *FILE*]
+| **shoestring-wm** **--check-config** [**-c** *FILE*]
 | **shoestring-wm** **-V** | **--version**
 | **shoestring-wm** **-h** | **--help**
 
@@ -48,6 +49,15 @@ Options
 
 **--force**
     Allow **--write-default-config** to overwrite an existing file.
+
+**--check-config**
+    Validate the config file (resolved as for **-c**) and exit without
+    starting the compositor. Parses the TOML, then compiles the
+    keybindings and prints any non-fatal warnings (unknown keysyms or
+    modifiers). Exits non-zero if the file is missing or fails to parse;
+    otherwise prints a one-line summary and exits zero. Starts no
+    compositor and writes nothing, so it is safe to run against a live
+    session.
 
 **--enable-automation**
     Force the runtime automation gate ON at startup, overriding
@@ -99,12 +109,13 @@ Exit status
 -----------
 
 **0**
-    Normal exit (via the ``quit`` action, ``--write-default-config``, or
-    a clean shutdown).
+    Normal exit (via the ``quit`` action, ``--write-default-config``, a
+    successful ``--check-config``, or a clean shutdown).
 
 Non-zero
     Startup error (missing config file when explicitly named, backend
-    unavailable, etc.). See stderr or ``$SHOESTRING_WM_LOG``.
+    unavailable, etc.), or a config that fails ``--check-config``. See
+    stderr or ``$SHOESTRING_WM_LOG``.
 
 Helpers
 -------

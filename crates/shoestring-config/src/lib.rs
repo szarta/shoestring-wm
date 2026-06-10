@@ -242,6 +242,14 @@ pub struct General {
     /// disk — the config file stays the source of truth at next start.
     #[serde(default)]
     pub automation_enabled: bool,
+    /// Advertise the `ext_idle_notify_v1` global so clients (idle daemons,
+    /// screen-dimmers, auto-lockers) can ask to be told after N ms of no
+    /// input. Off by default: on a desktop that never travels, idle
+    /// behaviour is mostly an annoyance, and not advertising the global at
+    /// all means a stray `swayidle` simply finds nothing to talk to. Flip
+    /// to `true` on a laptop where you do want idle dimming/locking.
+    #[serde(default)]
+    pub idle_notifications_enabled: bool,
 }
 
 fn default_repeat_delay() -> i32 {
@@ -274,6 +282,7 @@ impl Default for General {
             lock_command: default_lock_command(),
             autostart: default_autostart(),
             automation_enabled: false,
+            idle_notifications_enabled: false,
         }
     }
 }

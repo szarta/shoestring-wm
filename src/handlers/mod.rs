@@ -34,6 +34,19 @@ impl ForeignToplevelListHandler for ShoestringWm {
     }
 }
 
+impl smithay::wayland::idle_notify::IdleNotifierHandler for ShoestringWm {
+    fn idle_notifier_state(
+        &mut self,
+    ) -> &mut smithay::wayland::idle_notify::IdleNotifierState<Self> {
+        // Only reached when a client holds an ext_idle_notify resource, which
+        // requires the global — and the global only exists when the option is
+        // on, i.e. when `idle_notifier` is `Some`. See [`ShoestringWm::new`].
+        self.idle_notifier
+            .as_mut()
+            .expect("ext_idle_notify dispatched without an IdleNotifierState")
+    }
+}
+
 impl SeatHandler for ShoestringWm {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;

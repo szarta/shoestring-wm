@@ -81,6 +81,13 @@ struct Cli {
     #[arg(long)]
     force: bool,
 
+    /// Validate a config file and exit. Parses the file at `--config PATH`
+    /// (or the default path), then compiles the keybindings and reports any
+    /// problems. Exits non-zero on a parse error or a missing file. Touches
+    /// nothing and starts no compositor — safe to run against a live session.
+    #[arg(long)]
+    check_config: bool,
+
     /// Force the runtime automation gate ON at startup, overriding
     /// `general.automation_enabled` from the config. Off by default so
     /// remote-automation IPC methods (key/text/click injection, future
@@ -127,6 +134,10 @@ fn main() -> Result<()> {
 
     if cli.write_default_config {
         return write_default_config(cli.config.as_deref(), cli.force);
+    }
+
+    if cli.check_config {
+        return check_config(cli.config.as_deref());
     }
 
     let (config, config_path) = shoestring_config::load_or_default(cli.config.as_deref())?;
@@ -258,6 +269,44 @@ fn write_default_config(path: Option<&std::path::Path>, force: bool) -> Result<(
     }
     std::fs::write(&target, shoestring_config::default_config_toml())?;
     println!("wrote default config to {}", target.display());
+    Ok(())
+}
+
+/// Validate a config file without starting the compositor. Resolves the
+/// path the same way startup does, but — unlike `load_or_default` — treats a
+/// missing file as an error rather than silently falling back to defaults, so
+/// a typo'd `--config` path can't masquerade as "valid". On success prints a
+/// one-line summary and any non-fatal binding warnings (unknown keysyms /
+/// modifiers), exactly the warnings the WM would log at startup.
+fn check_config(path: Option<&std::path::Path>) -> Result<()> {
+    let target = path
+        .map(std::path::PathBuf::from)
+        .or_else(shoestring_config::default_config_path)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no config path: pass --config or set $HOME/$XDG_CONFIG_HOME")
+        })?;
+
+    if !target.exists() {
+        anyhow::bail!("{} does not exist", target.display());
+    }
+
+    let config = shoestring_config::load_from(&target)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
+
+    // Parsing succeeded. Compiling the bindings is the only other place the
+    // config can be "wrong" in a way worth flagging — bad keysyms, unknown
+    // modifiers — so surface those warnings here too. They are non-fatal: the
+    // WM drops the offending bind and runs, so `--check-config` still exits 0.
+    let (_table, warnings) = binds::BindingTable::compile(&config);
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
+    println!(
+        "{}: OK — {} binding(s), {} warning(s)",
+        target.display(),
+        config.bindings.len(),
+        warnings.len()
+    );
     Ok(())
 }
 

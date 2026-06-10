@@ -100,6 +100,13 @@ pub struct ShoestringWm {
     pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
     pub session_lock_state: SessionLockManagerState,
+    /// `Some` only when `general.idle_notifications_enabled` is set, in which
+    /// case the `ext_idle_notify_v1` global is advertised and this holds its
+    /// state. When `None` the global was never created, so no client can bind
+    /// it and the handler getter is never reached. Pinged on every input
+    /// event via [`Self::notify_idle_activity`]. See
+    /// [`crate::handlers`]'s `IdleNotifierHandler` impl.
+    pub idle_notifier: Option<smithay::wayland::idle_notify::IdleNotifierState<Self>>,
     /// `Some` while a session lock is active. See
     /// [`crate::handlers::session_lock`] for the protocol wiring.
     pub lock_session: Option<crate::handlers::session_lock::LockState>,
@@ -266,6 +273,13 @@ impl ShoestringWm {
 
         let automation_enabled = config.general.automation_enabled;
 
+        // Only advertise ext_idle_notify_v1 when the user opted in. Creating
+        // the state also creates the global, so gating creation here is what
+        // keeps the protocol entirely absent (not merely inert) by default.
+        let idle_notifier = config.general.idle_notifications_enabled.then(|| {
+            smithay::wayland::idle_notify::IdleNotifierState::new(&dh, event_loop.handle())
+        });
+
         let space = Space::default();
         let popups = PopupManager::default();
         let workspaces = build_workspace_manager(&config.workspaces);
@@ -306,6 +320,7 @@ impl ShoestringWm {
             output_management,
             screencopy,
             session_lock_state,
+            idle_notifier,
             lock_session: None,
             seat,
             ipc: None,

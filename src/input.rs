@@ -427,7 +427,27 @@ impl ShoestringWm {
         }
     }
 
+    /// Reset every idle-notification timer for the seat. No-op unless
+    /// `ext_idle_notify_v1` is advertised (`general.idle_notifications_enabled`).
+    /// The seat clone is `Arc`-cheap and sidesteps the simultaneous
+    /// `&mut self` / `&self.seat` borrow.
+    fn notify_idle_activity(&mut self) {
+        if self.idle_notifier.is_none() {
+            return;
+        }
+        let seat = self.seat.clone();
+        self.idle_notifier.as_mut().unwrap().notify_activity(&seat);
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        // Any real input is "activity" for idle purposes; device hotplug is
+        // not. Mirrors the conventional compositor behaviour (cf. niri).
+        if !matches!(
+            event,
+            InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
+        ) {
+            self.notify_idle_activity();
+        }
         match event {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();

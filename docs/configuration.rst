@@ -13,6 +13,18 @@ Bootstrap a starter file:
     $ shoestring-wm --write-default-config
     wrote default config to /home/you/.config/shoestring-wm/config.toml
 
+Validate a file before relying on it — this parses the TOML, compiles the
+keybindings, reports any problems, and exits without starting a compositor
+(so it is safe to run against a live session):
+
+.. code-block:: console
+
+    $ shoestring-wm --check-config
+    /home/you/.config/shoestring-wm/config.toml: OK — 48 binding(s), 0 warning(s)
+
+It exits non-zero on a parse error or a missing file, making it suitable
+for a pre-commit hook or a CI check on a dotfiles repo.
+
 The file has five sections — ``[general]``, ``[workspaces]``,
 ``[[bindings]]``, ``[[window_rules]]``, and ``[outputs.<name>]`` — all
 optional. Missing sections take built-in defaults.
@@ -91,6 +103,16 @@ The ``[general]`` section
        CLI flag ``--enable-automation`` and the runtime IPC
        ``set_automation`` both override this without writing back to
        disk — the config file stays the source of truth at next start.
+   * - ``idle_notifications_enabled``
+     - bool
+     - ``false``
+     - Advertise the ``ext_idle_notify_v1`` global so idle daemons,
+       screen-dimmers and auto-lockers (e.g. ``swayidle``) can request a
+       notification after N milliseconds without input. Off by default:
+       on a desktop that never sleeps, idle behaviour is mostly an
+       annoyance, and not advertising the global means a stray idle
+       client simply finds nothing to talk to. Set ``true`` on a laptop
+       where you do want idle dimming/locking.
 
 Example::
 
@@ -102,6 +124,7 @@ Example::
     lock_command = "shoestring-lock"
     autostart = ["shoestring-bar", "swww init"]
     automation_enabled = false
+    idle_notifications_enabled = false
 
 The ``[workspaces]`` section
 ----------------------------

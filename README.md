@@ -75,7 +75,7 @@ cargo build --release --no-default-features --features winit
 | `Super+M` | Maximize |
 | `Super+D` / `Super+Shift+D` | Minimize / unminimize last |
 | `Super+X` | Close focused window |
-| `Alt+Tab` | Cycle focus through the workspace's windows |
+| `Alt+Tab` / `Super+Down` | Cycle focus through the workspace's windows |
 | `Super+H` / `Super+L` | Previous / next workspace (auto-repeat on hold) |
 | `Super+Ctrl+H` / `Super+Ctrl+L` | Move focused window to previous / next workspace |
 | `Super+1..9` | Focus workspace N |
