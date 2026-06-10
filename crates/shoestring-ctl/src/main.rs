@@ -55,6 +55,22 @@ enum Command {
     },
     /// List every connected output with its mode and scale.
     Outputs,
+    /// Print the WM's diagnostics metrics: process resource gauges
+    /// (`process.open_fds`, `process.rss_kb`, `process.fd_limit`) plus WM
+    /// counts. Read-only and not gated by automation. A one-shot snapshot
+    /// by default; with `--watch` it subscribes and prints a metrics line
+    /// per sample until the WM closes the socket (Ctrl-C to stop). Pair
+    /// with `-p` for indented output.
+    Metrics {
+        /// Stream samples instead of printing a single snapshot.
+        #[arg(short, long)]
+        watch: bool,
+        /// Desired push interval in milliseconds while watching. Clamped
+        /// up to the WM's `[diagnostics].sample_interval_ms`. Ignored
+        /// without `--watch`.
+        #[arg(long, value_name = "MS")]
+        interval: Option<u32>,
+    },
     /// Stream events forever (one JSON line per event). Exits on socket
     /// close (typically when the WM quits).
     EventStream,
@@ -211,15 +227,27 @@ fn main() -> Result<()> {
     let stream = UnixStream::connect(&socket_path)
         .with_context(|| format!("connect to {}", socket_path.display()))?;
 
-    // Capture before moving cli.cmd into the match — only EventStream
-    // keeps the connection open afterward.
-    let is_stream = matches!(cli.cmd, Command::EventStream);
+    // Capture before moving cli.cmd into the match — only EventStream and
+    // `metrics --watch` keep the connection open afterward.
+    let is_stream = matches!(
+        cli.cmd,
+        Command::EventStream | Command::Metrics { watch: true, .. }
+    );
 
     let request = match cli.cmd {
         Command::Workspaces => Request::Workspaces,
         Command::Windows => Request::Windows,
         Command::FindWindows { title, app_id } => Request::FindWindows { title, app_id },
         Command::Outputs => Request::Outputs,
+        Command::Metrics { watch, interval } => {
+            if watch {
+                Request::MetricsStream {
+                    interval_ms: interval,
+                }
+            } else {
+                Request::Metrics
+            }
+        }
         Command::EventStream => Request::EventStream,
         Command::Key { keysym, modifiers } => {
             let (keysym, modifiers) = split_chord(&keysym, modifiers);

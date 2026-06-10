@@ -107,6 +107,11 @@ pub struct ShoestringWm {
     pub seat: Seat<Self>,
 
     pub ipc: Option<crate::ipc::Server>,
+    /// Diagnostics registry: the latest sampled process/WM metrics plus
+    /// the fd-leak detector's state. Fed by the sampler timer started in
+    /// `main` (when `[diagnostics].enabled`) and read by the `metrics`
+    /// IPC snapshot/stream. See [`crate::metrics`].
+    pub metrics: crate::metrics::Metrics,
     /// Whether this WM is the session compositor and may integrate with the
     /// surrounding session — i.e. push `WAYLAND_DISPLAY` / `DISPLAY` into the
     /// systemd user manager so D-Bus-activated services find them. True for
@@ -304,6 +309,7 @@ impl ShoestringWm {
             lock_session: None,
             seat,
             ipc: None,
+            metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
             // on for the real session backend once the backend is chosen.
             session_integration: false,

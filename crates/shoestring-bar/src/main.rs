@@ -721,7 +721,8 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
         IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::OutputAdded(_)
         | IpcEvent::OutputRemoved { .. }
-        | IpcEvent::ConfigReloaded => {}
+        | IpcEvent::ConfigReloaded
+        | IpcEvent::Metrics { .. } => {}
     }
 }
 

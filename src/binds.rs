@@ -126,6 +126,7 @@ mod tests {
             bindings: binds,
             window_rules: Vec::new(),
             outputs: Default::default(),
+            diagnostics: Default::default(),
         }
     }
 

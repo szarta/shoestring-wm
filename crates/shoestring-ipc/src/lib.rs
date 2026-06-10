@@ -16,6 +16,7 @@
 //! pushes [`Event`]s forever (one JSON line per event) until the client
 //! disconnects.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -231,6 +232,39 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app_id: Option<String>,
     },
+    /// Snapshot the diagnostics metrics registry — process resource gauges
+    /// (open fds, RSS, fd limit), WM counts, and any counters. Reply is
+    /// [`Response::Metrics`]. Read-only and *not* gated by automation
+    /// (pure observation, like [`Request::Windows`] / [`Request::Outputs`]).
+    /// Answered on demand even when `[diagnostics].enabled = false`.
+    Metrics,
+    /// Subscribe to a stream of [`Event::Metrics`] samples: the server
+    /// replies [`Response::Ok`], then pushes one metrics line per sample
+    /// until the client disconnects. This is the turn-on/off diagnostics
+    /// pipe — subscribe to start, hang up to stop.
+    ///
+    /// `interval_ms` is the desired push interval; it is clamped *up* to
+    /// the WM's `[diagnostics].sample_interval_ms` (v1 can't push faster
+    /// than it samples). Omit to push on every sample tick.
+    ///
+    /// Requires `[diagnostics].enabled = true` (the background sampler is
+    /// the source of the stream); returns [`Response::Error`] when
+    /// diagnostics are disabled.
+    MetricsStream {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interval_ms: Option<u32>,
+    },
+}
+
+/// One sampled metric. `gauge` is an instantaneous reading that can go up
+/// or down (open fds, RSS); `counter` is monotonic since WM start (frames
+/// rendered, IPC requests). The `kind` tag makes the wire self-describing
+/// so consumers can render/aggregate without an out-of-band schema.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MetricValue {
+    Gauge { value: i64 },
+    Counter { value: u64 },
 }
 
 /// Per-stream byte cap for [`Request::RunCommand`]. Keeps IPC frames
@@ -307,6 +341,15 @@ pub enum Response {
     PointerPosition {
         x: f64,
         y: f64,
+    },
+    /// Snapshot of the diagnostics registry for [`Request::Metrics`].
+    /// `ts_ms` is the sample's wall-clock time (ms since the Unix epoch);
+    /// `metrics` maps a dotted metric name (`process.open_fds`,
+    /// `wm.windows`, …) to its [`MetricValue`]. A `BTreeMap` so key order
+    /// is stable on the wire.
+    Metrics {
+        ts_ms: u64,
+        metrics: BTreeMap<String, MetricValue>,
     },
     /// Server-side error; the client should print and exit non-zero.
     Error {
@@ -388,6 +431,12 @@ pub enum Event {
     /// mirrors the active keybind set). The event carries no payload; a
     /// subscriber that wants the new state should re-query.
     ConfigReloaded,
+    /// One diagnostics sample, pushed to [`Request::MetricsStream`]
+    /// subscribers. Same payload shape as [`Response::Metrics`].
+    Metrics {
+        ts_ms: u64,
+        metrics: BTreeMap<String, MetricValue>,
+    },
 }
 
 #[cfg(test)]
@@ -652,6 +701,73 @@ mod tests {
         let e = Event::ConfigReloaded;
         let s = serde_json::to_string(&e).unwrap();
         assert_eq!(s, r#"{"type":"config_reloaded"}"#);
+    }
+
+    #[test]
+    fn metrics_request_shapes() {
+        let snap = Request::Metrics;
+        assert_eq!(
+            serde_json::to_string(&snap).unwrap(),
+            r#"{"type":"metrics"}"#
+        );
+        let back: Request = serde_json::from_str(r#"{"type":"metrics"}"#).unwrap();
+        assert!(matches!(back, Request::Metrics));
+
+        // interval_ms is skipped when None.
+        let stream_bare = Request::MetricsStream { interval_ms: None };
+        assert_eq!(
+            serde_json::to_string(&stream_bare).unwrap(),
+            r#"{"type":"metrics_stream"}"#
+        );
+        let stream = Request::MetricsStream {
+            interval_ms: Some(2000),
+        };
+        assert_eq!(
+            serde_json::to_string(&stream).unwrap(),
+            r#"{"type":"metrics_stream","interval_ms":2000}"#
+        );
+        let back: Request = serde_json::from_str(r#"{"type":"metrics_stream"}"#).unwrap();
+        assert!(matches!(back, Request::MetricsStream { interval_ms: None }));
+    }
+
+    #[test]
+    fn metric_value_and_metrics_payload_shapes() {
+        // Self-describing kind tag.
+        assert_eq!(
+            serde_json::to_string(&MetricValue::Gauge { value: 142 }).unwrap(),
+            r#"{"kind":"gauge","value":142}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MetricValue::Counter { value: 918273 }).unwrap(),
+            r#"{"kind":"counter","value":918273}"#
+        );
+
+        let mut metrics = BTreeMap::new();
+        metrics.insert(
+            "process.open_fds".to_string(),
+            MetricValue::Gauge { value: 142 },
+        );
+        metrics.insert(
+            "render.frames_total".to_string(),
+            MetricValue::Counter { value: 5 },
+        );
+        let resp = Response::Metrics {
+            ts_ms: 1_733_800_000_000,
+            metrics: metrics.clone(),
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        // BTreeMap keeps keys sorted: open_fds before render.frames_total.
+        assert_eq!(
+            s,
+            r#"{"type":"metrics","ts_ms":1733800000000,"metrics":{"process.open_fds":{"kind":"gauge","value":142},"render.frames_total":{"kind":"counter","value":5}}}"#
+        );
+        let back: Response = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Response::Metrics { ts_ms, .. } if ts_ms == 1_733_800_000_000));
+
+        // Event variant shares the payload shape.
+        let ev = Event::Metrics { ts_ms: 1, metrics };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.starts_with(r#"{"type":"metrics","ts_ms":1,"metrics":{"#));
     }
 
     #[test]

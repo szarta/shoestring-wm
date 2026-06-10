@@ -12,6 +12,7 @@ mod inject;
 mod input;
 mod ipc;
 mod layout;
+mod metrics;
 mod output_management;
 mod picker;
 mod remote_command;
@@ -119,6 +120,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     init_tracing();
+    // Defense-in-depth before anything opens fds: a higher ceiling buys the
+    // leak detector more time to warn. Secondary to detection — see metrics.rs.
+    metrics::raise_fd_limit();
     let reap_read_fd = install_sigchld_autoreap();
 
     if cli.write_default_config {
@@ -204,6 +208,10 @@ fn main() -> Result<()> {
     // IPC socket goes up after WAYLAND_DISPLAY is exported so
     // default_socket_path() can resolve it.
     state.start_ipc();
+
+    // Diagnostics sampler (fd/RSS metrics + leak detector). After IPC so a
+    // stream subscriber has a socket to attach to; harmless if disabled.
+    state.start_metrics();
 
     // XWayland goes up before autostart so X11 apps in the autostart
     // list (and any first client launched from a terminal that inherits

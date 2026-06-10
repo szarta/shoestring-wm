@@ -44,6 +44,19 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "event_stream"}``
      - Switch into streaming mode. Server replies once with ``Ok`` then
        pushes events.
+   * - ``{"type": "metrics"}``
+     - Snapshot the diagnostics registry — process resource gauges plus
+       WM counts. Reply is ``metrics``. Read-only and not gated by
+       automation. Sampled fresh on demand, so it answers even when
+       ``[diagnostics].enabled`` is off.
+   * - ``{"type": "metrics_stream", "interval_ms": 1000}``
+     - Subscribe to a stream of ``metrics`` events: the server replies
+       once with ``ok`` then pushes one sample per tick until the client
+       disconnects (the turn-on/off diagnostics pipe). ``interval_ms``
+       (optional) is the desired push interval, clamped *up* to
+       ``[diagnostics].sample_interval_ms`` — v1 can't push faster than
+       it samples. Requires ``[diagnostics].enabled = true``; returns
+       ``error`` otherwise.
    * - ``{"type": "inject_key", "keysym": "Return", "modifiers": ["Super", "Shift"]}``
      - Synthesize a keypress (press + release) targeting the focused
        surface. ``keysym`` is any X keysym name understood by
@@ -202,9 +215,48 @@ The server replies with a single JSON object tagged by ``type``:
     timeout-driven ``SIGKILL``). ``truncated`` is true if either
     stream exceeded the 64 KiB cap.
 
+``metrics``
+    ``{"type": "metrics", "ts_ms": <u64>, "metrics": {<name>: MetricValue, ...}}``.
+    ``ts_ms`` is the sample's wall-clock time (ms since the Unix epoch).
+    ``metrics`` maps a dotted metric name to a ``MetricValue`` (below).
+    Keys are sorted, and the set is append-only — new metrics may appear
+    in later builds, so consumers should ignore unknown names rather than
+    fail. Returned for ``metrics`` and carried verbatim by the ``metrics``
+    event.
+
 ``error``
     ``{"type": "error", "message": "..."}``. The client should print the
     message and exit non-zero.
+
+``MetricValue``
+    A self-describing tagged value: ``{"kind": "gauge", "value": <i64>}``
+    for an instantaneous reading (open fds, RSS) that can rise or fall, or
+    ``{"kind": "counter", "value": <u64>}`` for a monotonic count since WM
+    start. v1 emits these gauges:
+
+    .. list-table::
+       :header-rows: 1
+       :widths: 30 70
+
+       * - Name
+         - Meaning
+       * - ``process.open_fds``
+         - Open file descriptors (``/proc/self/fd``).
+       * - ``process.fd_limit``
+         - ``RLIMIT_NOFILE`` soft limit.
+       * - ``process.rss_kb``
+         - Resident set size in KiB.
+       * - ``wm.windows``
+         - Mapped toplevels across all workspaces.
+       * - ``wm.clients``
+         - Connected IPC clients.
+       * - ``ipc.subscribers``
+         - Long-lived stream subscribers (event + metrics).
+
+    The WM warns in its log when ``process.open_fds`` crosses
+    ``[diagnostics].fd_warn_fraction`` of ``process.fd_limit`` or climbs
+    monotonically — an early signal of a file-descriptor leak before it
+    can exhaust the limit and crash the session.
 
 ``WindowSummary``::
 
@@ -270,6 +322,12 @@ Each event is tagged by ``type``.
     re-read (file-watcher or explicit ``reload_config`` trigger).
     Subscribers should re-query anything derived from the config.
 
+``metrics``
+    ``{"type": "metrics", "ts_ms": <u64>, "metrics": {...}}``. One
+    diagnostics sample, pushed only to ``metrics_stream`` subscribers
+    (*not* to plain ``event_stream`` connections). Same payload as the
+    ``metrics`` response.
+
 Reference client
 ----------------
 
@@ -293,6 +351,21 @@ subcommand maps to one request:
     $ shoestring-ctl event-stream
     {"type":"workspace_changed","active":4}
     {"type":"window_focused","id":"abcd-1234"}
+    ...
+
+    $ shoestring-ctl -p metrics          # one-shot diagnostics snapshot
+    {
+      "type": "metrics",
+      "ts_ms": 1733800000000,
+      "metrics": {
+        "process.open_fds": { "kind": "gauge", "value": 142 },
+        "process.fd_limit": { "kind": "gauge", "value": 1024 },
+        "process.rss_kb":   { "kind": "gauge", "value": 85320 }
+      }
+    }
+
+    $ shoestring-ctl metrics --watch     # tail samples (Ctrl-C to stop)
+    {"type":"metrics","ts_ms":...,"metrics":{...}}
     ...
 
     $ shoestring-ctl key Return         # synthesize a single Enter press

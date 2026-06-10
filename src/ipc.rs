@@ -30,6 +30,7 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -77,6 +78,20 @@ pub(crate) struct Client {
     /// Once we've handled the (single) one-shot request on this connection,
     /// further input is unexpected — set this and close on next read.
     spent: bool,
+    /// `Some` after [`Request::MetricsStream`]: this connection tails the
+    /// diagnostics sampler. The sampler timer pushes [`Event::Metrics`] at
+    /// it every tick, gated by the per-subscriber interval below.
+    metrics_sub: Option<MetricsSub>,
+}
+
+/// Per-connection state for a `metrics` stream subscriber.
+struct MetricsSub {
+    /// Minimum gap between pushes. Clamped *up* to the sampler cadence at
+    /// subscribe time, so it never asks for samples faster than they're
+    /// taken.
+    interval: Duration,
+    /// When we last pushed to this client; `None` until the first push.
+    last_push: Option<Instant>,
 }
 
 impl ShoestringWm {
@@ -153,6 +168,23 @@ impl Server {
         self.next_id += 1;
         ClientId(id)
     }
+
+    /// Total connected IPC clients (one-shot and streaming alike).
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    /// Long-lived streaming subscribers — event-stream tails plus metrics
+    /// tails. Surfaced as the `ipc.subscribers` gauge.
+    pub fn subscriber_count(&self) -> usize {
+        self.clients
+            .values()
+            .filter(|e| {
+                let c = e.client.borrow();
+                c.subscriber || c.metrics_sub.is_some()
+            })
+            .count()
+    }
 }
 
 fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
@@ -167,6 +199,7 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
         read_buf: Vec::new(),
         subscriber: false,
         spent: false,
+        metrics_sub: None,
     }));
 
     let source_client = Rc::clone(&client);
@@ -504,6 +537,49 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::Metrics => {
+                // Sample fresh on demand so a snapshot is current even when
+                // the background sampler is off. Ungated — pure observation.
+                state.sample_metrics();
+                let resp = Response::Metrics {
+                    ts_ms: crate::metrics::now_ms(),
+                    metrics: state.metrics.snapshot(),
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::MetricsStream { interval_ms } => {
+                if !state.config.diagnostics.enabled {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "metrics stream unavailable: diagnostics disabled \
+                                      (set [diagnostics].enabled = true)"
+                                .into(),
+                        },
+                    );
+                    return true;
+                }
+                if write_response(client, &Response::Ok).is_err() {
+                    return true;
+                }
+                // Clamp the requested interval up to the sampler cadence —
+                // v1 can't push faster than it samples.
+                let floor = state.config.diagnostics.sample_interval_ms.max(1);
+                let want = interval_ms.map(u64::from).unwrap_or(0).max(floor);
+                {
+                    let mut c = client.borrow_mut();
+                    c.metrics_sub = Some(MetricsSub {
+                        interval: Duration::from_millis(want),
+                        last_push: None,
+                    });
+                    // Long-lived like an event subscriber: stay open, re-armed
+                    // for READ only to notice hangup.
+                    c.spent = true;
+                }
+                tracing::debug!(?id, interval_ms = want, "ipc client subscribed to metrics");
+                return false;
+            }
             Request::DispatchAction { action } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -680,6 +756,63 @@ impl ShoestringWm {
             {
                 tracing::debug!(?id, error = %e, "ipc event write failed; dropping subscriber");
                 to_drop.push(id);
+            }
+        }
+        for id in to_drop {
+            self.drop_ipc_client(id);
+        }
+    }
+
+    /// Push the current metrics snapshot to every `metrics` subscriber
+    /// whose per-client interval has elapsed. Called once per sampler
+    /// tick. Same drop-on-write-failure discipline as [`Self::emit_ipc`]:
+    /// a subscriber we can't write to is broken, so we drop it rather than
+    /// buffer.
+    pub fn push_metrics_to_subscribers(&mut self) {
+        // Bail before serializing if nobody's listening.
+        let any = self.ipc.as_ref().is_some_and(|s| {
+            s.clients
+                .values()
+                .any(|e| e.client.borrow().metrics_sub.is_some())
+        });
+        if !any {
+            return;
+        }
+        let event = Event::Metrics {
+            ts_ms: crate::metrics::now_ms(),
+            metrics: self.metrics.snapshot(),
+        };
+        let line = match serde_json::to_string(&event) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "metrics event serialize failed");
+                return;
+            }
+        };
+        let now = Instant::now();
+        let server = self.ipc.as_mut().expect("checked above");
+        let mut to_drop: Vec<ClientId> = Vec::new();
+        for (&id, entry) in &server.clients {
+            let mut c = entry.client.borrow_mut();
+            let Some(sub) = c.metrics_sub.as_ref() else {
+                continue;
+            };
+            // Honor the per-subscriber interval (slower than the sampler is
+            // fine; faster was clamped away at subscribe time).
+            if let Some(last) = sub.last_push {
+                if now.duration_since(last) < sub.interval {
+                    continue;
+                }
+            }
+            if let Err(e) = c
+                .stream
+                .write_all(line.as_bytes())
+                .and_then(|_| c.stream.write_all(b"\n"))
+            {
+                tracing::debug!(?id, error = %e, "metrics push failed; dropping subscriber");
+                to_drop.push(id);
+            } else if let Some(sub) = c.metrics_sub.as_mut() {
+                sub.last_push = Some(now);
             }
         }
         for id in to_drop {

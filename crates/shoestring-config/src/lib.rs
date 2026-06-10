@@ -53,6 +53,54 @@ pub struct Config {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub outputs: BTreeMap<String, OutputConfig>,
+    #[serde(default)]
+    pub diagnostics: Diagnostics,
+}
+
+/// `[diagnostics]` — the metrics/observability subsystem. When `enabled`
+/// (the default), the WM samples its own process resources on a timer,
+/// feeds the `metrics` IPC snapshot/stream, and runs the fd-leak detector
+/// that warns before an unbounded file-descriptor leak hits
+/// `RLIMIT_NOFILE` and crashes the session. Turn it off to drop all
+/// background sampling (snapshot queries still answer on demand; the
+/// stream subscription requires it on).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Diagnostics {
+    /// Master switch for background sampling + the leak detector. Default
+    /// `true` so the crash protection is on without configuration.
+    #[serde(default = "default_diagnostics_enabled")]
+    pub enabled: bool,
+    /// Background sampling cadence in milliseconds. Also the floor for a
+    /// `metrics` stream subscriber's push interval (a subscriber can ask
+    /// for slower, not faster, in v1). Default 1000.
+    #[serde(default = "default_sample_interval_ms")]
+    pub sample_interval_ms: u64,
+    /// Warn when `process.open_fds` exceeds this fraction of the
+    /// `RLIMIT_NOFILE` soft limit. Default 0.75. Clamped to `(0.0, 1.0]`
+    /// at load.
+    #[serde(default = "default_fd_warn_fraction")]
+    pub fd_warn_fraction: f64,
+}
+
+fn default_diagnostics_enabled() -> bool {
+    true
+}
+fn default_sample_interval_ms() -> u64 {
+    1000
+}
+fn default_fd_warn_fraction() -> f64 {
+    0.75
+}
+
+impl Default for Diagnostics {
+    fn default() -> Self {
+        Self {
+            enabled: default_diagnostics_enabled(),
+            sample_interval_ms: default_sample_interval_ms(),
+            fd_warn_fraction: default_fd_warn_fraction(),
+        }
+    }
 }
 
 /// Workspace layout. `count` controls how many workspaces exist (and
@@ -452,6 +500,13 @@ impl Config {
                 key: "Tab".into(),
                 action: Action::CycleWindows,
             },
+            // Super+Down does the same thing — an alternate, one-hand
+            // friendly window switcher.
+            Binding {
+                mods: super_only(),
+                key: "Down".into(),
+                action: Action::CycleWindows,
+            },
             // Lock screen. Spawns `general.lock_command` (default
             // `shoestring-lock`) which binds ext-session-lock-v1.
             // Super+L is already workspace-next; pair with Shift.
@@ -533,6 +588,7 @@ impl Config {
             bindings,
             window_rules: Vec::new(),
             outputs: BTreeMap::new(),
+            diagnostics: Diagnostics::default(),
         }
     }
 }
@@ -685,6 +741,25 @@ mod tests {
     fn automation_enabled_user_override() {
         let cfg: Config = toml::from_str("[general]\nautomation_enabled = true\n").unwrap();
         assert!(cfg.general.automation_enabled);
+    }
+
+    #[test]
+    fn diagnostics_defaults_on() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.diagnostics.enabled);
+        assert_eq!(cfg.diagnostics.sample_interval_ms, 1000);
+        assert_eq!(cfg.diagnostics.fd_warn_fraction, 0.75);
+    }
+
+    #[test]
+    fn diagnostics_user_override() {
+        let cfg: Config = toml::from_str(
+            "[diagnostics]\nenabled = false\nsample_interval_ms = 5000\nfd_warn_fraction = 0.9\n",
+        )
+        .unwrap();
+        assert!(!cfg.diagnostics.enabled);
+        assert_eq!(cfg.diagnostics.sample_interval_ms, 5000);
+        assert_eq!(cfg.diagnostics.fd_warn_fraction, 0.9);
     }
 
     #[test]
