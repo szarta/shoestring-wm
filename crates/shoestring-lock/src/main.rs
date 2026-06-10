@@ -56,6 +56,13 @@ use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
     ext_session_lock_v1::{self, ExtSessionLockV1},
 };
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+};
 use xkbcommon::xkb;
 
 // Color palette taken from xscreensaver's maze.c defaults (lines
@@ -242,17 +249,27 @@ struct OutputEntry {
     lock_surface: Option<ExtSessionLockSurfaceV1>,
     /// Last configure size from the compositor (logical pixels).
     size: Option<(u32, u32)>,
+    /// Fractional scale (1.0 until the compositor reports a preferred scale).
+    /// The buffer + maze render at `logical * scale` px, mapped back to logical
+    /// via `viewport`.
+    scale: f64,
+    viewport: Option<WpViewport>,
+    #[allow(dead_code)]
+    fractional: Option<WpFractionalScaleV1>,
     /// True once we've drawn a buffer matching the latest configure.
     #[allow(dead_code)]
     drawn: bool,
-    /// Per-output screensaver state. Built lazily on first
-    /// configure (need the size), torn down + rebuilt on resize.
+    /// Per-output screensaver state. Built lazily on first configure (need the
+    /// size), rebuilt on resize or scale change — it is sized in physical px.
     anim: Option<Animation>,
 }
 
 struct State {
     compositor: WlCompositor,
     shm: WlShm,
+    /// HiDPI globals — `Some` when the compositor advertises both.
+    viewporter: Option<WpViewporter>,
+    fractional_mgr: Option<WpFractionalScaleManagerV1>,
     /// Held so the manager stays bound for the lifetime of the locker.
     #[allow(dead_code)]
     lock_manager: ExtSessionLockManagerV1,
@@ -327,6 +344,8 @@ fn run(cli: Cli) -> Result<()> {
         .bind(&qh, 1..=1, ())
         .context("ext_session_lock_manager_v1 missing — compositor doesn't support locking")?;
     let seat: Option<WlSeat> = globals.bind(&qh, 1..=7, ()).ok();
+    let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+    let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     // Outputs: bind whatever the registry currently knows about. New
     // outputs after lock are out of scope for the MVP.
@@ -344,6 +363,9 @@ fn run(cli: Cli) -> Result<()> {
                     surface: None,
                     lock_surface: None,
                     size: None,
+                    scale: 1.0,
+                    viewport: None,
+                    fractional: None,
                     drawn: false,
                     anim: None,
                 }
@@ -357,6 +379,8 @@ fn run(cli: Cli) -> Result<()> {
     let mut state = State {
         compositor,
         shm,
+        viewporter,
+        fractional_mgr,
         lock_manager,
         lock: Some(lock),
         locked: false,
@@ -474,6 +498,13 @@ fn create_lock_surface(state: &mut State, qh: &QueueHandle<State>, idx: usize) {
         return;
     };
     let surface = state.compositor.create_surface(qh, ());
+    // Opt into fractional scaling before the first configure so the maze and
+    // prompt render crisp on HiDPI outputs.
+    if let (Some(vp), Some(mgr)) = (&state.viewporter, &state.fractional_mgr) {
+        state.outputs[idx].viewport = Some(vp.get_viewport(&surface, qh, ()));
+        state.outputs[idx].fractional =
+            Some(mgr.get_fractional_scale(&surface, qh, OutputSurfaceData { idx }));
+    }
     let entry = &mut state.outputs[idx];
     let lock_surface =
         lock.get_lock_surface(&surface, &entry.output, qh, OutputSurfaceData { idx });
@@ -540,6 +571,76 @@ impl Dispatch<WlShmPool, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+// wp_viewporter / wp_viewport / wp_fractional_scale_manager_v1 are request-only.
+impl Dispatch<WpViewporter, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewporter,
+        _: <WpViewporter as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewport, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewport,
+        _: <WpViewport as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, OutputSurfaceData> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as wayland_client::Proxy>::Event,
+        data: &OutputSurfaceData,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // `scale` is the ratio in 1/120ths (e.g. 180 == 1.5x).
+            let s = scale as f64 / 120.0;
+            let Some(entry) = state.outputs.get_mut(data.idx) else {
+                return;
+            };
+            if entry.scale == s {
+                return;
+            }
+            entry.scale = s;
+            // The maze is sized in physical px, so a scale change is a resize:
+            // rebuild it at the new resolution, then repaint.
+            if let Some((w, h)) = entry.size {
+                let pw = ((w as f64) * s).round().max(1.0) as u32;
+                let ph = ((h as f64) * s).round().max(1.0) as u32;
+                entry.anim = Some(Animation::new(pw, ph));
+            }
+            if let Err(e) = redraw_output(state, qh, data.idx) {
+                tracing::warn!(error = %e, "redraw after scale change failed");
+            }
+        }
     }
 }
 
@@ -639,10 +740,13 @@ impl Dispatch<ExtSessionLockSurfaceV1, OutputSurfaceData> for State {
             // (Re)build the animation on first configure or genuine
             // resize. Same-size reconfigures preserve the running
             // solver so the maze doesn't restart on each focus
-            // change / mode flap.
+            // change / mode flap. The maze is sized in physical px so it
+            // fills the (possibly HiDPI) buffer crisply.
             let need_rebuild = entry.anim.is_none() || prev != Some((width, height));
             if need_rebuild {
-                entry.anim = Some(Animation::new(width, height));
+                let pw = ((width as f64) * entry.scale).round().max(1.0) as u32;
+                let ph = ((height as f64) * entry.scale).round().max(1.0) as u32;
+                entry.anim = Some(Animation::new(pw, ph));
             }
             if let Err(e) = redraw_output(state, qh, data.idx) {
                 tracing::warn!(error = %e, "redraw failed");
@@ -893,19 +997,25 @@ fn redraw_all(state: &mut State, qh: &QueueHandle<State>) {
 }
 
 fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Result<()> {
-    let entry = &state.outputs[idx];
-    let Some((w, h)) = entry.size else {
+    // `(w, h)` is the logical surface size; the buffer + maze render at physical
+    // `(pw, ph)` and the viewport maps it back. The maze `anim` is already sized
+    // in physical px (see configure / preferred_scale).
+    let Some((w, h)) = state.outputs[idx].size else {
         return Ok(());
     };
-    let Some(surface) = entry.surface.as_ref().cloned() else {
+    let Some(surface) = state.outputs[idx].surface.as_ref().cloned() else {
         return Ok(());
     };
     if w == 0 || h == 0 {
         return Ok(());
     }
+    let scale = state.outputs[idx].scale;
+    let viewport = state.outputs[idx].viewport.clone();
+    let pw = ((w as f64) * scale).round().max(1.0) as u32;
+    let ph = ((h as f64) * scale).round().max(1.0) as u32;
 
-    let stride = w as i32 * 4;
-    let size = (stride as usize) * h as usize;
+    let stride = pw as i32 * 4;
+    let size = (stride as usize) * ph as usize;
     let mut tmp = tempfile::tempfile()?;
     tmp.set_len(size as u64)?;
     // Pre-fill so a peek before our mmap stamp still shows the bg.
@@ -915,17 +1025,17 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         for px in row.chunks_exact_mut(4) {
             px.copy_from_slice(&bg);
         }
-        for _ in 0..h {
+        for _ in 0..ph {
             tmp.write_all(&row)?;
         }
     }
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
-    fill_solid(&mut mmap, w, h, COLOR_BG);
+    fill_solid(&mut mmap, pw, ph, COLOR_BG);
 
     // Maze underlay. Drawn first so the prompt overlay below
     // composites on top.
-    if let Some(anim) = entry.anim.as_ref() {
-        draw_maze(&mut mmap, w, h, anim);
+    if let Some(anim) = state.outputs[idx].anim.as_ref() {
+        draw_maze(&mut mmap, pw, ph, anim);
     }
 
     // Prompt overlay: centered 3-line block with a solid backdrop
@@ -936,7 +1046,7 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         let title = format!("{} · locked", state.hostname);
         let masked: String = "•".repeat(state.password.chars().count());
         let prompt = format!("Password: {masked}");
-        let font_px = state.font_size;
+        let font_px = state.font_size * scale as f32;
         let lines = [title.as_str(), prompt.as_str(), state.status.as_str()];
 
         let line_metrics =
@@ -961,9 +1071,18 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         let pad_y = (font_px * 0.8).round() as i32;
         let box_w = max_text_w + pad_x * 2;
         let box_h = total_h.round() as i32 + pad_y * 2;
-        let box_x = (w as i32 - box_w) / 2;
-        let box_y = ((h as f32 - total_h) / 2.0).round() as i32 - pad_y;
-        fill_rect(&mut mmap, w, h, box_x, box_y, box_w, box_h, COLOR_PROMPT_BG);
+        let box_x = (pw as i32 - box_w) / 2;
+        let box_y = ((ph as f32 - total_h) / 2.0).round() as i32 - pad_y;
+        fill_rect(
+            &mut mmap,
+            pw,
+            ph,
+            box_x,
+            box_y,
+            box_w,
+            box_h,
+            COLOR_PROMPT_BG,
+        );
 
         let text_top = box_y + pad_y;
         for (i, line) in lines.iter().enumerate() {
@@ -975,8 +1094,8 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
             let baseline_y = text_top + (i as f32 * line_h + line_metrics.ascent).round() as i32;
             draw_text(
                 &mut mmap,
-                w,
-                h,
+                pw,
+                ph,
                 &state.font,
                 font_px,
                 x,
@@ -990,8 +1109,8 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer = pool.create_buffer(
         0,
-        w as i32,
-        h as i32,
+        pw as i32,
+        ph as i32,
         stride,
         wl_shm::Format::Argb8888,
         qh,
@@ -1001,7 +1120,10 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
     drop(mmap);
 
     surface.attach(Some(&buffer), 0, 0);
-    surface.damage_buffer(0, 0, w as i32, h as i32);
+    if let Some(vp) = viewport.as_ref() {
+        vp.set_destination(w as i32, h as i32);
+    }
+    surface.damage_buffer(0, 0, pw as i32, ph as i32);
     surface.commit();
     state.outputs[idx].drawn = true;
     buffer.destroy();

@@ -49,6 +49,13 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1, EVT_TOPLEVEL_OPCODE},
 };
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
@@ -108,6 +115,13 @@ struct State {
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     size: Option<(u32, u32)>,
+    /// Fractional scale for the surface (1.0 until the compositor sends a
+    /// `wp_fractional_scale.preferred_scale`). The buffer is rendered at
+    /// `logical * scale` px and mapped back to logical via `viewport`.
+    scale: f64,
+    viewport: Option<WpViewport>,
+    #[allow(dead_code)]
+    fractional: Option<WpFractionalScaleV1>,
     /// Reused `wl_shm` buffer. Allocated lazily and only reallocated when
     /// the bar's pixel dimensions change; every redraw maps it afresh and
     /// re-attaches the same `wl_buffer`. Allocating a new pool+buffer per
@@ -309,6 +323,9 @@ fn run_session() -> Result<()> {
     let layer_shell: ZwlrLayerShellV1 = globals
         .bind(&qh, 1..=5, ())
         .context("zwlr_layer_shell_v1 missing (compositor doesn't support layer-shell?)")?;
+    // Optional HiDPI globals: present under shoestring-wm.
+    let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+    let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
     // Subscribe to the window list. Missing global is not fatal — bar
     // will just render without a window list (clock + future workspaces
     // still useful).
@@ -386,6 +403,9 @@ fn run_session() -> Result<()> {
         surface: None,
         layer_surface: None,
         size: None,
+        scale: 1.0,
+        viewport: None,
+        fractional: None,
         buffer: None,
         toplevels: HashMap::new(),
         active_workspace,
@@ -422,6 +442,11 @@ fn run_session() -> Result<()> {
     layer_surface.set_size(0, state.cfg.height);
     layer_surface.set_anchor(edge_anchor | Anchor::Left | Anchor::Right);
     layer_surface.set_exclusive_zone(state.cfg.height as i32);
+    // Opt into fractional scaling so the bar renders crisp on HiDPI outputs.
+    if let (Some(vp), Some(mgr)) = (&viewporter, &fractional_mgr) {
+        state.viewport = Some(vp.get_viewport(&surface, &qh, ()));
+        state.fractional = Some(mgr.get_fractional_scale(&surface, &qh, ()));
+    }
     surface.commit();
 
     state.surface = Some(surface);
@@ -745,33 +770,43 @@ struct BarBuffer {
 /// Compose the bar into its reused wl_buffer and attach it.
 /// Re-runs on every configure event and on state changes.
 fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
-    let stride = w as i32 * 4;
-    let size = (stride as usize) * h as usize;
+    // `(w, h)` is the logical surface size from the layer-shell configure. The
+    // buffer is rendered at physical resolution `(pw, ph)` and mapped back to
+    // logical via the viewport, so every layout dimension below is scaled into
+    // physical px. `s(v)` scales a logical length; click hit-test rects are
+    // converted back to logical before storing (pointer coords stay logical).
+    let scale = state.scale;
+    let pw = ((w as f64) * scale).round().max(1.0) as u32;
+    let ph = ((h as f64) * scale).round().max(1.0) as u32;
+    let s = |v: i32| ((v as f64) * scale).round() as i32;
+
+    let stride = pw as i32 * 4;
+    let size = (stride as usize) * ph as usize;
 
     // (Re)allocate the shm buffer only when missing or the size changed.
     // Destroying the old wl_buffer releases the compositor's pool fd —
     // skipping this per frame is the entire fix (see `State::buffer`).
-    if state.buffer.as_ref().is_none_or(|b| b.dims != (w, h)) {
+    if state.buffer.as_ref().is_none_or(|b| b.dims != (pw, ph)) {
         if let Some(old) = state.buffer.take() {
             old.buffer.destroy();
         }
         let tmp = tempfile::tempfile()?;
         tmp.set_len(size as u64)?;
         let pool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
-        let buffer = pool.create_buffer(0, w as i32, h as i32, stride, Format::Argb8888, qh, ());
+        let buffer = pool.create_buffer(0, pw as i32, ph as i32, stride, Format::Argb8888, qh, ());
         // The wl_buffer keeps the pool's mapping alive, so we can drop the
         // pool object now and just hold onto the buffer.
         pool.destroy();
         state.buffer = Some(BarBuffer {
             tmp,
             buffer,
-            dims: (w, h),
+            dims: (pw, ph),
         });
     }
 
     let bg = state.cfg.background;
     let fg = state.cfg.foreground;
-    let font_px = state.cfg.font_size;
+    let font_px = state.cfg.font_size * scale as f32;
 
     // Map the persisted backing file for this frame. `map_mut` only borrows
     // the file for the call; the returned mapping is independent, so the
@@ -780,15 +815,16 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         unsafe { MmapMut::map_mut(&state.buffer.as_ref().expect("buffer ensured above").tmp)? };
 
     // We re-fill via the mmap (faster than seek+write) so subsequent draws
-    // can mutate in place. Background first, then text on top.
-    fill_bg(&mut mmap, w, h, bg);
+    // can mutate in place. Background first, then text on top. All coords are
+    // physical px from here on (`pw`/`ph` and `s(..)`-scaled constants).
+    fill_bg(&mut mmap, pw, ph, bg);
 
     // Right: clock. Drawn first so we know how much horizontal space
     // remains for the (truncatable) window list in the middle.
     let clock = format_clock_now(&state.cfg.clock_format);
     let clock_w = measure_text(&state.font, font_px, &clock);
-    let clock_x = w as i32 - PADDING_X - clock_w;
-    draw_text(&mut mmap, w, h, &state.font, font_px, clock_x, &clock, fg);
+    let clock_x = pw as i32 - s(PADDING_X) - clock_w;
+    draw_text(&mut mmap, pw, ph, &state.font, font_px, clock_x, &clock, fg);
 
     // Automation indicator chip: drawn immediately left of the clock when
     // the WM's automation gate is ON. Hidden when off — the user should
@@ -798,20 +834,29 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // grammar matches across the bar.
     let auto_chip_left = if state.automation_enabled {
         const AUTO_LABEL: &str = "AUTO";
-        const AUTO_PAD: i32 = 4;
-        const AUTO_CLOCK_GAP: i32 = 8;
+        let auto_pad = s(4);
+        let auto_clock_gap = s(8);
         let label_w = measure_text(&state.font, font_px, AUTO_LABEL);
-        let chip_w = label_w + AUTO_PAD * 2;
-        let chip_right = clock_x - AUTO_CLOCK_GAP;
+        let chip_w = label_w + auto_pad * 2;
+        let chip_right = clock_x - auto_clock_gap;
         let chip_left = chip_right - chip_w;
-        fill_rect(&mut mmap, w, h, chip_left, 2, chip_w, h as i32 - 4, ACCENT);
+        fill_rect(
+            &mut mmap,
+            pw,
+            ph,
+            chip_left,
+            s(2),
+            chip_w,
+            ph as i32 - s(4),
+            ACCENT,
+        );
         draw_text(
             &mut mmap,
-            w,
-            h,
+            pw,
+            ph,
             &state.font,
             font_px,
-            chip_left + AUTO_PAD,
+            chip_left + auto_pad,
             AUTO_LABEL,
             fg,
         );
@@ -826,11 +871,11 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // detection up in main).
     let battery_left = match (state.battery_source.as_ref(), state.battery_reading) {
         (Some(_), Some(reading)) => {
-            const BAT_GAP: i32 = 8;
+            let bat_gap = s(8);
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
             let right_anchor = auto_chip_left.unwrap_or(clock_x);
-            let bat_x = right_anchor - BAT_GAP - text_w;
+            let bat_x = right_anchor - bat_gap - text_w;
             let color = battery::pick_color(
                 &reading,
                 fg,
@@ -839,7 +884,7 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
                 BAT_CRITICAL,
                 state.cfg.battery_critical_threshold,
             );
-            draw_text(&mut mmap, w, h, &state.font, font_px, bat_x, &text, color);
+            draw_text(&mut mmap, pw, ph, &state.font, font_px, bat_x, &text, color);
             Some(bat_x)
         }
         _ => None,
@@ -849,36 +894,38 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // dimmed. Suppressed entirely when `cfg.show_workspaces` is false,
     // in which case the window list slides to the left edge.
     let list_start_x = if state.cfg.show_workspaces {
+        let ws_box_w = s(WS_BOX_W);
+        let ws_box_h = s(WS_BOX_H);
+        let ws_gap = s(WS_GAP);
         let ws_cluster_w =
-            state.workspace_count as i32 * WS_BOX_W + (state.workspace_count as i32 - 1) * WS_GAP;
-        let ws_y = (h as i32 - WS_BOX_H) / 2;
+            state.workspace_count as i32 * ws_box_w + (state.workspace_count as i32 - 1) * ws_gap;
+        let ws_y = (ph as i32 - ws_box_h) / 2;
         for i in 0..state.workspace_count {
-            let bx = PADDING_X + i as i32 * (WS_BOX_W + WS_GAP);
+            let bx = s(PADDING_X) + i as i32 * (ws_box_w + ws_gap);
             let color = if i + 1 == state.active_workspace {
                 ACCENT
             } else {
                 DIM
             };
-            fill_rect(&mut mmap, w, h, bx, ws_y, WS_BOX_W, WS_BOX_H, color);
+            fill_rect(&mut mmap, pw, ph, bx, ws_y, ws_box_w, ws_box_h, color);
         }
         // Active workspace's display name, drawn immediately right of
         // the box cluster. Skipped when the user hasn't named the
         // active slot — boxes alone are enough in that case.
         // WS_LIST_GAP separates the name from the window list.
-        let mut after_ws_x = PADDING_X + ws_cluster_w;
+        let mut after_ws_x = s(PADDING_X) + ws_cluster_w;
         let active_name = state
             .workspace_names
             .get(state.active_workspace.saturating_sub(1) as usize)
             .map(|s| s.as_str())
             .unwrap_or("");
         if !active_name.is_empty() {
-            const NAME_GAP: i32 = 8;
-            let name_x = after_ws_x + NAME_GAP;
+            let name_x = after_ws_x + s(8);
             let name_w = measure_text(&state.font, font_px, active_name);
             draw_text(
                 &mut mmap,
-                w,
-                h,
+                pw,
+                ph,
                 &state.font,
                 font_px,
                 name_x,
@@ -887,9 +934,9 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
             );
             after_ws_x = name_x + name_w;
         }
-        after_ws_x + WS_LIST_GAP
+        after_ws_x + s(WS_LIST_GAP)
     } else {
-        PADDING_X
+        s(PADDING_X)
     };
 
     // Middle: window list, drawn per-entry so we can paint a background
@@ -897,15 +944,16 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // ordered by FT identifier (stable across renders). When no window
     // exists on the active workspace the slot stays empty — `--version`
     // is the supported channel for reading the build version.
-    let list_end_x = battery_left.or(auto_chip_left).unwrap_or(clock_x) - PADDING_X;
+    let list_end_x = battery_left.or(auto_chip_left).unwrap_or(clock_x) - s(PADDING_X);
     let list_budget = (list_end_x - list_start_x).max(0);
     // draw_window_list also fills `entry_rects`, which the pointer
     // button handler reads on the next click to hit-test entries.
     let mut entry_rects: Vec<(i32, i32, String)> = Vec::new();
     draw_window_list(
         &mut mmap,
-        w,
-        h,
+        pw,
+        ph,
+        scale,
         state,
         list_start_x,
         list_budget,
@@ -913,6 +961,12 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         fg,
         &mut entry_rects,
     );
+    // Stored hit-test rects must be logical: pointer events arrive in logical
+    // surface coords, so divide the physical x/width back down by `scale`.
+    for r in &mut entry_rects {
+        r.0 = ((r.0 as f64) / scale).round() as i32;
+        r.1 = ((r.1 as f64) / scale).round() as i32;
+    }
     state.window_entry_rects = entry_rects;
 
     // Flush our writes and unmap before committing; the compositor reads
@@ -922,7 +976,11 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     let buffer = &state.buffer.as_ref().expect("buffer ensured above").buffer;
     let surface = state.surface.as_ref().expect("surface missing in redraw");
     surface.attach(Some(buffer), 0, 0);
-    surface.damage_buffer(0, 0, w as i32, h as i32);
+    // Map the physical buffer back onto the logical surface size.
+    if let Some(vp) = state.viewport.as_ref() {
+        vp.set_destination(w as i32, h as i32);
+    }
+    surface.damage_buffer(0, 0, pw as i32, ph as i32);
     surface.commit();
     Ok(())
 }
@@ -975,10 +1033,12 @@ fn format_clock_now(format: &str) -> String {
 /// focused entry. Truncates the visible set with ".." if the cumulative
 /// width exceeds `budget_px`. The focused entry, when present, is drawn
 /// first in width-budget order so it always survives truncation.
+#[allow(clippy::too_many_arguments)]
 fn draw_window_list(
     mmap: &mut MmapMut,
     w: u32,
     h: u32,
+    scale: f64,
     state: &State,
     start_x: i32,
     budget_px: i32,
@@ -986,6 +1046,8 @@ fn draw_window_list(
     fg: u32,
     entry_rects: &mut Vec<(i32, i32, String)>,
 ) {
+    let s = |v: i32| ((v as f64) * scale).round() as i32;
+    let entry_gap = s(ENTRY_GAP);
     let font = &state.font;
     // Filter to windows on the active workspace. Entries without a
     // mapping yet (announced via ext-FT before the matching
@@ -1022,7 +1084,7 @@ fn draw_window_list(
         let needed = if visible.is_empty() {
             lw
         } else {
-            lw + ENTRY_GAP
+            lw + entry_gap
         };
         if used + needed > budget_px {
             // Out of room; signal truncation with a trailing ".." if it fits.
@@ -1030,7 +1092,7 @@ fn draw_window_list(
             let ellipsis_needed = if visible.is_empty() {
                 ellipsis_w
             } else {
-                ellipsis_w + ENTRY_GAP
+                ellipsis_w + entry_gap
             };
             if used + ellipsis_needed <= budget_px {
                 visible.push(("..".into(), ellipsis_w, false, None));
@@ -1045,22 +1107,22 @@ fn draw_window_list(
     let mut x = start_x;
     for (i, (label, lw, focused, id)) in visible.iter().enumerate() {
         if i > 0 {
-            x += ENTRY_GAP;
+            x += entry_gap;
         }
         // Every real entry (not the ".." overflow marker) gets a chip
         // background so entries are visually separated. Focused = accent,
         // unfocused = dim dark bg.
         if id.is_some() {
-            let pad = 4;
+            let pad = s(4);
             let chip_color = if *focused { ACCENT } else { ENTRY_BG };
             fill_rect(
                 mmap,
                 w,
                 h,
                 x - pad,
-                2,
+                s(2),
                 lw + pad * 2,
-                h as i32 - 4,
+                h as i32 - s(4),
                 chip_color,
             );
         }
@@ -1340,7 +1402,31 @@ noop_dispatch!(
     WlSurface,
     WlOutput,
     ZwlrLayerShellV1,
+    // Request-only HiDPI globals — they never send events.
+    WpViewporter,
+    WpViewport,
+    WpFractionalScaleManagerV1,
 );
+
+impl Dispatch<WpFractionalScaleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // `scale` is the ratio in 1/120ths (e.g. 180 == 1.5x).
+            let s = scale as f64 / 120.0;
+            if state.scale != s {
+                state.scale = s;
+                state.dirty = true;
+            }
+        }
+    }
+}
 
 impl Dispatch<WlSeat, ()> for State {
     fn event(

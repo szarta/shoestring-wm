@@ -13,7 +13,8 @@ path = "src/main.rs"
 [dependencies]
 # Same wayland stack the bar/menu/lock/screenshot use — already resolved.
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
+# `staging` pulls in wp_fractional_scale_v1; viewporter is in the base client set.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 # SHM pool: mmap an anon tempfile, hand the fd to the compositor.

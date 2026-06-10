@@ -39,6 +39,13 @@ use wayland_client::{
     },
     Connection, Dispatch, QueueHandle, WEnum,
 };
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
@@ -97,6 +104,13 @@ struct State {
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     size: Option<(u32, u32)>,
+    /// Fractional scale for the surface (1.0 until the compositor sends a
+    /// `wp_fractional_scale.preferred_scale`). The buffer renders at
+    /// `logical * scale` px and the viewport maps it back to logical.
+    scale: f64,
+    viewport: Option<WpViewport>,
+    #[allow(dead_code)]
+    fractional: Option<WpFractionalScaleV1>,
     dirty: bool,
     running: bool,
     /// xkb context shared across keymaps (cheap to keep around).
@@ -197,6 +211,9 @@ fn main() -> Result<()> {
     let _seat: WlSeat = globals
         .bind(&qh, 5..=9, ())
         .context("wl_seat (>=v5) missing")?;
+    // Optional HiDPI globals: present under shoestring-wm.
+    let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+    let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     let mut state = State {
         compositor,
@@ -206,6 +223,9 @@ fn main() -> Result<()> {
         surface: None,
         layer_surface: None,
         size: None,
+        scale: 1.0,
+        viewport: None,
+        fractional: None,
         dirty: false,
         running: true,
         xkb_ctx: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
@@ -246,6 +266,13 @@ fn main() -> Result<()> {
     // app stealing input. The compositor releases focus when we destroy the
     // surface (on Esc / Enter / Closed).
     layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    // Opt into fractional scaling: viewport maps a physical-resolution buffer
+    // back to the logical surface size; the fractional object reports the
+    // preferred ratio.
+    if let (Some(vp), Some(mgr)) = (&viewporter, &fractional_mgr) {
+        state.viewport = Some(vp.get_viewport(&surface, &qh, ()));
+        state.fractional = Some(mgr.get_fractional_scale(&surface, &qh, ()));
+    }
     surface.commit();
 
     state.surface = Some(surface);
@@ -519,40 +546,52 @@ fn load_font() -> Result<Font> {
 fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
     let surface = state.surface.as_ref().expect("surface missing in redraw");
 
-    let stride = w as i32 * 4;
-    let size = (stride as usize) * h as usize;
+    // `(w, h)` is the logical surface size from the layer-shell configure. We
+    // render the buffer at physical resolution (`pw`/`ph`) and let the viewport
+    // map it back down, so every layout constant below is scaled into physical
+    // px. Keyboard-only tool — there is no pointer hit-testing to keep logical.
+    let scale = state.scale;
+    let pw = ((w as f64) * scale).round().max(1.0) as u32;
+    let ph = ((h as f64) * scale).round().max(1.0) as u32;
+    let font_px = FONT_PX * scale as f32;
+    let pad_x = ((PADDING_X as f64) * scale).round() as i32;
+    let input_h = ((INPUT_HEIGHT as f64) * scale).round() as u32;
+    let row_h = ((ROW_HEIGHT as f64) * scale).round() as u32;
+
+    let stride = pw as i32 * 4;
+    let size = (stride as usize) * ph as usize;
 
     let mut tmp = tempfile::tempfile()?;
     tmp.set_len(size as u64)?;
-    let row_bytes = BG.to_ne_bytes().repeat(w as usize);
-    for _ in 0..h {
+    let row_bytes = BG.to_ne_bytes().repeat(pw as usize);
+    for _ in 0..ph {
         tmp.write_all(&row_bytes)?;
     }
 
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
-    fill_bg(&mut mmap, w, h, BG);
+    fill_bg(&mut mmap, pw, ph, BG);
 
-    // --- Input strip (top INPUT_HEIGHT pixels) ---
+    // --- Input strip (top input_h pixels) ---
     let line = format!("{}{}", PROMPT, state.query);
     draw_text_at(
         &mut mmap,
-        w,
-        h,
+        pw,
+        ph,
         0,
-        INPUT_HEIGHT,
+        input_h,
         &state.font,
-        FONT_PX,
-        PADDING_X,
+        font_px,
+        pad_x,
         &line,
         FG,
     );
     let pre_caret = format!("{}{}", PROMPT, &state.query[..state.cursor_byte]);
-    let caret_x = PADDING_X + measure_text(&state.font, FONT_PX, &pre_caret);
-    draw_caret(&mut mmap, w, INPUT_HEIGHT, caret_x, FG);
+    let caret_x = pad_x + measure_text(&state.font, font_px, &pre_caret);
+    draw_caret(&mut mmap, pw, input_h, caret_x, FG);
 
     // --- Dropdown rows ---
     for (row_idx, cand_idx) in state.matches.iter().copied().enumerate() {
-        let row_top = INPUT_HEIGHT as i32 + (row_idx as i32) * ROW_HEIGHT as i32;
+        let row_top = input_h as i32 + (row_idx as i32) * row_h as i32;
         let selected = row_idx == state.selected;
         let row_bg = if selected {
             SEL_BG
@@ -563,24 +602,24 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
         };
         fill_rect(
             &mut mmap,
-            w,
-            h,
+            pw,
+            ph,
             0,
             row_top,
-            w as i32,
-            ROW_HEIGHT as i32,
+            pw as i32,
+            row_h as i32,
             row_bg,
         );
         let label = &state.candidates[cand_idx].display;
         draw_text_at(
             &mut mmap,
-            w,
-            h,
+            pw,
+            ph,
             row_top,
-            ROW_HEIGHT,
+            row_h,
             &state.font,
-            FONT_PX,
-            PADDING_X,
+            font_px,
+            pad_x,
             label,
             if selected { SEL_FG } else { FG },
         );
@@ -588,12 +627,16 @@ fn redraw(state: &State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> 
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer =
-        pool.create_buffer(0, w as i32, h as i32, stride, Format::Argb8888, qh, ());
+        pool.create_buffer(0, pw as i32, ph as i32, stride, Format::Argb8888, qh, ());
     pool.destroy();
     drop(mmap);
 
     surface.attach(Some(&buffer), 0, 0);
-    surface.damage_buffer(0, 0, w as i32, h as i32);
+    // Map the physical buffer back onto the logical surface size.
+    if let Some(vp) = state.viewport.as_ref() {
+        vp.set_destination(w as i32, h as i32);
+    }
+    surface.damage_buffer(0, 0, pw as i32, ph as i32);
     surface.commit();
     Ok(())
 }
@@ -1107,7 +1150,31 @@ noop_dispatch!(
     WlSurface,
     WlOutput,
     ZwlrLayerShellV1,
+    // Request-only HiDPI globals — they never send events.
+    WpViewporter,
+    WpViewport,
+    WpFractionalScaleManagerV1,
 );
+
+impl Dispatch<WpFractionalScaleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // `scale` is the ratio in 1/120ths (e.g. 180 == 1.5x).
+            let s = scale as f64 / 120.0;
+            if state.scale != s {
+                state.scale = s;
+                state.dirty = true;
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

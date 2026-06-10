@@ -39,6 +39,13 @@ use wayland_client::{
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
@@ -68,12 +75,25 @@ struct OutputEntry {
     size: Option<(u32, u32)>,
     /// True until we've committed a buffer for the current size.
     dirty: bool,
+    /// Fractional scale for this surface (1.0 until the compositor sends a
+    /// `wp_fractional_scale.preferred_scale`). Buffers are rendered at
+    /// `logical * scale` physical px and mapped back to logical via `viewport`.
+    scale: f64,
+    /// Per-surface viewport + fractional-scale objects, present only when the
+    /// compositor advertises both globals (it does — see the WM's scale wiring).
+    viewport: Option<WpViewport>,
+    fractional: Option<WpFractionalScaleV1>,
 }
 
 struct State {
     compositor: WlCompositor,
     shm: WlShm,
     layer_shell: ZwlrLayerShellV1,
+    /// HiDPI scaling globals. `Some` when the compositor advertises both
+    /// wp_viewporter and wp_fractional_scale_manager_v1; without them the tool
+    /// falls back to unscaled (scale 1.0) rendering.
+    viewporter: Option<WpViewporter>,
+    fractional_mgr: Option<WpFractionalScaleManagerV1>,
     outputs: Vec<OutputEntry>,
 
     // Seat / input.
@@ -137,6 +157,9 @@ fn run() -> Result<u8> {
     let seat: WlSeat = globals
         .bind(&qh, 5..=9, ())
         .context("wl_seat (>=v5) missing")?;
+    // Optional: present under shoestring-wm, absent under bare compositors.
+    let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+    let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     let outputs: Vec<OutputEntry> = globals.contents().with_list(|list| {
         list.iter()
@@ -153,6 +176,9 @@ fn run() -> Result<u8> {
                     layer_surface: None,
                     size: None,
                     dirty: false,
+                    scale: 1.0,
+                    viewport: None,
+                    fractional: None,
                 }
             })
             .collect()
@@ -165,6 +191,8 @@ fn run() -> Result<u8> {
         compositor,
         shm,
         layer_shell,
+        viewporter,
+        fractional_mgr,
         outputs,
         seat,
         pointer: None,
@@ -198,6 +226,14 @@ fn run() -> Result<u8> {
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        // Opt this surface into fractional scaling: a viewport lets us submit a
+        // physical-resolution buffer and map it back to the logical surface
+        // size, and the fractional-scale object delivers the preferred ratio.
+        if let (Some(vp), Some(mgr)) = (&state.viewporter, &state.fractional_mgr) {
+            state.outputs[i].viewport = Some(vp.get_viewport(&surface, &qh, ()));
+            state.outputs[i].fractional =
+                Some(mgr.get_fractional_scale(&surface, &qh, FractionalData { idx: i }));
+        }
         surface.commit();
         state.outputs[i].surface = Some(surface);
         state.outputs[i].layer_surface = Some(layer_surface);
@@ -325,16 +361,23 @@ fn commit_selection(state: &mut State) {
 // ---- Drawing -------------------------------------------------------------
 
 fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Result<()> {
-    let (w, h) = match state.outputs[idx].size {
+    // `(lw, lh)` is the logical surface size from the layer-shell configure;
+    // the buffer is rendered at `(pw, ph)` physical px and mapped back down to
+    // logical via the viewport (set below). Pointer/selection coords stay
+    // logical throughout — only the pixels we stamp scale up.
+    let (lw, lh) = match state.outputs[idx].size {
         Some(s) => s,
         None => return Ok(()),
     };
-    if w == 0 || h == 0 {
+    if lw == 0 || lh == 0 {
         return Ok(());
     }
+    let scale = state.outputs[idx].scale;
+    let pw = ((lw as f64) * scale).round().max(1.0) as u32;
+    let ph = ((lh as f64) * scale).round().max(1.0) as u32;
 
-    let stride = w as i32 * 4;
-    let size = (stride as usize) * h as usize;
+    let stride = pw as i32 * 4;
+    let size = (stride as usize) * ph as usize;
     let tmp = tempfile::tempfile()?;
     tmp.set_len(size as u64)?;
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
@@ -352,22 +395,22 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         let x1 = ax.max(bx).round() as i32;
         let y1 = ay.max(by).round() as i32;
         Some((
-            x0.clamp(0, w as i32),
-            y0.clamp(0, h as i32),
-            x1.clamp(0, w as i32),
-            y1.clamp(0, h as i32),
+            x0.clamp(0, lw as i32),
+            y0.clamp(0, lh as i32),
+            x1.clamp(0, lw as i32),
+            y1.clamp(0, lh as i32),
         ))
     } else {
         None
     };
 
-    paint(&mut mmap, w, h, rect);
+    paint(&mut mmap, pw, ph, scale, rect);
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer = pool.create_buffer(
         0,
-        w as i32,
-        h as i32,
+        pw as i32,
+        ph as i32,
         stride,
         wl_shm::Format::Argb8888,
         qh,
@@ -381,7 +424,11 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         None => return Ok(()),
     };
     surface.attach(Some(&buffer), 0, 0);
-    surface.damage_buffer(0, 0, w as i32, h as i32);
+    // Map the physical buffer back onto the logical surface size.
+    if let Some(vp) = state.outputs[idx].viewport.as_ref() {
+        vp.set_destination(lw as i32, lh as i32);
+    }
+    surface.damage_buffer(0, 0, pw as i32, ph as i32);
     surface.commit();
     state.outputs[idx].dirty = false;
     // The compositor takes ownership of the buffer until release; we drop
@@ -392,8 +439,10 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
 }
 
 /// Paint the surface: solid dim everywhere, then (optionally) punch a
-/// transparent hole and stamp a 2-px border around the selection rect.
-fn paint(mmap: &mut MmapMut, w: u32, h: u32, rect: Option<(i32, i32, i32, i32)>) {
+/// transparent hole and stamp a border around the selection rect. `w`/`h` are
+/// physical (buffer) px; `rect` is in logical coords and is scaled here, so the
+/// border stays a constant logical thickness across HiDPI scales.
+fn paint(mmap: &mut MmapMut, w: u32, h: u32, scale: f64, rect: Option<(i32, i32, i32, i32)>) {
     let stride = w as usize * 4;
     let dim = [0u8, 0u8, 0u8, DIM_ALPHA];
     // Fill the whole surface with dim.
@@ -414,6 +463,9 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, rect: Option<(i32, i32, i32, i32)>)
     if x1 <= x0 || y1 <= y0 {
         return;
     }
+    // Logical -> physical.
+    let px = |v: i32| ((v as f64) * scale).round() as i32;
+    let (x0, y0, x1, y1) = (px(x0), px(y0), px(x1), px(y1));
     let x0 = x0.max(0) as usize;
     let y0 = y0.max(0) as usize;
     let x1 = (x1 as usize).min(w as usize);
@@ -430,10 +482,10 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, rect: Option<(i32, i32, i32, i32)>)
         }
     }
 
-    // Border: 2-px-thick outline drawn just *outside* the cleared rect
-    // when there's room (so the drag region stays pixel-exact for the
-    // capture). Stamps as opaque white in premultiplied ARGB8888.
-    let bt = BORDER_PX as usize;
+    // Border: outline drawn just *outside* the cleared rect when there's room
+    // (so the drag region stays pixel-exact for the capture). Stamps as opaque
+    // white in premultiplied ARGB8888. Thickness is BORDER_PX logical px.
+    let bt = (((BORDER_PX as f64) * scale).round() as usize).max(1);
     let bx0 = x0.saturating_sub(bt);
     let by0 = y0.saturating_sub(bt);
     let bx1 = (x1 + bt).min(w as usize);
@@ -638,6 +690,71 @@ impl Dispatch<ZwlrLayerShellV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+// wp_viewporter / wp_viewport / wp_fractional_scale_manager_v1 are all
+// request-only — no events ever arrive, so their dispatch is a no-op.
+impl Dispatch<WpViewporter, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewporter,
+        _: <WpViewporter as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewport, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewport,
+        _: <WpViewport as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+/// Identifies which output a `wp_fractional_scale_v1` object belongs to.
+struct FractionalData {
+    idx: usize,
+}
+
+impl Dispatch<WpFractionalScaleV1, FractionalData> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as Proxy>::Event,
+        data: &FractionalData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // `scale` is the ratio in 1/120ths (e.g. 180 == 1.5x).
+            let s = scale as f64 / 120.0;
+            if let Some(entry) = state.outputs.get_mut(data.idx) {
+                if entry.scale != s {
+                    entry.scale = s;
+                    entry.dirty = true;
+                }
+            }
+        }
     }
 }
 

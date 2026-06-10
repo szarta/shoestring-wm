@@ -49,6 +49,13 @@ use wayland_client::{
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
@@ -98,12 +105,21 @@ struct OutputEntry {
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     size: Option<(u32, u32)>,
     dirty: bool,
+    /// Fractional scale (1.0 until the compositor reports a preferred scale).
+    /// Buffers render at `logical * scale` px, mapped back via `viewport`.
+    scale: f64,
+    viewport: Option<WpViewport>,
+    #[allow(dead_code)]
+    fractional: Option<WpFractionalScaleV1>,
 }
 
 struct State {
     compositor: WlCompositor,
     shm: WlShm,
     layer_shell: ZwlrLayerShellV1,
+    /// HiDPI globals — `Some` when the compositor advertises both.
+    viewporter: Option<WpViewporter>,
+    fractional_mgr: Option<WpFractionalScaleManagerV1>,
     outputs: Vec<OutputEntry>,
     font: Font,
     prompt: String,
@@ -194,6 +210,8 @@ fn run() -> Result<u8> {
     let seat: WlSeat = globals
         .bind(&qh, 5..=9, ())
         .context("wl_seat (>=v5) missing")?;
+    let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+    let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     let outputs: Vec<OutputEntry> = globals.contents().with_list(|list| {
         list.iter()
@@ -209,6 +227,9 @@ fn run() -> Result<u8> {
                     layer_surface: None,
                     size: None,
                     dirty: false,
+                    scale: 1.0,
+                    viewport: None,
+                    fractional: None,
                 }
             })
             .collect()
@@ -221,6 +242,8 @@ fn run() -> Result<u8> {
         compositor,
         shm,
         layer_shell,
+        viewporter,
+        fractional_mgr,
         outputs,
         font,
         prompt,
@@ -250,6 +273,11 @@ fn run() -> Result<u8> {
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        if let (Some(vp), Some(mgr)) = (&state.viewporter, &state.fractional_mgr) {
+            state.outputs[i].viewport = Some(vp.get_viewport(&surface, &qh, ()));
+            state.outputs[i].fractional =
+                Some(mgr.get_fractional_scale(&surface, &qh, FractionalData { idx: i }));
+        }
         surface.commit();
         state.outputs[i].surface = Some(surface);
         state.outputs[i].layer_surface = Some(layer_surface);
@@ -320,27 +348,32 @@ fn event_loop(
 // ---- Drawing -------------------------------------------------------------
 
 fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Result<()> {
-    let (w, h) = match state.outputs[idx].size {
+    // `(lw, lh)` is logical; the buffer renders at physical `(pw, ph)` and the
+    // viewport maps it back. The box + text are laid out in physical px below.
+    let (lw, lh) = match state.outputs[idx].size {
         Some(s) => s,
         None => return Ok(()),
     };
-    if w == 0 || h == 0 {
+    if lw == 0 || lh == 0 {
         return Ok(());
     }
+    let scale = state.outputs[idx].scale;
+    let pw = ((lw as f64) * scale).round().max(1.0) as u32;
+    let ph = ((lh as f64) * scale).round().max(1.0) as u32;
 
-    let stride = w as i32 * 4;
-    let size = (stride as usize) * h as usize;
+    let stride = pw as i32 * 4;
+    let size = (stride as usize) * ph as usize;
     let tmp = tempfile::tempfile()?;
     tmp.set_len(size as u64)?;
     let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
 
-    paint(&mut mmap, w, h, &state.prompt, &state.font);
+    paint(&mut mmap, pw, ph, scale, &state.prompt, &state.font);
 
     let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
     let buffer: WlBuffer = pool.create_buffer(
         0,
-        w as i32,
-        h as i32,
+        pw as i32,
+        ph as i32,
         stride,
         wl_shm::Format::Argb8888,
         qh,
@@ -354,14 +387,20 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         None => return Ok(()),
     };
     surface.attach(Some(&buffer), 0, 0);
-    surface.damage_buffer(0, 0, w as i32, h as i32);
+    if let Some(vp) = state.outputs[idx].viewport.as_ref() {
+        vp.set_destination(lw as i32, lh as i32);
+    }
+    surface.damage_buffer(0, 0, pw as i32, ph as i32);
     surface.commit();
     state.outputs[idx].dirty = false;
     buffer.destroy();
     Ok(())
 }
 
-fn paint(mmap: &mut MmapMut, w: u32, h: u32, prompt: &str, font: &Font) {
+/// Paint into a physical-resolution buffer. `w`/`h` are physical px and every
+/// logical dimension (box size, borders, font sizes, gap) is multiplied by
+/// `scale`, so the dialog keeps a constant logical size across HiDPI scales.
+fn paint(mmap: &mut MmapMut, w: u32, h: u32, scale: f64, prompt: &str, font: &Font) {
     let stride = w as usize * 4;
     // Dim background.
     let dim = [0u8, 0u8, 0u8, DIM_ALPHA];
@@ -376,9 +415,14 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, prompt: &str, font: &Font) {
         }
     }
 
-    // Centered dialog box.
-    let bw = BOX_W.min(w.saturating_sub(20));
-    let bh = BOX_H.min(h.saturating_sub(20));
+    let sc = |v: u32| ((v as f64) * scale).round() as u32;
+    let prompt_px = PROMPT_SIZE_PX * scale as f32;
+    let hint_px = HINT_SIZE_PX * scale as f32;
+
+    // Centered dialog box (physical px). The 20px logical margin scales too.
+    let margin = sc(20);
+    let bw = sc(BOX_W).min(w.saturating_sub(margin));
+    let bh = sc(BOX_H).min(h.saturating_sub(margin));
     let bx0 = ((w.saturating_sub(bw)) / 2) as i32;
     let by0 = ((h.saturating_sub(bh)) / 2) as i32;
     let bx1 = bx0 + bw as i32;
@@ -393,22 +437,22 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, prompt: &str, font: &Font) {
         by0,
         bx1,
         by1,
-        BOX_BORDER as i32,
+        sc(BOX_BORDER).max(1) as i32,
         BOX_BORDER_COLOR,
     );
 
     // Prompt + hint, both centered horizontally inside the box.
-    let prompt_metrics = measure_line(font, PROMPT_SIZE_PX, prompt);
-    let hint_metrics = measure_line(font, HINT_SIZE_PX, HINT_LINE);
+    let prompt_metrics = measure_line(font, prompt_px, prompt);
+    let hint_metrics = measure_line(font, hint_px, HINT_LINE);
 
-    let prompt_band = line_band(font, PROMPT_SIZE_PX);
-    let hint_band = line_band(font, HINT_SIZE_PX);
-    let gap = 12.0_f32;
+    let prompt_band = line_band(font, prompt_px);
+    let hint_band = line_band(font, hint_px);
+    let gap = 12.0_f32 * scale as f32;
     let total = prompt_band + gap + hint_band;
     let top = by0 as f32 + (bh as f32 - total) / 2.0;
 
-    let prompt_baseline = (top + font_ascent(font, PROMPT_SIZE_PX)).round() as i32;
-    let hint_baseline = (top + prompt_band + gap + font_ascent(font, HINT_SIZE_PX)).round() as i32;
+    let prompt_baseline = (top + font_ascent(font, prompt_px)).round() as i32;
+    let hint_baseline = (top + prompt_band + gap + font_ascent(font, hint_px)).round() as i32;
 
     let prompt_x = bx0 + ((bw as i32 - prompt_metrics) / 2);
     let hint_x = bx0 + ((bw as i32 - hint_metrics) / 2);
@@ -418,7 +462,7 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, prompt: &str, font: &Font) {
         w,
         h,
         font,
-        PROMPT_SIZE_PX,
+        prompt_px,
         prompt_x,
         prompt_baseline,
         prompt,
@@ -429,7 +473,7 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, prompt: &str, font: &Font) {
         w,
         h,
         font,
-        HINT_SIZE_PX,
+        hint_px,
         hint_x,
         hint_baseline,
         HINT_LINE,
@@ -650,6 +694,70 @@ impl Dispatch<WlBuffer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+// wp_viewporter / wp_viewport / wp_fractional_scale_manager_v1 are request-only.
+impl Dispatch<WpViewporter, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewporter,
+        _: <WpViewporter as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewport, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpViewport,
+        _: <WpViewport as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+/// Identifies which output a `wp_fractional_scale_v1` object belongs to.
+struct FractionalData {
+    idx: usize,
+}
+
+impl Dispatch<WpFractionalScaleV1, FractionalData> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as Proxy>::Event,
+        data: &FractionalData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // `scale` is the ratio in 1/120ths (e.g. 180 == 1.5x).
+            let s = scale as f64 / 120.0;
+            if let Some(entry) = state.outputs.get_mut(data.idx) {
+                if entry.scale != s {
+                    entry.scale = s;
+                    entry.dirty = true;
+                }
+            }
+        }
     }
 }
 
