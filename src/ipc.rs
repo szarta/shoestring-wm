@@ -98,10 +98,15 @@ impl ShoestringWm {
 
 impl Server {
     fn bind(loop_handle: LoopHandle<'static, ShoestringWm>) -> Result<Self> {
-        let socket_path = std::env::var_os(SOCKET_ENV)
-            .map(PathBuf::from)
-            .or_else(default_socket_path)
-            .context("neither $SHOESTRING_WM_SOCKET nor $XDG_RUNTIME_DIR+$WAYLAND_DISPLAY set")?;
+        // Listen at the path derived from our own WAYLAND_DISPLAY (set to our
+        // socket name just before start_ipc). We deliberately do NOT honor an
+        // inherited $SHOESTRING_WM_SOCKET: that variable is how *clients*
+        // locate a socket, so a nested WM that inherited it from the host
+        // session would otherwise bind — and unlink (below) — the host
+        // compositor's live socket. start_ipc re-exports SOCKET_ENV to our
+        // own path for the children we spawn.
+        let socket_path = default_socket_path()
+            .context("cannot derive IPC socket path: $XDG_RUNTIME_DIR or $WAYLAND_DISPLAY unset")?;
 
         // Stale socket from a previous (crashed) run would make bind() fail
         // with EADDRINUSE. Remove it unconditionally; if a *live* WM owns it

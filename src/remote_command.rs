@@ -31,7 +31,13 @@ use crate::state::ShoestringWm;
 pub struct Pending {
     pub client: Rc<RefCell<crate::ipc::Client>>,
     pub client_id: crate::ipc::ClientId,
+    /// Kept solely so a timeout can `kill()` it; we never `wait()` it (the
+    /// global SIGCHLD reaper does that — see `main::install_sigchld_autoreap`).
     child: Child,
+    /// PID, used to match the reaped-status record from the SIGCHLD drain.
+    pid: i32,
+    /// Exit status, once the reaper has delivered it. `None` until then.
+    exit_status: Option<std::process::ExitStatus>,
     stdout_buf: Vec<u8>,
     stderr_buf: Vec<u8>,
     stdout_open: bool,
@@ -91,12 +97,15 @@ impl ShoestringWm {
             .stderr
             .take()
             .expect("piped stderr must exist on spawn");
+        let pid = child.id() as i32;
 
         let pending_id = self.next_remote_command_id();
         let pending = Pending {
             client,
             client_id,
             child,
+            pid,
+            exit_status: None,
             stdout_buf: Vec::new(),
             stderr_buf: Vec::new(),
             stdout_open: true,
@@ -139,22 +148,32 @@ impl ShoestringWm {
         id
     }
 
-    /// Pipe source callback: one of stdout/stderr hit EOF. When both
-    /// are drained, reap the child and reply.
+    /// Pipe source callback: one of stdout/stderr hit EOF. Marks the
+    /// stream closed, then attempts to finalize.
     fn on_command_pipe_closed(&mut self, pending_id: u64, kind: PipeKind) {
-        let done = match self.pending_commands.get_mut(&pending_id) {
-            Some(p) => {
-                match kind {
-                    PipeKind::Stdout => p.stdout_open = false,
-                    PipeKind::Stderr => p.stderr_open = false,
-                }
-                !p.stdout_open && !p.stderr_open
-            }
+        match self.pending_commands.get_mut(&pending_id) {
+            Some(p) => match kind {
+                PipeKind::Stdout => p.stdout_open = false,
+                PipeKind::Stderr => p.stderr_open = false,
+            },
             None => return,
-        };
-        if done {
-            self.finalize_remote_command(pending_id);
         }
+        self.maybe_finalize_remote_command(pending_id);
+    }
+
+    /// Called by the SIGCHLD drain (`note_child_reaped`) when a reaped pid
+    /// matches an in-flight command. Records the status, then attempts to
+    /// finalize. Returns `true` if the pid matched one of our children.
+    pub fn note_command_reaped(&mut self, pid: i32, status: std::process::ExitStatus) -> bool {
+        let Some((&pending_id, _)) = self.pending_commands.iter().find(|(_, p)| p.pid == pid)
+        else {
+            return false;
+        };
+        if let Some(p) = self.pending_commands.get_mut(&pending_id) {
+            p.exit_status = Some(status);
+        }
+        self.maybe_finalize_remote_command(pending_id);
+        true
     }
 
     /// Timer fired before the child exited. SIGKILL it; the pipe
@@ -175,10 +194,18 @@ impl ShoestringWm {
         p.timer_token = None;
     }
 
-    fn finalize_remote_command(&mut self, pending_id: u64) {
-        let Some(mut pending) = self.pending_commands.remove(&pending_id) else {
-            return;
+    /// Reply only once both pipes have drained *and* the exit status has
+    /// arrived from the reaper. Whichever of `on_command_pipe_closed` /
+    /// `note_command_reaped` lands last is the one that finalizes.
+    fn maybe_finalize_remote_command(&mut self, pending_id: u64) {
+        let ready = match self.pending_commands.get(&pending_id) {
+            Some(p) => !p.stdout_open && !p.stderr_open && p.exit_status.is_some(),
+            None => return,
         };
+        if !ready {
+            return;
+        }
+        let mut pending = self.pending_commands.remove(&pending_id).unwrap();
         if let Some(t) = pending.stdout_token.take() {
             self.loop_handle.remove(t);
         }
@@ -189,20 +216,13 @@ impl ShoestringWm {
             self.loop_handle.remove(t);
         }
 
-        let exit_code = match pending.child.wait() {
-            Ok(status) => status.code().unwrap_or(-1),
-            Err(e) => {
-                tracing::warn!(error = %e, "wait run_command failed");
-                let _ = crate::ipc::write_response(
-                    &pending.client,
-                    &Response::Error {
-                        message: format!("run_command: wait failed: {e}"),
-                    },
-                );
-                self.drop_ipc_client(pending.client_id);
-                return;
-            }
-        };
+        // SIGKILL on timeout (and other signal deaths) yield no exit code;
+        // -1 preserves the prior sentinel for "killed / no code".
+        let exit_code = pending
+            .exit_status
+            .expect("ready implies status present")
+            .code()
+            .unwrap_or(-1);
 
         let stdout = String::from_utf8_lossy(&pending.stdout_buf).into_owned();
         let stderr = String::from_utf8_lossy(&pending.stderr_buf).into_owned();

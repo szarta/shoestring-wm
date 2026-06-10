@@ -23,12 +23,26 @@ mod window_rules;
 mod workspace;
 mod xwayland;
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
+use std::sync::atomic::{AtomicI32, Ordering};
+
 use anyhow::Result;
 use clap::Parser;
-use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
+use smithay::reexports::{
+    calloop::{generic::Generic, EventLoop, Interest, LoopHandle, Mode, PostAction},
+    wayland_server::Display,
+};
 use tracing_subscriber::EnvFilter;
 
 use crate::state::ShoestringWm;
+
+/// Write end of the SIGCHLD self-pipe. The async-signal-safe reaper
+/// handler `write(2)`s one `(pid, raw_status)` record per reaped child
+/// here; the calloop drain source reads them back on the main thread.
+/// `-1` until [`install_sigchld_autoreap`] sets it.
+static REAP_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum BackendKind {
@@ -104,7 +118,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     init_tracing();
-    install_sigchld_autoreap();
+    let reap_read_fd = install_sigchld_autoreap();
 
     if cli.write_default_config {
         return write_default_config(cli.config.as_deref(), cli.force);
@@ -121,6 +135,11 @@ fn main() -> Result<()> {
 
     let mut state = ShoestringWm::new(&mut event_loop, display, config, config_path);
 
+    // Drain reaped-child statuses (pushed by the SIGCHLD handler) on the
+    // main thread so remote_command / remote_screenshot can collect a real
+    // exit status without racing the reaper to ECHILD.
+    register_reaper_drain(&state.loop_handle, reap_read_fd)?;
+
     if cli.enable_automation && !state.automation_enabled {
         state.automation_enabled = true;
         tracing::info!("automation gate forced on by --enable-automation");
@@ -136,6 +155,14 @@ fn main() -> Result<()> {
         }
     });
     tracing::info!(?backend, "starting backend");
+
+    // Only the real session compositor (TTY/udev) integrates with the
+    // surrounding session. The nested winit backend runs inside another
+    // compositor and must not push its WAYLAND_DISPLAY/DISPLAY into the
+    // shared systemd user manager — doing so retargets that session's
+    // socket-activated services (portals, ssh-tpm-agent, ...) at the
+    // nested instance's now-throwaway displays.
+    state.session_integration = matches!(backend, BackendKind::Tty);
 
     match backend {
         BackendKind::Winit => {
@@ -156,7 +183,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Point child processes at our socket.
+    // Point child processes at our socket. Process-env only, so this is
+    // safe even when nested — it affects this WM and its children, not the
+    // parent session.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
     // Push WAYLAND_DISPLAY into the systemd user manager so D-Bus-activated
@@ -164,7 +193,12 @@ fn main() -> Result<()> {
     // session wrapper already imported the static variables (XDG_CURRENT_DESKTOP,
     // XDG_SESSION_TYPE, PATH); this covers the dynamic one set just above.
     // DISPLAY is imported separately in xwayland.rs once XWayland is ready.
-    import_systemd_env(&["WAYLAND_DISPLAY"]);
+    // Skipped when nested so we don't clobber the host session's environment.
+    if state.session_integration {
+        import_systemd_env(&["WAYLAND_DISPLAY"]);
+    } else {
+        tracing::info!("nested backend: skipping systemd WAYLAND_DISPLAY import");
+    }
 
     // IPC socket goes up after WAYLAND_DISPLAY is exported so
     // default_socket_path() can resolve it.
@@ -230,14 +264,54 @@ fn write_default_config(path: Option<&std::path::Path>, force: bool) -> Result<(
 /// The previous SA_NOCLDWAIT approach caused POSIX-specified breakage:
 /// with SA_NOCLDWAIT set, *any* waitpid() call returns ECHILD immediately,
 /// which panicked inside smithay when it waited on the XWayland process.
-fn install_sigchld_autoreap() {
-    // SAFETY: the handler only calls waitpid and is async-signal-safe.
-    // We install it once before children are spawned.
+///
+/// Because this global reaper also collects the children that
+/// `remote_command` / `remote_screenshot` spawn, those helpers cannot call
+/// `child.wait()` themselves — they would race the handler to ECHILD. So the
+/// handler captures each child's raw wait-status and pushes a `(pid, status)`
+/// record through a self-pipe; [`register_reaper_drain`] reads them back on
+/// the main thread and routes the status to the matching pending request.
+/// Returns the read end of that self-pipe for the caller to register.
+fn install_sigchld_autoreap() -> RawFd {
+    // Self-pipe: the handler writes reaped statuses to `write`, the calloop
+    // drain reads them from `read`. O_NONBLOCK so a full pipe never blocks
+    // the handler (it drops the record instead — see below); O_CLOEXEC so
+    // children don't inherit it.
+    let mut fds = [0 as RawFd; 2];
+    let read_fd = unsafe {
+        if libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) != 0 {
+            let err = std::io::Error::last_os_error();
+            // Without the pipe we fall back to reap-only (no status routing);
+            // remote_command / remote_screenshot will then hang waiting for a
+            // status that never arrives. Loud warning, but keep running.
+            tracing::error!(error = %err, "SIGCHLD self-pipe creation failed; remote command/screenshot status routing disabled");
+            -1
+        } else {
+            REAP_WRITE_FD.store(fds[1], Ordering::SeqCst);
+            fds[0]
+        }
+    };
+
+    // SAFETY: the handler only calls async-signal-safe functions
+    // (waitpid, write, atomic load). We install it once before children
+    // are spawned.
     unsafe extern "C" fn sigchld_handler(_: libc::c_int) {
         loop {
-            let ret = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
-            if ret <= 0 {
+            let mut status: libc::c_int = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid <= 0 {
                 break;
+            }
+            let wfd = REAP_WRITE_FD.load(Ordering::SeqCst);
+            if wfd >= 0 {
+                // One record: [pid: i32, raw_status: i32], native-endian.
+                // 8 bytes ≤ PIPE_BUF, so the write is atomic; a failed or
+                // short write (e.g. EAGAIN on a full pipe) just drops the
+                // record — acceptable, the child is already reaped.
+                let record: [libc::c_int; 2] = [pid, status];
+                unsafe {
+                    libc::write(wfd, record.as_ptr() as *const libc::c_void, 8);
+                }
             }
         }
     }
@@ -253,6 +327,59 @@ fn install_sigchld_autoreap() {
             tracing::warn!(error = %err, "install_sigchld_autoreap failed; expect <defunct> in ps");
         }
     }
+
+    read_fd
+}
+
+/// Register the read end of the SIGCHLD self-pipe with calloop. On each
+/// wakeup it drains all buffered `(pid, raw_status)` records and hands each
+/// to [`ShoestringWm::note_child_reaped`], which routes it to the matching
+/// pending remote command/screenshot (or ignores fire-and-forget children).
+fn register_reaper_drain(handle: &LoopHandle<'static, ShoestringWm>, read_fd: RawFd) -> Result<()> {
+    if read_fd < 0 {
+        // Self-pipe creation failed earlier; nothing to drain.
+        return Ok(());
+    }
+    // SAFETY: read_fd is the unique owner of the pipe read end (the handler
+    // only ever holds the write end). calloop takes ownership via OwnedFd.
+    let owned = unsafe { OwnedFd::from_raw_fd(read_fd) };
+    let source = Generic::new(owned, Interest::READ, Mode::Level);
+    // Records can straddle reads, so carry an inter-callback remainder.
+    let mut leftover: Vec<u8> = Vec::new();
+    handle
+        .insert_source(source, move |_, fd, state| {
+            let raw = fd.as_raw_fd();
+            let mut buf = [0u8; 256];
+            loop {
+                let n =
+                    unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                if n > 0 {
+                    leftover.extend_from_slice(&buf[..n as usize]);
+                } else if n == 0 {
+                    break; // EOF: write end gone (process shutting down).
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    match err.kind() {
+                        std::io::ErrorKind::WouldBlock => break,
+                        std::io::ErrorKind::Interrupted => continue,
+                        _ => {
+                            tracing::warn!(error = %err, "reaper drain read failed");
+                            break;
+                        }
+                    }
+                }
+            }
+            while leftover.len() >= 8 {
+                let pid = i32::from_ne_bytes([leftover[0], leftover[1], leftover[2], leftover[3]]);
+                let status =
+                    i32::from_ne_bytes([leftover[4], leftover[5], leftover[6], leftover[7]]);
+                leftover.drain(..8);
+                state.note_child_reaped(pid, ExitStatus::from_raw(status));
+            }
+            Ok(PostAction::Continue)
+        })
+        .map_err(|e| anyhow::anyhow!("insert reaper drain source: {e}"))?;
+    Ok(())
 }
 
 fn import_systemd_env(vars: &[&str]) {

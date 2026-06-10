@@ -97,6 +97,14 @@ pub struct ShoestringWm {
     pub seat: Seat<Self>,
 
     pub ipc: Option<crate::ipc::Server>,
+    /// Whether this WM is the session compositor and may integrate with the
+    /// surrounding session — i.e. push `WAYLAND_DISPLAY` / `DISPLAY` into the
+    /// systemd user manager so D-Bus-activated services find them. True for
+    /// the TTY/udev backend; false for the nested winit backend, which runs
+    /// *inside* another session and must not clobber that session's
+    /// environment (or socket-activated services like ssh-tpm-agent). Set
+    /// from the chosen backend in `main`.
+    pub session_integration: bool,
     /// Runtime gate for remote-automation IPC methods (inject_key/text/click,
     /// future remote screenshot + command exec). Initialised from
     /// `general.automation_enabled` and overridable at runtime via
@@ -282,6 +290,9 @@ impl ShoestringWm {
             lock_session: None,
             seat,
             ipc: None,
+            // Default to the safe (non-integrating) stance; `main` flips this
+            // on for the real session backend once the backend is chosen.
+            session_integration: false,
             automation_enabled,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
@@ -304,6 +315,16 @@ impl ShoestringWm {
             xwayland_shell_state,
             primary_selection_state,
         }
+    }
+
+    /// Route a child reaped by the global SIGCHLD handler to whichever
+    /// in-flight remote request spawned it. Children we don't track
+    /// (autostart, bar, menus, XWayland, ...) match nothing and are simply
+    /// dropped — they only needed reaping to avoid zombies.
+    pub fn note_child_reaped(&mut self, pid: i32, status: std::process::ExitStatus) {
+        // Short-circuit: try screenshots first, then commands; a child that
+        // matches neither is a fire-and-forget helper we just let go.
+        let _ = self.note_screenshot_reaped(pid, status) || self.note_command_reaped(pid, status);
     }
 
     fn init_wayland_listener(
