@@ -226,18 +226,14 @@ libinput device tuning — touchpad and pointer behaviour you would otherwise
 set with udev/kernel rules. Settings are applied to every applicable device
 as it connects, and re-applied to all connected devices on config hot-reload.
 
-Every key is optional; an omitted key leaves libinput's own per-device
-default in place. A setting a device doesn't support (e.g. ``tap_to_click``
-on a wired mouse) is silently ignored for that device, so this single global
-section is safe across mixed hardware. **TTY/udev backend only** — the nested
-winit backend has no real input devices and ignores this section.
-
-.. note::
-
-   Only keys that are present are pushed to devices. *Deleting* a key and
-   reloading does not restore the default — the device keeps the last value
-   that was applied. To undo a setting without restarting, set it back to the
-   default value explicitly (e.g. ``accel_speed = 0.0``) and reload.
+The section is declarative: every key is optional, and an omitted key
+applies the device's libinput default. So editing or deleting a key and
+reloading takes effect right away — removing ``accel_speed`` snaps the
+pointer back to the default speed rather than leaving the last value. A
+setting a device doesn't support (e.g. ``tap_to_click`` on a wired mouse) is
+silently ignored for that device, so this single global section is safe
+across mixed hardware. **TTY/udev backend only** — the nested winit backend
+has no real input devices and ignores this section.
 
 .. list-table::
    :header-rows: 1

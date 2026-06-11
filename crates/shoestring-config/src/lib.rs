@@ -109,17 +109,15 @@ impl Default for Diagnostics {
 /// connect (and re-applied on config hot-reload), so touchpad/pointer
 /// behaviour can be set here instead of via udev/kernel rules.
 ///
-/// Every field is **optional**: an unset field leaves libinput's own
-/// per-device default untouched. A setting that a given device doesn't
-/// support (e.g. tap-to-click on a wired mouse) is silently ignored for that
-/// device, so a single global section is safe across mixed hardware. The
-/// settings apply only on the native TTY/udev backend; the nested winit
-/// backend has no real input devices and ignores this section.
-///
-/// Note: only set fields are pushed to devices. *Removing* a field and
-/// reloading does not reset it — the device keeps the last value applied
-/// until you set it explicitly (e.g. back to the default) or restart the
-/// session, where libinput re-opens devices with their own defaults.
+/// The section is **declarative**: every field is optional, and an unset
+/// field applies the device's own libinput default. Editing or *removing* a
+/// field and reloading therefore takes effect immediately — a removed field
+/// resets that knob to the default rather than leaving the last value. A
+/// setting a given device doesn't support (e.g. tap-to-click on a wired
+/// mouse) is silently ignored for that device, so a single global section is
+/// safe across mixed hardware. The settings apply only on the native TTY/udev
+/// backend; the nested winit backend has no real input devices and ignores
+/// this section.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
