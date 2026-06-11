@@ -133,6 +133,17 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "automation_status"}``
      - Read the current automation gate state without changing it.
        Reply is ``automation``.
+   * - ``{"type": "set_screen_capture", "enabled": true}``
+     - Flip the runtime screen-capture gate. When enabled the WM
+       advertises the ``zwlr_screencopy_manager_v1`` global so capture
+       tools (OBS, grim, the screen-share portal) can read the screen;
+       when disabled the global is withdrawn and any capture is refused.
+       Reply is ``screen_capture`` with the new state;
+       ``screen_capture_changed`` is broadcast when the value actually
+       changes. Not persisted to disk.
+   * - ``{"type": "screen_capture_status"}``
+     - Read the current screen-capture gate state without changing it.
+       Reply is ``screen_capture``.
    * - ``{"type": "reload_config"}``
      - Re-read the TOML config the WM was launched with and recompile
        the binding table. Broadcasts ``config_reloaded`` on success.
@@ -218,6 +229,10 @@ The server replies with a single JSON object tagged by ``type``:
 ``automation``
     ``{"type": "automation", "enabled": <bool>}``. Returned for both
     ``set_automation`` and ``automation_status``.
+
+``screen_capture``
+    ``{"type": "screen_capture", "enabled": <bool>}``. Returned for both
+    ``set_screen_capture`` and ``screen_capture_status``.
 
 ``screenshot``
     ``{"type": "screenshot", "path": "/absolute/path.png"}``.
@@ -335,6 +350,19 @@ Each event is tagged by ``type``.
 ``automation_changed``
     ``{"type": "automation_changed", "enabled": <bool>}``. Fired when
     the runtime automation gate flips.
+
+``screen_capture_changed``
+    ``{"type": "screen_capture_changed", "enabled": <bool>}``. Fired when
+    the runtime screen-capture gate flips — subscribers (e.g. a bar) can
+    surface whether capture is *possible* without polling.
+
+``screen_captured``
+    ``{"type": "screen_captured", "output": "<name>"}``. Fired when a
+    capture frame is actually delivered to a client — the live "your
+    screen is being read right now" signal, distinct from the gate merely
+    being enabled. Rate-limited by the WM (a few per second) so a high-FPS
+    cast doesn't flood subscribers; a bar can light a "recording" dot and
+    let it decay after the events stop.
 
 ``config_reloaded``
     ``{"type": "config_reloaded"}``. Fired after a successful config

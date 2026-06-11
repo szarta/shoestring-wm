@@ -155,6 +155,15 @@ fn create_frame(
         },
     );
 
+    // Screen-capture gate. The global is withdrawn when the gate is off, but a
+    // client that bound the manager beforehand keeps its proxy and could still
+    // reach here — so refuse explicitly. This is the authoritative check; the
+    // global's absence is just so capture can't be *discovered* when off.
+    if !state.screen_capture_enabled {
+        frame.failed();
+        return;
+    }
+
     if !ok || region_px.size.w <= 0 || region_px.size.h <= 0 {
         frame.failed();
         return;
@@ -188,6 +197,12 @@ impl Dispatch2<ZwlrScreencopyFrameV1, ShoestringWm> for ScreencopyFrameData {
         use zwlr_screencopy_frame_v1::Request;
         match request {
             Request::Copy { buffer } | Request::CopyWithDamage { buffer } => {
+                // Re-check the gate: the frame may have been created while
+                // capture was enabled and the gate flipped off since.
+                if !state.screen_capture_enabled {
+                    resource.failed();
+                    return;
+                }
                 let (region, stride, output) = {
                     let mut inner = self.inner.lock().unwrap();
                     if inner.used {
@@ -213,6 +228,8 @@ impl Dispatch2<ZwlrScreencopyFrameV1, ShoestringWm> for ScreencopyFrameData {
 
                 state.screencopy.pending.push(resource.clone());
                 state.kick_render_for_screencopy(&output);
+                // Live "your screen is being read right now" signal (throttled).
+                state.note_screen_capture(&output.name());
             }
             Request::Destroy => {}
             _ => {}

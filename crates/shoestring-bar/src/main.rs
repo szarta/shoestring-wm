@@ -74,6 +74,15 @@ const ENTRY_BG: u32 = DIM;
 const BAT_LOW: u32 = 0xFF_FF_AA_55;
 /// Battery indicator color at or below `battery_critical_threshold`. Red.
 const BAT_CRITICAL: u32 = 0xFF_FF_55_55;
+/// Fill for the capture chip while a frame was *just* read (live "your screen
+/// is being captured right now" signal). Red, matching the recording-light
+/// convention; distinct from the calmer accent used when capture is merely
+/// armed.
+const CAPTURE_ACTIVE: u32 = 0xFF_FF_33_33;
+/// How long the capture chip stays in its red "active" state after the last
+/// `screen_captured` event. Longer than the WM's ~400ms event throttle so a
+/// steady cast holds the light solid; the ~1Hz redraw clears it after.
+const CAPTURE_DOT_TTL: Duration = Duration::from_millis(1500);
 /// Horizontal text inset from the bar edges.
 const PADDING_X: i32 = 8;
 
@@ -156,6 +165,16 @@ struct State {
     /// "AUTO" chip next to the clock so the user can always tell at
     /// a glance that injected input / remote commands are allowed.
     automation_enabled: bool,
+    /// Runtime state of the WM's screen-capture gate. Sourced from
+    /// [`ipc_client::query_screen_capture`] at startup and updated by
+    /// `screen_capture_changed` events. When `true` the bar shows a "CAP"
+    /// chip so the user always knows screen capture is *possible*.
+    screen_capture_enabled: bool,
+    /// Wall-clock instant of the most recent `screen_captured` event, i.e.
+    /// the last time a frame was actually read. `Some` lights a live
+    /// "capturing now" dot that decays a short while after the events stop
+    /// (the ~1Hz redraw tick clears it). The strongest privacy signal.
+    last_capture: Option<Instant>,
     /// 1-based workspace for each window, keyed by ext-FT identifier.
     /// Populated from `window_opened` and updated by
     /// `window_moved_to_workspace`; ext-FT itself does not expose
@@ -379,6 +398,12 @@ fn run_session() -> Result<()> {
         false
     });
 
+    // Same bootstrap for the screen-capture gate.
+    let screen_capture_enabled = ipc_client::query_screen_capture().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc screen-capture query failed; assuming off");
+        false
+    });
+
     // Detect the battery source once at startup. If `battery_show` is
     // off, skip detection entirely so we don't even open the sysfs
     // dir on platforms where the user has opted out.
@@ -413,6 +438,8 @@ fn run_session() -> Result<()> {
         workspace_names,
         focused_id: None,
         automation_enabled,
+        screen_capture_enabled,
+        last_capture: None,
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
@@ -570,6 +597,18 @@ fn event_loop(
             state.dirty = true;
         }
 
+        // Decay the live capture indicator: once no `screen_captured` event
+        // has arrived for CAPTURE_DOT_TTL, drop back from the red "active"
+        // state. The ~1Hz poll tick below bounds how long the stale red
+        // lingers after a cast ends.
+        if state
+            .last_capture
+            .is_some_and(|t| t.elapsed() >= CAPTURE_DOT_TTL)
+        {
+            state.last_capture = None;
+            state.dirty = true;
+        }
+
         // Re-poll the battery at most once per second. The poll() call
         // below caps at 1000ms, so this naturally rate-limits to ~1Hz
         // without any timer plumbing. Only mark dirty when the reading
@@ -717,6 +756,18 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
                 state.automation_enabled = enabled;
                 state.dirty = true;
             }
+        }
+        IpcEvent::ScreenCaptureChanged { enabled } => {
+            if state.screen_capture_enabled != enabled {
+                state.screen_capture_enabled = enabled;
+                state.dirty = true;
+            }
+        }
+        IpcEvent::ScreenCaptured { .. } => {
+            // Refresh the live "capturing now" indicator; the event-loop tick
+            // clears it once captures stop (see CAPTURE_DOT_TTL).
+            state.last_capture = Some(Instant::now());
+            state.dirty = true;
         }
         IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::OutputAdded(_)
@@ -866,8 +917,50 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         None
     };
 
-    // Battery indicator: drawn immediately left of the AUTO chip (or
-    // left of the clock when AUTO is hidden). Skipped when no source
+    // Screen-capture indicator chip: drawn immediately left of the AUTO chip
+    // (or left of the clock when AUTO is hidden) whenever the WM's capture
+    // gate is ON, so the user can always tell screen capture is *possible*.
+    // It turns red while a frame is actually being read (the live "your
+    // screen is being captured right now" signal); otherwise it sits in the
+    // calmer accent color to mean "armed but idle".
+    let cap_chip_left = if state.screen_capture_enabled {
+        const CAP_LABEL: &str = "CAP";
+        let cap_pad = s(4);
+        let cap_gap = s(8);
+        let active = state
+            .last_capture
+            .is_some_and(|t| t.elapsed() < CAPTURE_DOT_TTL);
+        let label_w = measure_text(&state.font, font_px, CAP_LABEL);
+        let chip_w = label_w + cap_pad * 2;
+        let chip_right = auto_chip_left.unwrap_or(clock_x) - cap_gap;
+        let chip_left = chip_right - chip_w;
+        fill_rect(
+            &mut mmap,
+            pw,
+            ph,
+            chip_left,
+            s(2),
+            chip_w,
+            ph as i32 - s(4),
+            if active { CAPTURE_ACTIVE } else { ACCENT },
+        );
+        draw_text(
+            &mut mmap,
+            pw,
+            ph,
+            &state.font,
+            font_px,
+            chip_left + cap_pad,
+            CAP_LABEL,
+            fg,
+        );
+        Some(chip_left)
+    } else {
+        None
+    };
+
+    // Battery indicator: drawn immediately left of the capture/AUTO chips (or
+    // left of the clock when both are hidden). Skipped when no source
     // was detected or `battery_show = false` (which short-circuits
     // detection up in main).
     let battery_left = match (state.battery_source.as_ref(), state.battery_reading) {
@@ -875,7 +968,7 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
             let bat_gap = s(8);
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
-            let right_anchor = auto_chip_left.unwrap_or(clock_x);
+            let right_anchor = cap_chip_left.or(auto_chip_left).unwrap_or(clock_x);
             let bat_x = right_anchor - bat_gap - text_w;
             let color = battery::pick_color(
                 &reading,

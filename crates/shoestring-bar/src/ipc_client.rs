@@ -92,6 +92,21 @@ pub fn query_automation() -> Result<bool> {
     }
 }
 
+/// Send `Request::ScreenCaptureStatus`, return the current gate state.
+/// Used at startup so the capture indicator reflects reality before any
+/// `screen_capture_changed` event would arrive.
+pub fn query_screen_capture() -> Result<bool> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::ScreenCaptureStatus)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse screen-capture response")?;
+    match resp {
+        Response::ScreenCapture { enabled } => Ok(enabled),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Send `Request::Windows`, return the summary list. Used at startup to
 /// bootstrap per-window state (currently: workspace assignment) for any
 /// windows that already existed when the bar attached — `window_opened`

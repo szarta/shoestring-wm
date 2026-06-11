@@ -119,6 +119,19 @@ pub enum Request {
     /// Read the current automation gate state without changing it. Reply
     /// is [`Response::Automation`].
     AutomationStatus,
+    /// Toggle the runtime screen-capture gate (see
+    /// `general.screen_capture_enabled`). When enabled the WM advertises the
+    /// `zwlr_screencopy_manager_v1` global so capture tools (OBS, grim, the
+    /// portal screencast backend) can read the screen; when disabled the
+    /// global is withdrawn and any capture is refused. Reply is
+    /// [`Response::ScreenCapture`] with the new state; an
+    /// [`Event::ScreenCaptureChanged`] is broadcast when the value actually
+    /// flips. Not persisted to disk — the config file is the source of truth
+    /// at next start.
+    SetScreenCapture { enabled: bool },
+    /// Read the current screen-capture gate state without changing it. Reply
+    /// is [`Response::ScreenCapture`].
+    ScreenCaptureStatus,
     /// Capture a PNG screenshot via the WM's wlr-screencopy server. The
     /// WM spawns `shoestring-screenshot` on the user's behalf and replies
     /// with the resulting [`Response::Screenshot`] once the file is
@@ -350,6 +363,11 @@ pub enum Response {
     Automation {
         enabled: bool,
     },
+    /// Current state of the screen-capture gate. Returned for both
+    /// [`Request::SetScreenCapture`] and [`Request::ScreenCaptureStatus`].
+    ScreenCapture {
+        enabled: bool,
+    },
     /// Path of the PNG written by [`Request::Screenshot`]. Absolute,
     /// usually under `$XDG_PICTURES_DIR`.
     Screenshot {
@@ -459,6 +477,20 @@ pub enum Event {
     /// polling.
     AutomationChanged {
         enabled: bool,
+    },
+    /// Fired when the runtime screen-capture gate flips. Subscribers (e.g. a
+    /// bar widget) surface whether capture is *possible* without polling.
+    ScreenCaptureChanged {
+        enabled: bool,
+    },
+    /// Fired when a screen-capture frame is actually delivered to a client —
+    /// the live "your screen is being read right now" signal, distinct from
+    /// the gate merely being enabled. Rate-limited by the WM (at most a few
+    /// per second) so a 30fps cast doesn't flood subscribers; a bar can light
+    /// a "recording" dot and let it decay after the events stop. `output` is
+    /// the captured output's name.
+    ScreenCaptured {
+        output: String,
     },
     /// Fired after the WM re-reads its TOML config from disk — either via
     /// the [`Action::ReloadConfig`] keybind path or the file-watcher
@@ -633,6 +665,37 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"type":"automation_changed","enabled":true}"#
+        );
+    }
+
+    #[test]
+    fn screen_capture_request_response_event_shapes() {
+        let set = Request::SetScreenCapture { enabled: true };
+        assert_eq!(
+            serde_json::to_string(&set).unwrap(),
+            r#"{"type":"set_screen_capture","enabled":true}"#
+        );
+        let status = Request::ScreenCaptureStatus;
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            r#"{"type":"screen_capture_status"}"#
+        );
+        let resp = Response::ScreenCapture { enabled: false };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"screen_capture","enabled":false}"#
+        );
+        let ev = Event::ScreenCaptureChanged { enabled: true };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"screen_capture_changed","enabled":true}"#
+        );
+        let cap = Event::ScreenCaptured {
+            output: "eDP-1".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&cap).unwrap(),
+            r#"{"type":"screen_captured","output":"eDP-1"}"#
         );
     }
 

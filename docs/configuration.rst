@@ -103,6 +103,19 @@ The ``[general]`` section
        CLI flag ``--enable-automation`` and the runtime IPC
        ``set_automation`` both override this without writing back to
        disk — the config file stays the source of truth at next start.
+   * - ``screen_capture_enabled``
+     - bool
+     - ``false``
+     - Gate for screen capture via the ``zwlr_screencopy`` protocol — the
+       path tools like OBS, ``grim`` and the ``xdg-desktop-portal-wlr``
+       screencast backend use to read the screen. Off by default: unlike
+       X11, Wayland isolates clients, so leaving it off means a stray or
+       malicious client simply cannot capture the screen. When ``false``
+       the ``zwlr_screencopy_manager_v1`` global is not advertised and any
+       capture is refused. The runtime IPC ``set_screen_capture`` (and
+       ``shoestring-ctl screen-capture on``) override it without writing
+       to disk. Independent of the ``screenshot`` IPC request, which is
+       behind ``automation_enabled``.
    * - ``idle_notifications_enabled``
      - bool
      - ``false``
@@ -124,6 +137,7 @@ Example::
     lock_command = "shoestring-lock"
     autostart = ["shoestring-bar", "swww init"]
     automation_enabled = false
+    screen_capture_enabled = false
     idle_notifications_enabled = false
 
 The ``[workspaces]`` section

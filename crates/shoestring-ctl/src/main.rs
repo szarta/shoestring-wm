@@ -136,6 +136,15 @@ enum Command {
         #[command(subcommand)]
         action: AutomationAction,
     },
+    /// Read or toggle the runtime screen-capture gate. Controls whether the
+    /// `zwlr_screencopy` protocol is advertised, i.e. whether tools like OBS,
+    /// grim, or the screen-share portal can read the screen. Off by default;
+    /// not persisted to disk — the WM's config file is the source of truth at
+    /// next start.
+    ScreenCapture {
+        #[command(subcommand)]
+        action: ScreenCaptureAction,
+    },
     /// Run a command under the WM's environment (inherits
     /// WAYLAND_DISPLAY, SHOESTRING_WM_SOCKET, etc.) and print the
     /// captured stdout/stderr + exit code as JSON. Requires the
@@ -242,6 +251,17 @@ enum AutomationAction {
     Status,
 }
 
+#[derive(Debug, Subcommand)]
+enum ScreenCaptureAction {
+    /// Turn the gate ON. The `zwlr_screencopy` global is advertised and
+    /// capture tools can read the screen.
+    On,
+    /// Turn the gate OFF. The global is withdrawn and captures are refused.
+    Off,
+    /// Print the current state.
+    Status,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -288,6 +308,11 @@ fn main() -> Result<()> {
             AutomationAction::On => Request::SetAutomation { enabled: true },
             AutomationAction::Off => Request::SetAutomation { enabled: false },
             AutomationAction::Status => Request::AutomationStatus,
+        },
+        Command::ScreenCapture { action } => match action {
+            ScreenCaptureAction::On => Request::SetScreenCapture { enabled: true },
+            ScreenCaptureAction::Off => Request::SetScreenCapture { enabled: false },
+            ScreenCaptureAction::Status => Request::ScreenCaptureStatus,
         },
         Command::Screenshot { output, region } => {
             let region = region.as_deref().map(parse_region).transpose()?;

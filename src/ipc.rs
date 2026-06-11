@@ -370,6 +370,25 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 );
                 return true;
             }
+            Request::SetScreenCapture { enabled } => {
+                let changed = state.screen_capture_enabled != enabled;
+                state.set_screen_capture(enabled);
+                let _ = write_response(client, &Response::ScreenCapture { enabled });
+                if changed {
+                    tracing::info!(enabled, "screen-capture gate changed via ipc");
+                    state.emit_ipc(Event::ScreenCaptureChanged { enabled });
+                }
+                return true;
+            }
+            Request::ScreenCaptureStatus => {
+                let _ = write_response(
+                    client,
+                    &Response::ScreenCapture {
+                        enabled: state.screen_capture_enabled,
+                    },
+                );
+                return true;
+            }
             Request::Screenshot { output, region } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());

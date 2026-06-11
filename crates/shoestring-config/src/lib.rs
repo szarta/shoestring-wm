@@ -242,6 +242,20 @@ pub struct General {
     /// disk — the config file stays the source of truth at next start.
     #[serde(default)]
     pub automation_enabled: bool,
+    /// Gate for screen capture via the `zwlr_screencopy_v1` protocol — the
+    /// path external tools (OBS, grim, the xdg-desktop-portal-wlr screencast
+    /// backend) use to read your screen. Off by default: unlike X11, Wayland
+    /// isolates clients, and screencopy is the sanctioned exception, so
+    /// leaving it off means a stray or malicious client simply cannot capture
+    /// the screen. When `false` the `zwlr_screencopy_manager_v1` global is not
+    /// advertised at all *and* any capture request is refused. Flip it on (in
+    /// config for always-on, or at runtime via the `set_screen_capture` IPC /
+    /// `shoestring-ctl screen-capture on`) when you actually want to screen
+    /// share or record. The runtime toggle does not write back to disk — this
+    /// key stays the source of truth at next start. Does not affect the IPC
+    /// `screenshot` request (separately behind the automation gate).
+    #[serde(default)]
+    pub screen_capture_enabled: bool,
     /// Advertise the `ext_idle_notify_v1` global so clients (idle daemons,
     /// screen-dimmers, auto-lockers) can ask to be told after N ms of no
     /// input. Off by default: on a desktop that never travels, idle
@@ -282,6 +296,7 @@ impl Default for General {
             lock_command: default_lock_command(),
             autostart: default_autostart(),
             automation_enabled: false,
+            screen_capture_enabled: false,
             idle_notifications_enabled: false,
         }
     }
@@ -750,6 +765,18 @@ mod tests {
     fn automation_enabled_user_override() {
         let cfg: Config = toml::from_str("[general]\nautomation_enabled = true\n").unwrap();
         assert!(cfg.general.automation_enabled);
+    }
+
+    #[test]
+    fn screen_capture_defaults_off() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.general.screen_capture_enabled);
+    }
+
+    #[test]
+    fn screen_capture_enabled_user_override() {
+        let cfg: Config = toml::from_str("[general]\nscreen_capture_enabled = true\n").unwrap();
+        assert!(cfg.general.screen_capture_enabled);
     }
 
     #[test]

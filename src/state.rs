@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use shoestring_config::Config;
@@ -144,6 +144,17 @@ pub struct ShoestringWm {
     /// Never written back to disk; the config file stays the source of
     /// truth at next start.
     pub automation_enabled: bool,
+    /// Runtime gate for screen capture via `zwlr_screencopy_v1`. Initialised
+    /// from `general.screen_capture_enabled` and overridable at runtime via
+    /// `Request::SetScreenCapture`. When this flips, the screencopy manager
+    /// global is created/withdrawn ([`crate::screencopy::ScreencopyState`]).
+    /// Never written back to disk; the config file is the source of truth at
+    /// next start.
+    pub screen_capture_enabled: bool,
+    /// Throttle for [`shoestring_ipc::Event::ScreenCaptured`]: the
+    /// `Instant` of the last emitted live-capture event. `None` until the
+    /// first capture. Keeps a high-FPS cast from flooding subscribers.
+    pub last_screen_capture_event: Option<Instant>,
 
     /// In-flight `Request::Screenshot` subprocesses, keyed by an
     /// opaque counter. Entries are removed once the child has exited
@@ -269,9 +280,14 @@ impl ShoestringWm {
             managers: Vec::new(),
             heads: Vec::new(),
         };
+        // Screen capture is opt-in: only advertise the zwlr_screencopy manager
+        // global when the gate is on, so by default no client can even
+        // discover the capability. Toggled at runtime by `set_screen_capture`.
+        let screen_capture_enabled = config.general.screen_capture_enabled;
         let screencopy = crate::screencopy::ScreencopyState {
-            manager_global: dh
-                .create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData),
+            manager_global: screen_capture_enabled.then(|| {
+                dh.create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData)
+            }),
             pending: Vec::new(),
         };
         // wlr-gamma-control: advertise the manager so night-light tools can
@@ -364,6 +380,8 @@ impl ShoestringWm {
             // on for the real session backend once the backend is chosen.
             session_integration: false,
             automation_enabled,
+            screen_capture_enabled,
+            last_screen_capture_event: None,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),
@@ -762,6 +780,51 @@ impl ShoestringWm {
                     });
                 }
             }
+        }
+    }
+
+    /// Apply the screen-capture gate. Idempotent: brings the
+    /// `zwlr_screencopy_manager_v1` global into existence when `enabled` and
+    /// withdraws it when not, and updates [`Self::screen_capture_enabled`].
+    /// Withdrawing also fails any in-flight captures so a client doesn't hang,
+    /// and — because a client that bound the manager before withdrawal keeps
+    /// its proxy — the capture handler additionally refuses requests while the
+    /// gate is off (see [`crate::handlers::screencopy`]). The caller owns the
+    /// logging / `ScreenCaptureChanged` event (mirrors the automation gate).
+    pub fn set_screen_capture(&mut self, enabled: bool) {
+        self.screen_capture_enabled = enabled;
+        let dh = self.display_handle.clone();
+        if enabled {
+            if self.screencopy.manager_global.is_none() {
+                self.screencopy.manager_global = Some(
+                    dh.create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData),
+                );
+            }
+        } else {
+            if let Some(global) = self.screencopy.manager_global.take() {
+                dh.remove_global::<Self>(global);
+            }
+            for frame in self.screencopy.pending.drain(..) {
+                frame.failed();
+            }
+        }
+    }
+
+    /// Record that a capture frame was just requested and, throttled to a few
+    /// per second, broadcast [`shoestring_ipc::Event::ScreenCaptured`] so a
+    /// bar can show a live "your screen is being read" indicator (distinct
+    /// from the gate merely being enabled). The throttle keeps a 30/60-fps
+    /// cast from flooding subscribers.
+    pub fn note_screen_capture(&mut self, output_name: &str) {
+        let now = Instant::now();
+        let emit = self
+            .last_screen_capture_event
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(400));
+        if emit {
+            self.last_screen_capture_event = Some(now);
+            self.emit_ipc(shoestring_ipc::Event::ScreenCaptured {
+                output: output_name.to_string(),
+            });
         }
     }
 

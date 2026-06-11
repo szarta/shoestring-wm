@@ -41,9 +41,11 @@ pub struct ScreencopyManagerData;
 
 /// Container on `ShoestringWm` for the manager global + outstanding requests.
 pub struct ScreencopyState {
-    /// Held for the lifetime of the WM so the global stays advertised.
-    #[allow(dead_code)]
-    pub manager_global: GlobalId,
+    /// `Some` while the screen-capture gate is on — the manager global is
+    /// advertised iff this is set. Created/withdrawn at runtime by
+    /// [`crate::state::ShoestringWm::set_screen_capture`], which is what keeps
+    /// the protocol entirely absent (not merely inert) when capture is off.
+    pub manager_global: Option<GlobalId>,
     /// Frames whose `copy`/`copy_with_damage` request has come in and which
     /// are now waiting for the next render of their target output. Drained
     /// from the render path.
