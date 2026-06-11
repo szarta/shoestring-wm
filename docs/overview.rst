@@ -91,6 +91,9 @@ Implemented today:
   Xwayland Ready.
 - Layer-shell + foreign-toplevel-list (so the bar, menu, locker and
   notification helpers can attach).
+- wlr-foreign-toplevel-management (``zwlr_foreign_toplevel_management_v1``):
+  the writable taskbar protocol — waybar-style bars can activate, close,
+  minimize and maximize windows and read each window's state.
 - xcursor sprite rendering at the pointer.
 - IPC server with query + event-stream subscriptions, plus key/text/
   click injection, action dispatch, find-windows regex search, command

@@ -83,6 +83,11 @@ pub struct ShoestringWm {
     /// destroy is sufficient cleanup. Title/app_id changes are pushed in
     /// [`crate::handlers::compositor`]'s commit hook.
     pub foreign_toplevels: HashMap<Window, ForeignToplevelHandle>,
+    /// wlr-foreign-toplevel-management: the *writable* sibling of
+    /// `foreign_toplevels` (the read-only ext list). Lets waybar-style taskbars
+    /// activate/close/minimize/maximize windows and read their state. Hand-wired
+    /// (smithay ships no delegate); see [`crate::foreign_toplevel_mgmt`].
+    pub foreign_toplevel_mgmt: crate::foreign_toplevel_mgmt::ForeignToplevelMgmtState,
     pub shm_state: ShmState,
     // Held for the lifetime of the WM so their globals stay registered with the
     // display. wp_viewporter + wp_fractional_scale_manager_v1 let HiDPI clients
@@ -241,6 +246,18 @@ impl ShoestringWm {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
+        // wlr-foreign-toplevel-management: advertise v3 so taskbars can control
+        // windows (output_enter/leave need v1+, the handle interface is v3).
+        // Always-on (backend-agnostic, like the ext list above).
+        let foreign_toplevel_mgmt = crate::foreign_toplevel_mgmt::ForeignToplevelMgmtState {
+            manager_global: dh.create_global::<Self, _, _>(
+                3,
+                crate::foreign_toplevel_mgmt::ForeignToplevelManagerData,
+            ),
+            managers: Vec::new(),
+            handles: HashMap::new(),
+            last_outputs: HashMap::new(),
+        };
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
@@ -326,6 +343,7 @@ impl ShoestringWm {
             layer_shell_state,
             foreign_toplevel_list,
             foreign_toplevels: HashMap::new(),
+            foreign_toplevel_mgmt,
             shm_state,
             viewporter_state,
             fractional_scale_manager_state,
@@ -519,6 +537,8 @@ impl ShoestringWm {
 
         let id = self.foreign_toplevels.get(window).map(|h| h.identifier());
         self.emit_ipc(shoestring_ipc::Event::WindowFocused { id });
+        // The activated state bit moved — refresh every taskbar handle.
+        crate::foreign_toplevel_mgmt::broadcast_all(self);
     }
 
     /// Like [`focus_window`] but does not raise the window in the
@@ -548,6 +568,8 @@ impl ShoestringWm {
 
         let id = self.foreign_toplevels.get(window).map(|h| h.identifier());
         self.emit_ipc(shoestring_ipc::Event::WindowFocused { id });
+        // The activated state bit moved — refresh every taskbar handle.
+        crate::foreign_toplevel_mgmt::broadcast_all(self);
     }
 
     /// Clear keyboard focus and deactivate every mapped window. Used when
@@ -568,6 +590,8 @@ impl ShoestringWm {
             crate::window_ext::send_pending_configure(w);
         });
         self.emit_ipc(shoestring_ipc::Event::WindowFocused { id: None });
+        // Every window lost the activated bit — refresh all taskbar handles.
+        crate::foreign_toplevel_mgmt::broadcast_all(self);
     }
 
     /// Find a tracked window by its xdg toplevel surface. Considers both

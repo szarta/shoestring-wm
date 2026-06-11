@@ -36,6 +36,30 @@ pub fn send_pending_configure(window: &Window) {
     }
 }
 
+/// `(title, app_id)` for either an xdg toplevel or an X11 window. X11
+/// surfaces use their `WM_CLASS` second field as the app_id equivalent —
+/// the same thing window rules match and the bar surfaces as the app
+/// label. Empty strings when the client hasn't set them yet.
+pub fn window_title_app_id(window: &Window) -> (String, String) {
+    use smithay::wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData};
+    if let Some(toplevel) = window.toplevel() {
+        return with_states(toplevel.wl_surface(), |states| {
+            let Some(data) = states.data_map.get::<XdgToplevelSurfaceData>() else {
+                return (String::new(), String::new());
+            };
+            let g = data.lock().unwrap();
+            (
+                g.title.clone().unwrap_or_default(),
+                g.app_id.clone().unwrap_or_default(),
+            )
+        });
+    }
+    if let Some(x11) = window.x11_surface() {
+        return (x11.title(), x11.class());
+    }
+    (String::new(), String::new())
+}
+
 /// Ask the client to close `window`. xdg sends `xdg_toplevel.close`;
 /// X11 sends `WM_DELETE_WINDOW` (or terminates the client if the
 /// window opts out of the protocol).

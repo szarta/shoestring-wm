@@ -6,6 +6,7 @@ mod config_watcher;
 mod confirm;
 mod cursor;
 mod drawing;
+mod foreign_toplevel_mgmt;
 #[cfg(feature = "tty")]
 mod gamma_control;
 mod grabs;

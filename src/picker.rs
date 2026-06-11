@@ -17,7 +17,10 @@
 use std::{cell::RefCell, rc::Rc};
 
 use shoestring_ipc::{Response, WindowSummary};
-use smithay::{reexports::wayland_server::protocol::wl_surface::WlSurface, utils::SERIAL_COUNTER};
+use smithay::{
+    desktop::Window, reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::SERIAL_COUNTER,
+};
 
 use crate::{
     ipc::{Client, ClientId},
@@ -168,11 +171,19 @@ impl ShoestringWm {
             .find(|(_, h)| h.identifier() == id)
             .map(|(w, _)| w.clone())
             .ok_or_else(|| format!("no window with id {id:?}"))?;
+        self.activate_window(&window);
+        Ok(())
+    }
 
+    /// Bring `window` to the foreground: restore it from the minimized stack if
+    /// needed, switch to its workspace if it lives elsewhere, then run the same
+    /// focus/raise/activate path as a click. Shared by the IPC `focus_window`
+    /// (by FT id) and the foreign-toplevel-management `activate` request.
+    pub fn activate_window(&mut self, window: &Window) {
         // Minimized → re-map at its saved rect on the active workspace
         // before doing anything else, so the workspace-switch and
         // focus paths see it as a live element.
-        if let Some(rect) = self.layout.take_minimized(&window) {
+        if let Some(rect) = self.layout.take_minimized(window) {
             let active = self.workspaces.active();
             self.space.map_element(window.clone(), rect.loc, true);
             self.workspaces.assign(window.clone(), active, rect.loc);
@@ -182,7 +193,7 @@ impl ShoestringWm {
         let target_ws = self
             .workspaces
             .windows_on_any()
-            .find(|(w, _)| w == &window)
+            .find(|(w, _)| w == window)
             .map(|(_, ws)| ws);
         if let Some(ws) = target_ws {
             if ws != self.workspaces.active() {
@@ -190,8 +201,7 @@ impl ShoestringWm {
             }
         }
 
-        self.focus_window(&window);
-        Ok(())
+        self.focus_window(window);
     }
 }
 

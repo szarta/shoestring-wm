@@ -118,6 +118,7 @@ Working today:
 - Configurable focus model: click-to-focus (default), focus-follows-mouse, sloppy.
 - XWayland integration: X11 toplevels (e.g. GIMP, Inkscape) map alongside Wayland windows; class/title window rules apply; clipboard + primary selection bridged.
 - Layer-shell + foreign-toplevel-list (bar/menu/lock/notification enablement).
+- wlr-foreign-toplevel-management (`zwlr_foreign_toplevel_management_v1`): waybar-style taskbars can activate / close / minimize / maximize windows and read their state.
 - xcursor sprite rendering.
 - Per-app window rules (app\_id / title → workspace, position, size).
 - Config hot-reload via `notify` watcher (and `shoestring-ctl reload-config`).

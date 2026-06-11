@@ -209,6 +209,8 @@ impl XwmHandler for ShoestringWm {
             .new_toplevel::<crate::state::ShoestringWm>(&title, &app_id);
         let id = handle.identifier();
         self.foreign_toplevels.insert(window.clone(), handle);
+        // Announce to wlr-foreign-toplevel-management taskbars before focusing.
+        crate::foreign_toplevel_mgmt::announce_to_all_managers(self, &window);
         self.emit_ipc(shoestring_ipc::Event::WindowOpened {
             id,
             title,
@@ -231,6 +233,8 @@ impl XwmHandler for ShoestringWm {
 
     fn unmapped_window(&mut self, _xwm: XwmId, surface: X11Surface) {
         if let Some(window) = self.space_element_for_x11(&surface) {
+            // Tell wlr-foreign-toplevel-management taskbars the window is gone.
+            crate::foreign_toplevel_mgmt::close_toplevel(self, &window);
             self.space.unmap_elem(&window);
             self.layout.forget(&window);
             self.workspaces.forget(&window);

@@ -63,6 +63,16 @@ impl LayoutManager {
         self.minimized.iter().any(|(mw, _)| mw == w)
     }
 
+    /// The window's current tile/maximize state (`Floating` if untracked).
+    /// Used by the foreign-toplevel-management protocol to report and toggle
+    /// the maximized bit without going through the focused-window path.
+    pub fn layout_state(&self, w: &Window) -> LayoutState {
+        self.meta
+            .get(w)
+            .map(|m| m.layout)
+            .unwrap_or(LayoutState::Floating)
+    }
+
     /// Remove `w` from the minimized stack (if present) and return the
     /// rect it was minimized at. Used when a specific window is being
     /// restored by name (e.g. a bar click on its entry) rather than by

@@ -272,19 +272,48 @@ impl ShoestringWm {
             tracing::debug!("minimize: no focused window");
             return;
         };
-        let loc = self.space.element_location(&window).unwrap_or_default();
+        self.minimize_window(&window);
+    }
+
+    /// Hide `window` regardless of focus. Used by the foreign-toplevel-management
+    /// protocol (a taskbar minimizing an arbitrary window) and by
+    /// [`Self::minimize_focused`].
+    pub fn minimize_window(&mut self, window: &Window) {
+        if self.layout.is_minimized(window) {
+            return;
+        }
+        let loc = self.space.element_location(window).unwrap_or_default();
         let size = window.geometry().size;
         let rect = Rectangle::new(loc, size);
         tracing::debug!(?loc, ?size, "minimize");
 
-        self.space.unmap_elem(&window);
+        self.space.unmap_elem(window);
         // Drop the window from its workspace's MRU history so a workspace
         // switch doesn't try to focus a hidden surface. Workspace assignment
         // is dropped too — Unminimize will re-assign to whatever workspace is
         // active at restore time.
-        self.workspaces.forget(&window);
-        self.clear_focus();
-        self.layout.push_minimized(window, rect);
+        self.workspaces.forget(window);
+        // Only surrender keyboard focus if we're hiding the focused window;
+        // minimizing a background window (via a taskbar) must not steal focus.
+        if self.focused_window().as_ref() == Some(window) {
+            self.clear_focus();
+        }
+        self.layout.push_minimized(window.clone(), rect);
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+    }
+
+    /// Restore a specific minimized `window` (taskbar click on its entry),
+    /// as opposed to the LIFO [`Self::unminimize_last`]. No-op if it isn't
+    /// on the minimized stack.
+    pub fn unminimize_window(&mut self, window: &Window) {
+        let Some(rect) = self.layout.take_minimized(window) else {
+            return;
+        };
+        let active = self.workspaces.active();
+        self.space.map_element(window.clone(), rect.loc, true);
+        self.workspaces.assign(window.clone(), active, rect.loc);
+        self.focus_window(window);
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
     }
 
     fn unminimize_last(&mut self) {

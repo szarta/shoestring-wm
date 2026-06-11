@@ -645,6 +645,9 @@ fn connector_connected(
     ));
 
     crate::output_management::broadcast_head_added(state, &output);
+    // A new output may now contain existing windows — refresh taskbar
+    // output_enter/leave.
+    crate::foreign_toplevel_mgmt::broadcast_all(state);
 
     // First render is scheduled as an idle task so we return out of this
     // event handler before touching the surface again.
@@ -669,6 +672,9 @@ fn connector_disconnected(
         crate::output_management::broadcast_head_removed(state, &surface.output);
         state.space.unmap_output(&surface.output);
         state.space.refresh();
+        // Windows that were on this output now report no output — refresh
+        // taskbar output_leave while the wl_output still resolves.
+        crate::foreign_toplevel_mgmt::broadcast_all(state);
         surface.output.leave_all();
         if let Some(global) = surface.global {
             state.display_handle.remove_global::<ShoestringWm>(global);
@@ -718,6 +724,9 @@ pub fn disable_output(state: &mut ShoestringWm, output: &Output) -> bool {
     crate::output_management::broadcast_head_removed(state, &surface.output);
     state.space.unmap_output(&surface.output);
     state.space.refresh();
+    // Windows that were on this output now report no output — refresh taskbar
+    // output_leave while the wl_output still resolves.
+    crate::foreign_toplevel_mgmt::broadcast_all(state);
     surface.output.leave_all();
     if let Some(global) = surface.global {
         state.display_handle.remove_global::<ShoestringWm>(global);

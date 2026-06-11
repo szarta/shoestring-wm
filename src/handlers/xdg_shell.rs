@@ -55,6 +55,9 @@ impl XdgShellHandler for ShoestringWm {
             .new_toplevel::<crate::state::ShoestringWm>("", "");
         let id = handle.identifier();
         self.foreign_toplevels.insert(window.clone(), handle);
+        // Announce to wlr-foreign-toplevel-management taskbars before focusing,
+        // so the new window has handles when focus_window broadcasts activation.
+        crate::foreign_toplevel_mgmt::announce_to_all_managers(self, &window);
         self.emit_ipc(shoestring_ipc::Event::WindowOpened {
             id,
             title: String::new(),
@@ -76,6 +79,8 @@ impl XdgShellHandler for ShoestringWm {
             // Already cleaned up somewhere — nothing to do.
             return;
         };
+        // Tell wlr-foreign-toplevel-management taskbars the window is gone.
+        crate::foreign_toplevel_mgmt::close_toplevel(self, &window);
         self.space.unmap_elem(&window);
         self.layout.forget(&window);
         self.workspaces.forget(&window);
