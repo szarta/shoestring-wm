@@ -90,6 +90,16 @@ its helpers by bare name), then add the session file and its wrapper::
     sudo install -Dm644 resources/shoestring-wm.desktop \
         /usr/share/wayland-sessions/shoestring-wm.desktop
 
+For desktop-portal integration (file dialogs, screen sharing), also drop
+in the portal backend-selection config so the portal frontend knows which
+backend to use for our session::
+
+    sudo install -Dm644 resources/shoestring-wm-portals.conf \
+        /usr/share/xdg-desktop-portal/shoestring-wm-portals.conf
+
+See :doc:`portals` for the prerequisites (``xdg-desktop-portal-wlr``,
+PipeWire) and the optional xdpw output-chooser config.
+
 (The ``.deb`` / ``.rpm`` packages do all of this for you.)
 
 Distro packages

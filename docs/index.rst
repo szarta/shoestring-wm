@@ -20,6 +20,7 @@ This is the user guide. For source-level architecture notes see
    running
    configuration
    bindings
+   portals
    ipc
 
 .. toctree::
