@@ -115,6 +115,29 @@ systemd-logind):
 ``Ctrl+Alt+F1..F12`` switches the active VT, as on getty / X /
 Openbox. The binds are wired by default.
 
+Running as a systemd user service
+----------------------------------
+
+The display-manager session path (the ``.desktop`` entry, see
+:doc:`install`) is the usual way in. If you instead drive the session
+from a ``systemd`` **user unit** — e.g. a ``shoestring-wm.service`` that
+other units order themselves ``After=`` — declare it ``Type=notify``:
+
+.. code-block:: ini
+
+    [Service]
+    Type=notify
+    ExecStart=/usr/local/bin/shoestring-wm-session
+
+The compositor sends ``sd_notify(READY=1)`` once the wayland socket and
+IPC are listening and ``$WAYLAND_DISPLAY`` has been pushed into the user
+manager. systemd holds units ordered ``After=`` this service in the
+*activating* state until then, so companion services (bars, portals,
+notification daemons) no longer race ``$WAYLAND_DISPLAY``. The signal is
+keyed on ``$NOTIFY_SOCKET``, which systemd sets only for a ``Type=notify``
+service — it is a harmless no-op for the display-manager and nested-winit
+launch paths, which leave it unset.
+
 Autostart and companion processes
 ---------------------------------
 

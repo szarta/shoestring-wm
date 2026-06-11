@@ -29,6 +29,7 @@ mod workspace;
 mod xwayland;
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -240,6 +241,15 @@ fn main() -> Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "shoestring-wm ready",
     );
+
+    // Tell systemd we're up. No-op unless launched as a `Type=notify`
+    // service (i.e. `$NOTIFY_SOCKET` is set), so it's safe in every other
+    // launch path — display-manager session, nested dev, non-systemd. Done
+    // here, after the wayland socket + IPC are listening and the env is
+    // pushed into the user manager, so units ordered `After=` us don't race
+    // `$WAYLAND_DISPLAY`. Must come before autostart: it also strips
+    // `$NOTIFY_SOCKET` so spawned children don't inherit it.
+    sd_notify_ready();
 
     for entry in &state.config.general.autostart {
         spawn_client(entry);
@@ -456,6 +466,85 @@ fn import_systemd_env(vars: &[&str]) {
     }
 }
 
+/// Signal readiness to systemd via the `sd_notify` protocol (`READY=1`).
+///
+/// systemd sets `$NOTIFY_SOCKET` for a `Type=notify` service and holds units
+/// ordered `After=` us in the "activating" state until we send this datagram;
+/// without it they start the instant we `exec`, racing `$WAYLAND_DISPLAY`.
+/// niri/cosmic-comp do the same. A no-op when `$NOTIFY_SOCKET` is unset — the
+/// display-manager session path, nested dev instances, and non-systemd systems
+/// all leave it unset — so it is always safe to call unconditionally.
+///
+/// Hand-rolled over libc rather than pulling in the `sd_notify` crate: the
+/// protocol is a single datagram to an `AF_UNIX`/`SOCK_DGRAM` socket and we
+/// already lean on libc throughout. After signalling we drop `$NOTIFY_SOCKET`
+/// from our environment (systemd convention) so spawned children — autostart
+/// entries, helpers — don't inherit it and accidentally notify the manager on
+/// our behalf.
+fn sd_notify_ready() {
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    // Children must not inherit NOTIFY_SOCKET; strip it whether or not the
+    // send below succeeds.
+    std::env::remove_var("NOTIFY_SOCKET");
+
+    let path = socket.as_bytes();
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let cap = std::mem::size_of_val(&addr.sun_path);
+    // Path-based names need room for a trailing NUL; abstract names (leading
+    // '@', mapped to a NUL byte) use the leading slot instead. Either way the
+    // name must fit within sun_path.
+    if path.is_empty() || path.len() >= cap {
+        tracing::warn!(
+            "sd_notify: NOTIFY_SOCKET length {} out of range for sun_path",
+            path.len()
+        );
+        return;
+    }
+
+    let base = std::mem::size_of::<libc::sa_family_t>();
+    let dst = addr.sun_path.as_mut_ptr() as *mut u8;
+    let addrlen = unsafe {
+        if path[0] == b'@' {
+            // Abstract namespace: leading NUL (already zeroed), name follows.
+            let name = &path[1..];
+            std::ptr::copy_nonoverlapping(name.as_ptr(), dst.add(1), name.len());
+            (base + 1 + name.len()) as libc::socklen_t
+        } else {
+            std::ptr::copy_nonoverlapping(path.as_ptr(), dst, path.len());
+            // Include the trailing NUL in the address length for pathname sockets.
+            (base + path.len() + 1) as libc::socklen_t
+        }
+    };
+
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        tracing::warn!(error = %std::io::Error::last_os_error(), "sd_notify: socket() failed");
+        return;
+    }
+    let msg = b"READY=1\n";
+    let sent = unsafe {
+        libc::sendto(
+            fd,
+            msg.as_ptr() as *const libc::c_void,
+            msg.len(),
+            libc::MSG_NOSIGNAL,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            addrlen,
+        )
+    };
+    unsafe {
+        libc::close(fd);
+    }
+    if sent < 0 {
+        tracing::warn!(error = %std::io::Error::last_os_error(), "sd_notify: sendto() failed");
+    } else {
+        tracing::info!("sd_notify READY=1 sent");
+    }
+}
+
 fn spawn_client(command: &str) {
     let mut parts = command.split_whitespace();
     let Some(program) = parts.next() else { return };
@@ -463,5 +552,41 @@ fn spawn_client(command: &str) {
     match std::process::Command::new(program).args(&args).spawn() {
         Ok(child) => tracing::info!(pid = child.id(), %command, "spawned client"),
         Err(e) => tracing::warn!(%command, error = %e, "failed to spawn client"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixDatagram;
+
+    /// `sd_notify_ready()` sends exactly `READY=1\n` to the path-based socket
+    /// named by `$NOTIFY_SOCKET`, then strips the variable so children don't
+    /// inherit it; with the variable unset it is a no-op. Both cases live in
+    /// one test because `$NOTIFY_SOCKET` is process-global and cargo runs
+    /// tests in parallel.
+    #[test]
+    fn sd_notify_ready_behavior() {
+        // Unset → no-op, no panic.
+        std::env::remove_var("NOTIFY_SOCKET");
+        sd_notify_ready();
+
+        // Set → datagram delivered, then env stripped.
+        let path = std::env::temp_dir().join(format!("shoestring-sdnotify-{}.sock", unsafe {
+            libc::getpid()
+        }));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixDatagram::bind(&path).expect("bind notify socket");
+
+        std::env::set_var("NOTIFY_SOCKET", &path);
+        sd_notify_ready();
+
+        assert!(std::env::var_os("NOTIFY_SOCKET").is_none());
+
+        let mut buf = [0u8; 64];
+        let n = listener.recv(&mut buf).expect("recv READY datagram");
+        assert_eq!(&buf[..n], b"READY=1\n");
+
+        let _ = std::fs::remove_file(&path);
     }
 }
