@@ -115,6 +115,11 @@ impl Default for Diagnostics {
 /// device, so a single global section is safe across mixed hardware. The
 /// settings apply only on the native TTY/udev backend; the nested winit
 /// backend has no real input devices and ignores this section.
+///
+/// Note: only set fields are pushed to devices. *Removing* a field and
+/// reloading does not reset it — the device keeps the last value applied
+/// until you set it explicitly (e.g. back to the default) or restart the
+/// session, where libinput re-opens devices with their own defaults.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Input {

@@ -232,6 +232,13 @@ on a wired mouse) is silently ignored for that device, so this single global
 section is safe across mixed hardware. **TTY/udev backend only** — the nested
 winit backend has no real input devices and ignores this section.
 
+.. note::
+
+   Only keys that are present are pushed to devices. *Deleting* a key and
+   reloading does not restore the default — the device keeps the last value
+   that was applied. To undo a setting without restarting, set it back to the
+   default value explicitly (e.g. ``accel_speed = 0.0``) and reload.
+
 .. list-table::
    :header-rows: 1
    :widths: 18 14 68
