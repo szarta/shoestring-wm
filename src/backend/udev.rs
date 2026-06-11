@@ -41,6 +41,7 @@ use smithay::{
             CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType,
         },
         egl::{self, context::ContextPriority, EGLContext, EGLDevice, EGLDisplay},
+        input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             element::surface::WaylandSurfaceRenderElement,
@@ -111,6 +112,11 @@ pub struct UdevData {
     /// libinput context — stored here so the VT watchdog can call resume()
     /// without needing a closure-captured copy.
     pub libinput: smithay::reexports::input::Libinput,
+    /// Every currently-connected libinput device, tracked from
+    /// `DeviceAdded`/`DeviceRemoved`. libinput has no device enumeration, so
+    /// we keep this list to re-apply `[input]` settings on config hot-reload.
+    /// Devices are ref-counted handles; a clone points at the same device.
+    pub devices: Vec<smithay::reexports::input::Device>,
     /// Our own session-active flag.  Set true at startup and by every
     /// successful activation (ActivateSession handler or VT watchdog), set
     /// false in PauseSession.  Using this instead of session.is_active() lets
@@ -215,6 +221,7 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
     tracing::info!(vt_active, "session active at startup");
 
     state.udev = Some(UdevData {
+        devices: Vec::new(),
         session,
         libinput: libinput_context,
         vt_active,
@@ -229,7 +236,25 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
 
     event_loop
         .handle()
-        .insert_source(libinput_backend, move |event, _, state| {
+        .insert_source(libinput_backend, move |mut event, _, state| {
+            // Apply `[input]` settings as devices appear, and keep a roster so
+            // a config hot-reload can re-apply to everything already connected.
+            // Done here (not in the generic `process_input_event`) because only
+            // the libinput backend yields real `input::Device`s to configure.
+            match &mut event {
+                InputEvent::DeviceAdded { device } => {
+                    crate::input_config::apply(device, &state.config.input);
+                    if let Some(udev) = state.udev.as_mut() {
+                        udev.devices.push(device.clone());
+                    }
+                }
+                InputEvent::DeviceRemoved { device } => {
+                    if let Some(udev) = state.udev.as_mut() {
+                        udev.devices.retain(|d| d != device);
+                    }
+                }
+                _ => {}
+            }
             state.process_input_event(event);
         })
         .map_err(|e| anyhow::anyhow!("insert libinput source: {e}"))?;

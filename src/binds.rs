@@ -127,6 +127,7 @@ mod tests {
             window_rules: Vec::new(),
             outputs: Default::default(),
             diagnostics: Default::default(),
+            input: Default::default(),
         }
     }
 

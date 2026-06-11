@@ -25,9 +25,9 @@ keybindings, reports any problems, and exits without starting a compositor
 It exits non-zero on a parse error or a missing file, making it suitable
 for a pre-commit hook or a CI check on a dotfiles repo.
 
-The file has five sections — ``[general]``, ``[workspaces]``,
-``[[bindings]]``, ``[[window_rules]]``, and ``[outputs.<name>]`` — all
-optional. Missing sections take built-in defaults.
+The file's main sections — ``[general]``, ``[workspaces]``,
+``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, and
+``[input]`` — are all optional. Missing sections take built-in defaults.
 
 The ``[general]`` section
 -------------------------
@@ -218,6 +218,80 @@ Example — a HiDPI laptop panel at 2× on the left, 1× external on the right::
    Connector names are printed at WM startup in the log (``tracing``
    at ``INFO`` level) and in the ``output-added`` IPC event. Running
    ``shoestring-ctl outputs`` shows the current list.
+
+The ``[input]`` section
+-----------------------
+
+libinput device tuning — touchpad and pointer behaviour you would otherwise
+set with udev/kernel rules. Settings are applied to every applicable device
+as it connects, and re-applied to all connected devices on config hot-reload.
+
+Every key is optional; an omitted key leaves libinput's own per-device
+default in place. A setting a device doesn't support (e.g. ``tap_to_click``
+on a wired mouse) is silently ignored for that device, so this single global
+section is safe across mixed hardware. **TTY/udev backend only** — the nested
+winit backend has no real input devices and ignores this section.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 14 68
+
+   * - Key
+     - Type
+     - Meaning
+   * - ``tap_to_click``
+     - bool
+     - Tap the touchpad to click.
+   * - ``tap_button_map``
+     - enum
+     - Which button 1/2/3-finger taps emit: ``left-right-middle`` or
+       ``left-middle-right``.
+   * - ``tap_and_drag``
+     - bool
+     - A tap immediately followed by a finger-down starts a drag.
+   * - ``drag_lock``
+     - bool
+     - Keep dragging after the finger lifts until the next tap.
+   * - ``natural_scroll``
+     - bool
+     - Reverse the scroll direction (content follows the fingers).
+   * - ``scroll_method``
+     - enum
+     - How scrolling is produced: ``two-finger``, ``edge``,
+       ``on-button-down``, or ``none``.
+   * - ``scroll_button``
+     - integer
+     - evdev button code used for ``on-button-down`` scrolling (e.g.
+       ``274`` for middle).
+   * - ``click_method``
+     - enum
+     - Clickpad software-button method: ``button-areas`` or
+       ``clickfinger``.
+   * - ``accel_speed``
+     - float
+     - Pointer acceleration speed in ``[-1.0, 1.0]`` (``0`` = libinput
+       default). Out-of-range values are clamped.
+   * - ``accel_profile``
+     - enum
+     - ``adaptive`` (speed-dependent, the usual default) or ``flat``
+       (constant factor, no acceleration).
+   * - ``disable_while_typing``
+     - bool
+     - Suppress the touchpad while typing on the internal keyboard.
+   * - ``left_handed``
+     - bool
+     - Swap the left and right buttons.
+   * - ``middle_emulation``
+     - bool
+     - Treat a simultaneous left+right click as a middle click.
+
+Example — a typical laptop touchpad::
+
+    [input]
+    tap_to_click = true
+    natural_scroll = true
+    disable_while_typing = true
+    accel_speed = 0.3
 
 Bindings
 --------

@@ -55,6 +55,8 @@ pub struct Config {
     pub outputs: BTreeMap<String, OutputConfig>,
     #[serde(default)]
     pub diagnostics: Diagnostics,
+    #[serde(default)]
+    pub input: Input,
 }
 
 /// `[diagnostics]` — the metrics/observability subsystem. When `enabled`
@@ -101,6 +103,106 @@ impl Default for Diagnostics {
             fd_warn_fraction: default_fd_warn_fraction(),
         }
     }
+}
+
+/// `[input]` — libinput device tuning applied to every applicable device on
+/// connect (and re-applied on config hot-reload), so touchpad/pointer
+/// behaviour can be set here instead of via udev/kernel rules.
+///
+/// Every field is **optional**: an unset field leaves libinput's own
+/// per-device default untouched. A setting that a given device doesn't
+/// support (e.g. tap-to-click on a wired mouse) is silently ignored for that
+/// device, so a single global section is safe across mixed hardware. The
+/// settings apply only on the native TTY/udev backend; the nested winit
+/// backend has no real input devices and ignores this section.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Input {
+    /// Tap-to-click on touchpads (`libinput_device_config_tap_set_enabled`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_to_click: Option<bool>,
+    /// Which button 1/2/3-finger taps map to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_button_map: Option<TapButtonMap>,
+    /// Tap-and-drag (a tap immediately followed by a finger-down drags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_and_drag: Option<bool>,
+    /// Drag-lock: keep dragging after the finger lifts, until the next tap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drag_lock: Option<bool>,
+    /// Natural (reversed) scrolling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub natural_scroll: Option<bool>,
+    /// How scroll events are produced (two-finger, edge, on-button, none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_method: Option<ScrollMethod>,
+    /// Button used for on-button-down scrolling (evdev button code, e.g.
+    /// `274` for middle). Only meaningful with `scroll_method = "on-button-down"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_button: Option<u32>,
+    /// How software button clicks are emulated on clickpads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_method: Option<ClickMethod>,
+    /// Pointer acceleration speed in `[-1.0, 1.0]` (0 = libinput default).
+    /// Clamped to that range when applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accel_speed: Option<f64>,
+    /// Pointer acceleration profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accel_profile: Option<AccelProfile>,
+    /// Disable the touchpad while typing on the internal keyboard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_while_typing: Option<bool>,
+    /// Swap left/right buttons for left-handed use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_handed: Option<bool>,
+    /// Middle-button emulation (left+right chord → middle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub middle_emulation: Option<bool>,
+}
+
+/// Which physical button each tap maps to (libinput `TapButtonMap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TapButtonMap {
+    /// 1/2/3-finger tap → left/right/middle.
+    LeftRightMiddle,
+    /// 1/2/3-finger tap → left/middle/right.
+    LeftMiddleRight,
+}
+
+/// Scroll method (libinput `ScrollMethod`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScrollMethod {
+    /// Never emit scroll events from motion (wheels still scroll).
+    None,
+    /// Two fingers on the touchpad.
+    TwoFinger,
+    /// Dragging along the bottom/right edge.
+    Edge,
+    /// Holding `scroll_button` and moving.
+    OnButtonDown,
+}
+
+/// Software click-emulation method on clickpads (libinput `ClickMethod`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClickMethod {
+    /// Bottom-of-pad button areas.
+    ButtonAreas,
+    /// Number of fingers down picks the button.
+    Clickfinger,
+}
+
+/// Pointer acceleration profile (libinput `AccelProfile`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccelProfile {
+    /// Speed-dependent acceleration (libinput default for most devices).
+    Adaptive,
+    /// Constant factor, no acceleration.
+    Flat,
 }
 
 /// Workspace layout. `count` controls how many workspaces exist (and
@@ -613,6 +715,7 @@ impl Config {
             window_rules: Vec::new(),
             outputs: BTreeMap::new(),
             diagnostics: Diagnostics::default(),
+            input: Input::default(),
         }
     }
 }
@@ -796,6 +899,80 @@ mod tests {
         assert!(!cfg.diagnostics.enabled);
         assert_eq!(cfg.diagnostics.sample_interval_ms, 5000);
         assert_eq!(cfg.diagnostics.fd_warn_fraction, 0.9);
+    }
+
+    #[test]
+    fn input_defaults_all_unset() {
+        let cfg: Config = toml::from_str("").unwrap();
+        let i = cfg.input;
+        assert!(i.tap_to_click.is_none());
+        assert!(i.natural_scroll.is_none());
+        assert!(i.accel_speed.is_none());
+        assert!(i.accel_profile.is_none());
+        assert!(i.scroll_method.is_none());
+        assert!(i.click_method.is_none());
+        assert!(i.tap_button_map.is_none());
+    }
+
+    #[test]
+    fn input_parses_all_fields() {
+        let toml_src = "\
+[input]
+tap_to_click = true
+tap_button_map = \"left-right-middle\"
+tap_and_drag = true
+drag_lock = false
+natural_scroll = true
+scroll_method = \"two-finger\"
+scroll_button = 274
+click_method = \"clickfinger\"
+accel_speed = 0.3
+accel_profile = \"flat\"
+disable_while_typing = true
+left_handed = false
+middle_emulation = true
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let i = cfg.input;
+        assert_eq!(i.tap_to_click, Some(true));
+        assert_eq!(i.tap_button_map, Some(TapButtonMap::LeftRightMiddle));
+        assert_eq!(i.tap_and_drag, Some(true));
+        assert_eq!(i.drag_lock, Some(false));
+        assert_eq!(i.natural_scroll, Some(true));
+        assert_eq!(i.scroll_method, Some(ScrollMethod::TwoFinger));
+        assert_eq!(i.scroll_button, Some(274));
+        assert_eq!(i.click_method, Some(ClickMethod::Clickfinger));
+        assert_eq!(i.accel_speed, Some(0.3));
+        assert_eq!(i.accel_profile, Some(AccelProfile::Flat));
+        assert_eq!(i.disable_while_typing, Some(true));
+        assert_eq!(i.left_handed, Some(false));
+        assert_eq!(i.middle_emulation, Some(true));
+    }
+
+    #[test]
+    fn input_enums_use_kebab_case() {
+        let cfg: Config =
+            toml::from_str("[input]\nscroll_method = \"on-button-down\"\naccel_profile = \"adaptive\"\ntap_button_map = \"left-middle-right\"\n").unwrap();
+        assert_eq!(cfg.input.scroll_method, Some(ScrollMethod::OnButtonDown));
+        assert_eq!(cfg.input.accel_profile, Some(AccelProfile::Adaptive));
+        assert_eq!(
+            cfg.input.tap_button_map,
+            Some(TapButtonMap::LeftMiddleRight)
+        );
+    }
+
+    #[test]
+    fn input_unknown_field_rejected() {
+        let err = toml::from_str::<Config>("[input]\nfast_pointer = true\n").unwrap_err();
+        assert!(
+            err.to_string().contains("fast_pointer") || err.to_string().contains("unknown field"),
+            "error should point at the bad key: {err}"
+        );
+    }
+
+    #[test]
+    fn input_unknown_enum_value_rejected() {
+        assert!(toml::from_str::<Config>("[input]\naccel_profile = \"turbo\"\n").is_err());
     }
 
     #[test]

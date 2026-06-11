@@ -84,6 +84,7 @@ impl ShoestringWm {
                 }
                 self.config = cfg;
                 self.bindings = table;
+                self.reapply_input_config();
                 tracing::info!(path = %path.display(), "config reloaded");
                 self.emit_ipc(shoestring_ipc::Event::ConfigReloaded);
                 Ok(())
@@ -94,6 +95,24 @@ impl ShoestringWm {
             }
         }
     }
+
+    /// Re-push the `[input]` section to every connected libinput device after
+    /// a reload, so edits to e.g. `accel_speed` take effect without a restart.
+    /// udev/TTY backend only — the nested winit backend has no real devices.
+    /// The config is cloned first so `self.udev` can be borrowed mutably
+    /// without colliding with the `self.config` borrow.
+    #[cfg(feature = "tty")]
+    fn reapply_input_config(&mut self) {
+        let input_cfg = self.config.input.clone();
+        if let Some(udev) = self.udev.as_mut() {
+            for device in &mut udev.devices {
+                crate::input_config::apply(device, &input_cfg);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "tty"))]
+    fn reapply_input_config(&mut self) {}
 
     /// Notify-thread callback path: a filesystem event arrived. (Re-)arm
     /// the debounce timer; the previous one is removed so an unbroken
