@@ -902,6 +902,10 @@ fn do_activate_session(state: &mut ShoestringWm) {
         }
         udev.vt_active = true;
     }
+    // A VT switch resets every CRTC's gamma to identity, so re-push the ramps
+    // night-light clients had set. Done now that vt_active is true (so
+    // apply_gamma actually touches the hardware) and before the render kicks.
+    state.reapply_all_gamma();
     // Kick a render on every surface.  Deferred via insert_idle so calloop
     // finishes the current event before we submit DRM commits.
     let nodes: Vec<DrmNode> = state
@@ -926,6 +930,216 @@ fn do_activate_session(state: &mut ShoestringWm) {
                 state.render_surface(node, crtc);
             });
         }
+    }
+}
+
+/// DRM glue for `zwlr_gamma_control_v1`. These resolve a Wayland output to its
+/// CRTC and read/apply/restore the hardware gamma ramp. They live here (rather
+/// than in [`crate::gamma_control`]) because they reach into private udev
+/// state — `UdevData::backends` and the per-CRTC `DrmDevice`. Dispatch in
+/// [`crate::handlers::gamma_control`] calls them.
+impl ShoestringWm {
+    /// Resolve `output` to `(node, crtc, gamma_size)`. `None` if the output is
+    /// not a KMS/udev output or its CRTC advertises no gamma table.
+    pub(crate) fn gamma_target_for_output(
+        &self,
+        output: &Output,
+    ) -> Option<(DrmNode, crtc::Handle, u32)> {
+        let id = output.user_data().get::<UdevOutputId>()?;
+        let backend = self.udev.as_ref()?.backends.get(&id.device_id)?;
+        let size = backend
+            .drm_output_manager
+            .device()
+            .get_crtc(id.crtc)
+            .ok()?
+            .gamma_length();
+        (size != 0).then_some((id.device_id, id.crtc, size))
+    }
+
+    /// Read the CRTC's current gamma ramp, used to snapshot the table before a
+    /// client takes over so it can be restored on release.
+    pub(crate) fn read_gamma(
+        &self,
+        node: DrmNode,
+        crtc: crtc::Handle,
+        size: u32,
+    ) -> Option<crate::gamma_control::GammaRamp> {
+        let backend = self.udev.as_ref()?.backends.get(&node)?;
+        let dev = backend.drm_output_manager.device();
+        let mut red = vec![0u16; size as usize];
+        let mut green = vec![0u16; size as usize];
+        let mut blue = vec![0u16; size as usize];
+        dev.get_gamma(crtc, &mut red, &mut green, &mut blue).ok()?;
+        Some(crate::gamma_control::GammaRamp { red, green, blue })
+    }
+
+    /// Push a gamma ramp to the CRTC. Returns `false` only on a real DRM
+    /// failure; while we don't hold DRM master (VT switched away) it stores
+    /// nothing here and reports success — [`Self::reapply_all_gamma`] pushes it
+    /// once we're active again.
+    pub(crate) fn apply_gamma(
+        &self,
+        node: DrmNode,
+        crtc: crtc::Handle,
+        ramp: &crate::gamma_control::GammaRamp,
+    ) -> bool {
+        let Some(udev) = self.udev.as_ref() else {
+            return false;
+        };
+        if !udev.vt_active {
+            return true;
+        }
+        let Some(backend) = udev.backends.get(&node) else {
+            return false;
+        };
+        match backend.drm_output_manager.device().set_gamma(
+            crtc,
+            &ramp.red,
+            &ramp.green,
+            &ramp.blue,
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(?node, ?crtc, error = ?e, "set_gamma failed");
+                false
+            }
+        }
+    }
+
+    /// Re-apply every client's gamma ramp. Called after a VT switch back in,
+    /// which resets the CRTC gamma to identity.
+    pub(crate) fn reapply_all_gamma(&self) {
+        for ctrl in self.gamma_control.controls.values() {
+            if let Some(ramp) = &ctrl.current {
+                self.apply_gamma(ctrl.node, ctrl.crtc, ramp);
+            }
+        }
+    }
+
+    /// Release the control for `name` *if* `resource` is its current holder,
+    /// restoring the output's original gamma. A stale resource (one already
+    /// transferred away to a newer client) is ignored so it can't clobber the
+    /// new holder.
+    pub(crate) fn release_gamma_control(
+        &mut self,
+        name: &str,
+        resource: &smithay::reexports::wayland_protocols_wlr::gamma_control::v1::server::zwlr_gamma_control_v1::ZwlrGammaControlV1,
+    ) {
+        let is_active = self
+            .gamma_control
+            .controls
+            .get(name)
+            .is_some_and(|c| c.owner.is_client(resource));
+        if !is_active {
+            return;
+        }
+        let ctrl = self.gamma_control.controls.remove(name).unwrap();
+        self.apply_gamma(ctrl.node, ctrl.crtc, &ctrl.original);
+    }
+
+    /// IPC `set-gamma`: compute a ramp from a color `temperature` (Kelvin),
+    /// `brightness` and `gamma`, and apply it to `filter` (one output by name,
+    /// or all gamma-capable outputs when `None`). Takes over from any
+    /// wlr-gamma-control client on those outputs (the client is `failed`).
+    /// Returns the number of outputs set, or an error string.
+    pub(crate) fn set_gamma_ipc(
+        &mut self,
+        filter: Option<&str>,
+        temperature: u32,
+        brightness: f64,
+        gamma: f64,
+    ) -> Result<usize, String> {
+        if !(1000..=25000).contains(&temperature) {
+            return Err(format!(
+                "temperature {temperature}K out of range (1000–25000)"
+            ));
+        }
+        if !(0.1..=1.0).contains(&brightness) {
+            return Err(format!("brightness {brightness} out of range (0.1–1.0)"));
+        }
+        if !(0.1..=10.0).contains(&gamma) {
+            return Err(format!("gamma {gamma} out of range (0.1–10.0)"));
+        }
+
+        // Collect targets first (shared borrows of self.space + self.udev),
+        // then mutate self.gamma_control below.
+        let targets: Vec<(String, DrmNode, crtc::Handle, u32)> = self
+            .space
+            .outputs()
+            .filter(|o| filter.is_none_or(|f| o.name() == f))
+            .filter_map(|o| {
+                self.gamma_target_for_output(o)
+                    .map(|(n, c, s)| (o.name(), n, c, s))
+            })
+            .collect();
+
+        if targets.is_empty() {
+            return Err(match filter {
+                Some(f) => format!("no gamma-capable output named '{f}'"),
+                None => "no gamma-capable outputs".into(),
+            });
+        }
+
+        let mut applied = 0;
+        for (name, node, crtc, size) in targets {
+            let ramp =
+                crate::gamma_control::ramp_from_temperature(size, temperature, brightness, gamma);
+            // Transfer: fail any client owner, carry its original ramp forward.
+            let prior_original = self.gamma_control.controls.remove(&name).map(|old| {
+                if let crate::gamma_control::GammaOwner::Client(r) = &old.owner {
+                    r.failed();
+                }
+                old.original
+            });
+            let original = prior_original
+                .or_else(|| self.read_gamma(node, crtc, size))
+                .unwrap_or_else(|| crate::gamma_control::GammaRamp::identity(size));
+            let ok = self.apply_gamma(node, crtc, &ramp);
+            self.gamma_control.controls.insert(
+                name,
+                crate::gamma_control::GammaControl {
+                    owner: crate::gamma_control::GammaOwner::Ipc,
+                    node,
+                    crtc,
+                    size,
+                    original,
+                    current: Some(ramp),
+                },
+            );
+            if ok {
+                applied += 1;
+            }
+        }
+
+        if applied == 0 {
+            return Err("the DRM driver rejected the gamma ramp".into());
+        }
+        Ok(applied)
+    }
+
+    /// IPC `reset-gamma`: drop the WM's own (IPC-set) gamma on `filter` (one
+    /// output, or all when `None`), restoring each output's original ramp.
+    /// Leaves wlr-gamma-control clients alone. Returns the number cleared.
+    pub(crate) fn reset_gamma_ipc(&mut self, filter: Option<&str>) -> usize {
+        let names: Vec<String> = self
+            .gamma_control
+            .controls
+            .iter()
+            .filter(|(name, c)| {
+                matches!(c.owner, crate::gamma_control::GammaOwner::Ipc)
+                    && filter.is_none_or(|f| name.as_str() == f)
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        let mut count = 0;
+        for name in names {
+            if let Some(ctrl) = self.gamma_control.controls.remove(&name) {
+                self.apply_gamma(ctrl.node, ctrl.crtc, &ctrl.original);
+                count += 1;
+            }
+        }
+        count
     }
 }
 

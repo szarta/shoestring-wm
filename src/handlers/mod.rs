@@ -1,4 +1,6 @@
 mod compositor;
+#[cfg(feature = "tty")]
+mod gamma_control;
 mod layer_shell;
 mod output_management;
 mod screencopy;

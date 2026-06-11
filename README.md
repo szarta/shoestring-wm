@@ -125,12 +125,15 @@ Working today:
 - `ext-session-lock-v1` + PAM unlock via `shoestring-lock`, with an
   xscreensaver-style maze-2d screensaver underneath the prompt.
 - wlr-screencopy + region picker + IPC `screenshot` request.
+- `zwlr_gamma_control_v1` (night-light: gammastep/wlsunset) plus IPC
+  `set_gamma`/`reset_gamma` for color-temperature control without a
+  client.
 - IPC server: queries, event stream, `inject_key`/`text`/`click`,
   `move_mouse` + `pointer_position`,
   `focus_window`, `pick_window` + `close_window`, `find_windows`
   (title/app_id regex filter), `dispatch_action` (fire any keybind
-  server-side), `run_command`, `screenshot`, `set_automation` gate,
-  hot-reload trigger.
+  server-side), `run_command`, `screenshot`, `set_gamma`/`reset_gamma`,
+  `set_automation` gate, hot-reload trigger.
 - Modal confirm dialog primitive (`shoestring-confirm`); wraps `Quit` today.
 - Action helper scripts (volume, brightness, logout) wired to XF86 keys.
 

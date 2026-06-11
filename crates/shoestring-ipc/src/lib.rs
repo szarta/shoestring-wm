@@ -254,6 +254,42 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_ms: Option<u32>,
     },
+    /// Set a per-output gamma ramp from a color temperature, server-side —
+    /// the WM computes the ramp and drives the CRTC, so no external
+    /// night-light daemon (wlsunset/gammastep) is needed. Shares the same
+    /// exclusivity as `zwlr_gamma_control_v1`: this takes over any client
+    /// currently controlling the output (that client is `failed`), and a
+    /// later client likewise takes over from this.
+    ///
+    /// - `output: None` → every gamma-capable output; `Some(name)` → just
+    ///   that one.
+    /// - `temperature` is in Kelvin (1000–25000); ~6500 is neutral, lower is
+    ///   warmer.
+    /// - `brightness` (0.1–1.0, default 1.0) scales all channels.
+    /// - `gamma` (0.1–10.0, default 1.0) is the ramp exponent.
+    ///
+    /// KMS-only: works on the udev/TTY backend. Not gated by automation (a
+    /// benign display tweak, like [`Request::ReloadConfig`]). Reply is
+    /// [`Response::Ok`] or [`Response::Error`] (bad range / no capable
+    /// output / DRM rejection / non-TTY build).
+    SetGamma {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        temperature: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brightness: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gamma: Option<f64>,
+    },
+    /// Clear the WM's own (IPC-set) gamma and restore the output(s) to their
+    /// original ramp. `output: None` clears every output the WM set;
+    /// `Some(name)` clears just that one. Leaves wlr-gamma-control *clients*
+    /// untouched. Reply is [`Response::Ok`] (with the count) or
+    /// [`Response::Error`]. Not gated by automation.
+    ResetGamma {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
 }
 
 /// One sampled metric. `gauge` is an instantaneous reading that can go up

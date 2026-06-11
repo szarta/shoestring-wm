@@ -6,6 +6,8 @@ mod config_watcher;
 mod confirm;
 mod cursor;
 mod drawing;
+#[cfg(feature = "tty")]
+mod gamma_control;
 mod grabs;
 mod handlers;
 mod inject;

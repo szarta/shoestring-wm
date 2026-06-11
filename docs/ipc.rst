@@ -151,6 +151,25 @@ Each request is a JSON object with a ``type`` discriminator:
        milliseconds. Output is capped at 64 KiB per stream; extra bytes
        are drained but discarded and ``truncated`` is set. Reply is
        ``command_result``. Gated by the automation gate.
+   * - ``{"type": "set_gamma", "output": null, "temperature": 3000, "brightness": null, "gamma": null}``
+     - Drive the color temperature of an output's CRTC gamma ramp (the
+       same machinery ``zwlr_gamma_control_v1`` clients like gammastep
+       use). ``output`` is the output name (omit / null → every KMS
+       output). ``temperature`` is the whitepoint in kelvin
+       (1000–25000; 6500 ≈ neutral, lower = warmer). ``brightness``
+       (optional, 0.1–1.0, default 1.0) scales the ramp peak; ``gamma``
+       (optional, 0.1–10.0, default 1.0) is the gamma exponent. Takes
+       exclusive ownership of each target output, evicting any
+       wlr-gamma-control client holding it. KMS-only — returns ``error``
+       on a winit/non-DRM output or build. Reply is ``ok`` with the
+       count of outputs affected. **Not** gated by the automation gate.
+   * - ``{"type": "reset_gamma", "output": null}``
+     - Restore the original (pre-``set_gamma``) ramp on outputs whose
+       gamma this IPC owns and release them. ``output`` selects one by
+       name (omit / null → all IPC-owned outputs). Does not disturb
+       outputs currently held by a wlr-gamma-control client. Reply is
+       ``ok`` with the count restored. KMS-only. **Not** gated by the
+       automation gate.
 
 Injected key and click events bypass the WM's binding table — a scripted
 ``Super+q`` will NOT trigger the ``Quit`` binding. Use

@@ -203,6 +203,32 @@ enum Command {
         /// Bare name (e.g. `quit`) or JSON object literal.
         action: String,
     },
+    /// Set a per-output gamma ramp from a color temperature, server-side —
+    /// the WM drives the CRTC directly, so no night-light daemon is needed.
+    /// KMS-only (udev/TTY backend). Takes over any wlr-gamma-control client
+    /// on the affected output. Example: `set-gamma --temperature 3000`.
+    SetGamma {
+        /// Output name (e.g. `eDP-1`). Defaults to every gamma-capable output.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Color temperature in Kelvin (1000–25000). ~6500 is neutral, lower
+        /// is warmer.
+        #[arg(short, long)]
+        temperature: u32,
+        /// Overall brightness multiplier (0.1–1.0). Defaults to 1.0.
+        #[arg(short, long)]
+        brightness: Option<f64>,
+        /// Gamma exponent (0.1–10.0). Defaults to 1.0.
+        #[arg(short, long)]
+        gamma: Option<f64>,
+    },
+    /// Clear the WM's own (IPC-set) gamma and restore the output(s) to their
+    /// original ramp. Leaves wlr-gamma-control clients alone.
+    ResetGamma {
+        /// Output name. Defaults to every output the WM set.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -275,6 +301,18 @@ fn main() -> Result<()> {
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,
         },
+        Command::SetGamma {
+            output,
+            temperature,
+            brightness,
+            gamma,
+        } => Request::SetGamma {
+            output,
+            temperature,
+            brightness,
+            gamma,
+        },
+        Command::ResetGamma { output } => Request::ResetGamma { output },
     };
 
     let mut writer = stream.try_clone()?;

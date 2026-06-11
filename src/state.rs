@@ -100,6 +100,11 @@ pub struct ShoestringWm {
     pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
     pub session_lock_state: SessionLockManagerState,
+    /// wlr-gamma-control state: the manager global plus the live per-output
+    /// controls. KMS-only (gamma ramps are a CRTC property), so it exists only
+    /// in `tty`-feature builds; the DRM glue lives in [`crate::backend::udev`].
+    #[cfg(feature = "tty")]
+    pub gamma_control: crate::gamma_control::GammaControlState,
     /// `Some` only when `general.idle_notifications_enabled` is set, in which
     /// case the `ext_idle_notify_v1` global is advertised and this holds its
     /// state. When `None` the global was never created, so no client can bind
@@ -252,6 +257,16 @@ impl ShoestringWm {
                 .create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData),
             pending: Vec::new(),
         };
+        // wlr-gamma-control: advertise the manager so night-light tools can
+        // drive per-output gamma. Honored only for KMS outputs; binding it for
+        // a non-udev output fails gracefully (see the handler). Version 1.
+        #[cfg(feature = "tty")]
+        let gamma_control = crate::gamma_control::GammaControlState {
+            manager_global: dh
+                .create_global::<Self, _, _>(1, crate::gamma_control::GammaControlManagerData),
+            controls: std::collections::HashMap::new(),
+        };
+
         // Filter: every client may see ext-session-lock — clients without
         // permission to actually lock just receive `finished` when they try.
         // Our own gating (single locker at a time) lives in the handler.
@@ -320,6 +335,8 @@ impl ShoestringWm {
             output_management,
             screencopy,
             session_lock_state,
+            #[cfg(feature = "tty")]
+            gamma_control,
             idle_notifier,
             lock_session: None,
             seat,

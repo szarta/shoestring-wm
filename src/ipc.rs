@@ -601,7 +601,70 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::SetGamma {
+                output,
+                temperature,
+                brightness,
+                gamma,
+            } => {
+                let resp = set_gamma_response(state, output, temperature, brightness, gamma);
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::ResetGamma { output } => {
+                let resp = reset_gamma_response(state, output);
+                let _ = write_response(client, &resp);
+                return true;
+            }
         }
+    }
+}
+
+/// Handle `Request::SetGamma`. Gamma is KMS-only, so this is a no-op error in
+/// builds without the `tty` backend.
+#[cfg(feature = "tty")]
+fn set_gamma_response(
+    state: &mut ShoestringWm,
+    output: Option<String>,
+    temperature: u32,
+    brightness: Option<f64>,
+    gamma: Option<f64>,
+) -> Response {
+    match state.set_gamma_ipc(
+        output.as_deref(),
+        temperature,
+        brightness.unwrap_or(1.0),
+        gamma.unwrap_or(1.0),
+    ) {
+        Ok(_) => Response::Ok,
+        Err(message) => Response::Error { message },
+    }
+}
+
+#[cfg(not(feature = "tty"))]
+fn set_gamma_response(
+    _state: &mut ShoestringWm,
+    _output: Option<String>,
+    _temperature: u32,
+    _brightness: Option<f64>,
+    _gamma: Option<f64>,
+) -> Response {
+    Response::Error {
+        message: "gamma control unavailable: this build has no KMS/TTY backend".into(),
+    }
+}
+
+/// Handle `Request::ResetGamma`. See [`set_gamma_response`] for the non-TTY case.
+#[cfg(feature = "tty")]
+fn reset_gamma_response(state: &mut ShoestringWm, output: Option<String>) -> Response {
+    state.reset_gamma_ipc(output.as_deref());
+    Response::Ok
+}
+
+#[cfg(not(feature = "tty"))]
+fn reset_gamma_response(_state: &mut ShoestringWm, _output: Option<String>) -> Response {
+    Response::Error {
+        message: "gamma control unavailable: this build has no KMS/TTY backend".into(),
     }
 }
 
