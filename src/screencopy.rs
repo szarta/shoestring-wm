@@ -2,20 +2,27 @@
 //!
 //! Smithay ships only the modern `ext-image-copy-capture-v1` delegate, so we
 //! wire `zwlr_screencopy_v1` manually. Clients (grim, grimshot, wf-recorder,
-//! OBS, our own shoestring-screenshot) bind the manager, request a capture
-//! for an output, and we render the scene into an offscreen GLES texture and
-//! read back the requested region into the client-provided wl_shm buffer.
+//! OBS, xdg-desktop-portal-wlr, our own shoestring-screenshot) bind the
+//! manager and request a capture for an output. We offer two buffer kinds:
 //!
-//! Why offscreen rather than capturing the scanout buffer: it works uniformly
-//! across winit (nested dev) and udev (TTY) without poking at backend
-//! framebuffer internals, and screencopy is rare enough that the extra render
-//! pass is fine.
+//! - **shm** (always): render the scene into an offscreen GLES texture and
+//!   read the requested region back into the client's wl_shm buffer.
+//! - **dmabuf** (udev/KMS, full-output only): bind the client's dmabuf as the
+//!   render target and paint the scene straight into it — no readback. This
+//!   is the path xdpw's screencast probe requires; it refuses shm-only
+//!   compositors. Advertised via the screencopy `linux_dmabuf` event, gated
+//!   on the dmabuf global existing (see [`crate::backend::udev`]).
+//!
+//! Why offscreen for shm rather than capturing the scanout buffer: it works
+//! uniformly across winit (nested dev) and udev (TTY) without poking at
+//! backend framebuffer internals, and shm screencopy is rare enough that the
+//! extra render pass is fine.
 
 use std::sync::{Arc, Mutex};
 
 use smithay::{
     backend::{
-        allocator::Fourcc,
+        allocator::{dmabuf::Dmabuf, Fourcc},
         renderer::{
             damage::OutputDamageTracker, element::RenderElement, gles::GlesTexture, Bind,
             ExportMem, ImportAll, ImportMem, Offscreen, Renderer, RendererSuper,
@@ -30,7 +37,10 @@ use smithay::{
         wayland_server::{backend::GlobalId, protocol::wl_buffer::WlBuffer, Resource},
     },
     utils::{Buffer as BufferCoord, Rectangle},
-    wayland::shm::{with_buffer_contents_mut, BufferAccessError},
+    wayland::{
+        dmabuf::get_dmabuf,
+        shm::{with_buffer_contents_mut, BufferAccessError},
+    },
 };
 
 /// Marker user-data for `ZwlrScreencopyManagerV1` resources. Empty — the
@@ -94,7 +104,13 @@ pub fn process_pending<R>(
     renderer: &mut R,
     cursor_elements: &[crate::drawing::PointerRenderElement<R>],
 ) where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer
+        + ImportAll
+        + ImportMem
+        + ExportMem
+        + Bind<GlesTexture>
+        + Bind<Dmabuf>
+        + Offscreen<GlesTexture>,
     <R as RendererSuper>::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
     crate::drawing::PointerRenderElement<R>: RenderElement<R>,
@@ -120,9 +136,6 @@ pub fn process_pending<R>(
         return;
     }
 
-    // Render the scene into an offscreen texture sized to the output's
-    // physical pixels. We only do this once even if multiple frames are
-    // pending for the same output.
     let mode = match output.current_mode() {
         Some(m) => m,
         None => {
@@ -135,12 +148,79 @@ pub fn process_pending<R>(
     let output_size = mode.size;
     let scale = output.current_scale().fractional_scale();
 
+    // Split frames by buffer kind. dmabuf-backed frames render straight into
+    // the client buffer; shm-backed frames go through the offscreen-texture
+    // readback below. A frame whose buffer vanished (client raced us) is
+    // failed here.
+    let mut shm_frames: Vec<ZwlrScreencopyFrameV1> = Vec::new();
+    let mut dmabuf_frames: Vec<(ZwlrScreencopyFrameV1, Dmabuf)> = Vec::new();
+    for frame in for_us {
+        let Some(user) = frame.data::<ScreencopyFrameData>() else {
+            continue;
+        };
+        let buffer = user.inner.lock().unwrap().buffer.clone();
+        match buffer {
+            Some(buf) => match get_dmabuf(&buf) {
+                Ok(dmabuf) => dmabuf_frames.push((frame, dmabuf.clone())),
+                Err(_) => shm_frames.push(frame),
+            },
+            None => frame.failed(),
+        }
+    }
+
+    // dmabuf path: bind each client buffer as the render target and paint the
+    // scene directly into it. The bound framebuffer borrows the dmabuf (not the
+    // renderer), so render_into can still take `&mut renderer` — mirrors the
+    // offscreen path's bind/render split below.
+    for (frame, mut dmabuf) in dmabuf_frames {
+        let mut framebuffer = match renderer.bind(&mut dmabuf) {
+            Ok(fb) => fb,
+            Err(e) => {
+                tracing::warn!(error = %e, "screencopy: bind client dmabuf failed");
+                frame.failed();
+                continue;
+            }
+        };
+        let mut damage_tracker =
+            OutputDamageTracker::new(output_size, scale, output.current_transform());
+        let result = render_into::<R>(
+            &mut damage_tracker,
+            renderer,
+            &mut framebuffer,
+            output,
+            space,
+            cursor_elements,
+        );
+        drop(framebuffer);
+        match result {
+            Ok(()) => {
+                // Same YInvert as the shm path: we render through a GL FBO
+                // (here over the dmabuf's EGLImage), whose bottom-left origin
+                // leaves the buffer rows bottom-to-top. Matches wlroots' GL
+                // screencopy behaviour.
+                frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
+                send_ready(&frame);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "screencopy: dmabuf render failed");
+                frame.failed();
+            }
+        }
+    }
+
+    if shm_frames.is_empty() {
+        return;
+    }
+
+    // Render the scene into an offscreen texture sized to the output's
+    // physical pixels. We only do this once even if multiple frames are
+    // pending for the same output.
     let texture: GlesTexture =
         match renderer.create_buffer(Fourcc::Argb8888, (output_size.w, output_size.h).into()) {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: offscreen create_buffer failed");
-                for f in for_us {
+                for f in shm_frames {
                     f.failed();
                 }
                 return;
@@ -157,7 +237,7 @@ pub fn process_pending<R>(
             Ok(fb) => fb,
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: bind offscreen failed");
-                for f in for_us {
+                for f in shm_frames {
                     f.failed();
                 }
                 return;
@@ -182,7 +262,7 @@ pub fn process_pending<R>(
 
         if let Err(e) = render_result {
             tracing::warn!(error = %e, "screencopy: render_output failed");
-            for f in for_us {
+            for f in shm_frames {
                 f.failed();
             }
             return;
@@ -194,14 +274,14 @@ pub fn process_pending<R>(
             Ok(fb) => fb,
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: rebind offscreen failed");
-                for f in for_us {
+                for f in shm_frames {
                     f.failed();
                 }
                 return;
             }
         };
 
-        for frame in for_us {
+        for frame in shm_frames {
             let Some(user) = frame.data::<ScreencopyFrameData>() else {
                 continue;
             };
@@ -223,15 +303,7 @@ pub fn process_pending<R>(
             match copy_region(renderer, &framebuffer, region, format, stride, &buffer) {
                 Ok(()) => {
                     frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    let secs = now.as_secs();
-                    frame.ready(
-                        (secs >> 32) as u32,
-                        (secs & 0xFFFF_FFFF) as u32,
-                        now.subsec_nanos(),
-                    );
+                    send_ready(&frame);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "screencopy: copy_region failed");
@@ -241,6 +313,20 @@ pub fn process_pending<R>(
         }
         drop(framebuffer);
     }
+}
+
+/// Send the `ready` event with a wall-clock presentation timestamp split into
+/// the protocol's `tv_sec_hi`/`tv_sec_lo`/`tv_nsec` triplet.
+fn send_ready(frame: &ZwlrScreencopyFrameV1) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    frame.ready(
+        (secs >> 32) as u32,
+        (secs & 0xFFFF_FFFF) as u32,
+        now.subsec_nanos(),
+    );
 }
 
 fn render_into<R>(

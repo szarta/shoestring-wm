@@ -18,7 +18,7 @@ use smithay::{
         },
     },
     utils::{Buffer as BufferCoord, Logical, Rectangle, Size},
-    wayland::{shm::with_buffer_contents, Dispatch2, GlobalDispatch2},
+    wayland::{dmabuf::get_dmabuf, shm::with_buffer_contents, Dispatch2, GlobalDispatch2},
 };
 
 use crate::{
@@ -169,7 +169,8 @@ fn create_frame(
         return;
     }
 
-    // Announce supported buffer parameters. SHM only — no dmabuf path.
+    // Announce supported buffer parameters: always the shm format, plus dmabuf
+    // formats on v3+ when the dmabuf global is up.
     frame.buffer(
         wl_shm::Format::Argb8888,
         region_px.size.w as u32,
@@ -177,9 +178,22 @@ fn create_frame(
         stride as u32,
     );
     if frame.version() >= 3 {
+        // Advertise dmabuf only for full-output captures: our dmabuf path binds
+        // the client buffer and renders the whole output into it (no cropping),
+        // so a sub-region buffer would be filled wrong. Region captures stay
+        // shm-only. xdpw — the screencast consumer that *requires* a dmabuf
+        // format — only ever captures the full output, so this is sufficient.
+        if region_logical.is_none() {
+            for fourcc in state.screencopy_dmabuf_formats() {
+                frame.linux_dmabuf(
+                    fourcc as u32,
+                    region_px.size.w as u32,
+                    region_px.size.h as u32,
+                );
+            }
+        }
         frame.buffer_done();
     }
-    let _ = state; // suppress unused warning until we add fast-path kicks
 }
 
 // ---------------- Frame ----------------
@@ -212,7 +226,12 @@ impl Dispatch2<ZwlrScreencopyFrameV1, ShoestringWm> for ScreencopyFrameData {
                         );
                         return;
                     }
-                    let valid = validate_shm(&buffer, inner.region, inner.stride);
+                    // dmabuf or shm: validate against whichever the client sent.
+                    let valid = if get_dmabuf(&buffer).is_ok() {
+                        validate_dmabuf(&buffer, inner.region)
+                    } else {
+                        validate_shm(&buffer, inner.region, inner.stride)
+                    };
                     if !valid {
                         resource.post_error(
                             zwlr_screencopy_frame_v1::Error::InvalidBuffer,
@@ -243,6 +262,16 @@ impl Dispatch2<ZwlrScreencopyFrameV1, ShoestringWm> for ScreencopyFrameData {
         resource: &ZwlrScreencopyFrameV1,
     ) {
         state.screencopy.pending.retain(|f| f != resource);
+    }
+}
+
+fn validate_dmabuf(buffer: &WlBuffer, region: Rectangle<i32, BufferCoord>) -> bool {
+    use smithay::backend::allocator::Buffer as _;
+    match get_dmabuf(buffer) {
+        Ok(dmabuf) => {
+            dmabuf.width() as i32 == region.size.w && dmabuf.height() as i32 == region.size.h
+        }
+        Err(_) => false,
     }
 }
 

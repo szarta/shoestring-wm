@@ -30,6 +30,7 @@ use anyhow::Result;
 use smithay::{
     backend::{
         allocator::{
+            dmabuf::Dmabuf,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
             Fourcc,
         },
@@ -45,6 +46,7 @@ use smithay::{
             element::surface::WaylandSurfaceRenderElement,
             gles::{Capability, GlesRenderer},
             multigpu::{gbm::GbmGlesBackend, GpuManager, MultiRenderer},
+            ImportDma,
         },
         session::{
             libseat::{self, LibSeatSession},
@@ -118,6 +120,21 @@ pub struct UdevData {
     primary_gpu: DrmNode,
     gpus: GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
     backends: HashMap<DrmNode, BackendData>,
+}
+
+impl UdevData {
+    /// Try to import `dmabuf` into the primary GPU's renderer. Backs
+    /// [`crate::state::ShoestringWm::import_dmabuf_test`] — the validation the
+    /// `zwp_linux_dmabuf_v1` protocol runs before creating a wl_buffer.
+    pub fn import_dmabuf_test(&mut self, dmabuf: &Dmabuf) -> bool {
+        match self.gpus.single_renderer(&self.primary_gpu) {
+            Ok(mut renderer) => renderer.import_dmabuf(dmabuf, None).is_ok(),
+            Err(err) => {
+                tracing::warn!(?err, "dmabuf import test: no renderer for primary gpu");
+                false
+            }
+        }
+    }
 }
 
 struct BackendData {
@@ -416,6 +433,9 @@ fn device_added(
         .iter()
         .copied()
         .collect();
+    // Keep a copy for the dmabuf global / screencopy advertisement; the
+    // original is consumed by the DrmOutputManager below.
+    let dmabuf_formats = render_formats.clone();
 
     let drm_output_manager = DrmOutputManager::new(
         drm,
@@ -436,6 +456,24 @@ fn device_added(
             registration_token,
         },
     );
+
+    // First GPU to come up stands up the zwp_linux_dmabuf_v1 global, advertising
+    // this renderer's import formats. This is a general GPU facility (clients use
+    // it for their own surface buffers) and is intentionally NOT behind the
+    // screen-capture gate — only the screencopy `linux_dmabuf` event respects
+    // that gate. The udev borrow ends above, so we touch `state` directly here.
+    if state.dmabuf_global.is_none() {
+        let dh = state.display_handle.clone();
+        let global = state
+            .dmabuf_state
+            .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
+        state.dmabuf_global = Some(global);
+        tracing::info!(
+            formats = dmabuf_formats.iter().count(),
+            "zwp_linux_dmabuf_v1 global created"
+        );
+        state.dmabuf_formats = Some(dmabuf_formats);
+    }
 
     device_changed(state, node);
     Ok(())

@@ -69,14 +69,25 @@ this on a systemd session.
 
 .. note::
 
-   **Screen sharing status.** Portal *routing* (this page) is complete,
-   and the GTK-backed portals (file chooser, settings, …) work today.
-   Full ScreenCast is still gated on a compositor capability: our
-   ``zwlr_screencopy`` implementation currently advertises **shm** buffers
-   only, while ``xdg-desktop-portal-wlr`` requires a **dmabuf** capture
-   format (a hard requirement in the 0.7.x series Ubuntu 24.04 ships).
-   Exporting dmabuf buffers from the capture path — or implementing the
-   newer ``ext-image-copy-capture-v1`` protocol that xdpw 0.8+ prefers —
-   is tracked as follow-up work. Until then, screen sharing through the
-   wlroots portal will not produce frames even with the config above in
-   place.
+   **Screen sharing status.** Portal *routing* (this page) is complete and
+   the GTK-backed portals (file chooser, settings, …) work today.
+   ScreenCast through ``xdg-desktop-portal-wlr`` additionally needs our
+   ``zwlr_screencopy`` capture to hand back a **dmabuf** buffer — a hard
+   requirement in the 0.7.x series Ubuntu 24.04 ships, which refuses to
+   start a cast from an shm-only compositor. The capture path now exports
+   dmabuf (a ``zwp_linux_dmabuf_v1`` global plus the screencopy
+   ``linux_dmabuf`` event, with the rendered output blitted straight into
+   the client buffer), so the wlroots portal can negotiate a stream.
+
+   Screen capture is **opt-in**: the ``zwlr_screencopy`` manager is only
+   advertised while the screen-capture gate is on, so a cast produces no
+   frames until you enable it (``shoestring-ctl screen-capture on`` for the
+   session, or ``general.screen_capture_enabled = true`` in the config).
+   See :doc:`configuration`. (The dmabuf global itself is always present —
+   it is a general GPU-import facility for ordinary client surfaces, not a
+   capture path, so it is not behind the gate.)
+
+   Dmabuf export is GPU-backed and only stood up on the udev/KMS backend;
+   the nested winit dev backend stays shm-only. The newer
+   ``ext-image-copy-capture-v1`` protocol that xdpw 0.8+ prefers is still
+   possible future work but is not required for the 0.7.x path.

@@ -7,6 +7,7 @@ use std::{
 
 use shoestring_config::Config;
 use smithay::{
+    backend::allocator::{dmabuf::Dmabuf, format::FormatSet},
     desktop::{layer_map_for_output, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatState},
     reexports::{
@@ -22,6 +23,7 @@ use smithay::{
     utils::{Logical, Point},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        dmabuf::{DmabufGlobal, DmabufState},
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
@@ -104,6 +106,21 @@ pub struct ShoestringWm {
     pub data_device_state: DataDeviceState,
     pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
+    /// `zwp_linux_dmabuf_v1` delegate. The global is stood up lazily once the
+    /// first GPU (udev backend) reports its render formats — see
+    /// [`crate::backend::udev`]. Unlike the screencopy manager this is *not*
+    /// gated by the screen-capture gate: dmabuf import is a general facility
+    /// GPU clients use for their own surface buffers. Only the screencopy
+    /// `linux_dmabuf` *event* (which offers the compositor's framebuffer up
+    /// for readback) respects the gate.
+    pub dmabuf_state: DmabufState,
+    /// `Some` once the dmabuf global has been created (held so it stays
+    /// registered). Created at most once, on the first udev `device_added`.
+    pub dmabuf_global: Option<DmabufGlobal>,
+    /// dmabuf formats the primary GPU's renderer can import/render, captured
+    /// when the global is created. Reused to advertise the screencopy
+    /// `linux_dmabuf` event. `None` on the winit backend (no dmabuf export).
+    pub dmabuf_formats: Option<FormatSet>,
     pub session_lock_state: SessionLockManagerState,
     /// wlr-gamma-control state: the manager global plus the live per-output
     /// controls. KMS-only (gamma ramps are a CRTC property), so it exists only
@@ -368,6 +385,9 @@ impl ShoestringWm {
             data_device_state,
             output_management,
             screencopy,
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
+            dmabuf_formats: None,
             session_lock_state,
             #[cfg(feature = "tty")]
             gamma_control,
@@ -826,6 +846,36 @@ impl ShoestringWm {
                 output: output_name.to_string(),
             });
         }
+    }
+
+    /// Validate that a client's dmabuf can actually be imported by our
+    /// renderer — the import test the `zwp_linux_dmabuf_v1` protocol expects
+    /// before a buffer is created. Only the udev backend stands up the dmabuf
+    /// global (winit has no dmabuf export), so the winit path is never reached
+    /// in practice; we accept there rather than reject.
+    pub fn import_dmabuf_test(&mut self, dmabuf: &Dmabuf) -> bool {
+        #[cfg(feature = "tty")]
+        if let Some(udev) = self.udev.as_mut() {
+            return udev.import_dmabuf_test(dmabuf);
+        }
+        let _ = dmabuf;
+        true
+    }
+
+    /// Pixel formats to advertise in the screencopy `linux_dmabuf` event, in
+    /// client-preference order. Empty on the winit backend (no dmabuf global),
+    /// so callers stay shm-only there. Opaque (`Xrgb8888`) is offered first
+    /// since screencast streams are opaque; we only offer a format the
+    /// renderer can actually import.
+    pub fn screencopy_dmabuf_formats(&self) -> Vec<smithay::backend::allocator::Fourcc> {
+        use smithay::backend::allocator::Fourcc;
+        let Some(formats) = self.dmabuf_formats.as_ref() else {
+            return Vec::new();
+        };
+        [Fourcc::Xrgb8888, Fourcc::Argb8888]
+            .into_iter()
+            .filter(|fourcc| formats.iter().any(|f| f.code == *fourcc))
+            .collect()
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from

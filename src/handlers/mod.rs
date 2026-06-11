@@ -1,4 +1,5 @@
 mod compositor;
+mod dmabuf;
 mod foreign_toplevel_mgmt;
 #[cfg(feature = "tty")]
 mod gamma_control;
