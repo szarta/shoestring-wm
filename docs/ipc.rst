@@ -41,6 +41,12 @@ Each request is a JSON object with a ``type`` discriminator:
      - List every mapped window (across all workspaces).
    * - ``{"type": "outputs"}``
      - List every connected output.
+   * - ``{"type": "get_tree"}``
+     - Snapshot the full window tree: outputs with their logical
+       placement, plus each workspace and the windows on it (geometry,
+       stacking order, and the output each window sits on). Reply is
+       ``tree``. The ``swaymsg -t get_tree`` analogue — the canonical
+       query for layout scripting. Read-only and not gated by automation.
    * - ``{"type": "event_stream"}``
      - Switch into streaming mode. Server replies once with ``Ok`` then
        pushes events.
@@ -220,6 +226,15 @@ The server replies with a single JSON object tagged by ``type``:
 ``outputs``
     ``{"type": "outputs", "outputs": [OutputSummary, ...]}``
 
+``tree``
+    ``{"type": "tree", "outputs": [OutputNode, ...], "workspaces": [WorkspaceNode, ...], "minimized": [WindowNode, ...]}``.
+    Returned in reply to ``get_tree``. Only workspaces that have windows —
+    plus the active one — appear in ``workspaces``. ``minimized`` holds
+    windows that are minimized and therefore belong to no workspace
+    (minimizing drops a window's workspace assignment; unminimizing
+    re-assigns it to the active workspace). It is empty when nothing is
+    minimized.
+
 ``picked_window``
     ``{"type": "picked_window", "window": WindowSummary | null}``.
     Returned in reply to ``pick_window`` once the user resolves the
@@ -299,11 +314,18 @@ The server replies with a single JSON object tagged by ``type``:
       "title":     "Window title",
       "app_id":    "alacritty",
       "workspace": 3,
-      "focused":   true
+      "focused":   true,
+      "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080}
     }
 
 ``id`` matches the ``identifier`` event from ``ext-foreign-toplevel-list-v1``,
-so a bar can cross-reference between protocols.
+so a bar can cross-reference between protocols. ``geometry`` is the window's
+on-screen rectangle in compositor-global logical coords (same system as
+``move_mouse`` / ``pointer_position``); it is **omitted** when the window is
+minimized or on a non-active workspace (only the active workspace is mapped,
+so an unmapped window has no rectangle). Older WM builds that pre-dated the
+field omit it too — clients should treat "absent" and "off-screen"
+identically.
 
 ``OutputSummary``::
 
@@ -313,6 +335,56 @@ so a bar can cross-reference between protocols.
       "height": 2160,
       "scale":  1.5
     }
+
+``tree`` payload types
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``OutputNode`` carries the output's *logical placement* (position + size in
+the global coordinate space), which ``OutputSummary`` lacks — that's what lets
+a script relate a window's ``geometry`` to the output it lands on::
+
+    {
+      "name":  "DP-1",
+      "x":     0,
+      "y":     0,
+      "w":     2560,
+      "h":     1440,
+      "scale": 1.0
+    }
+
+``WorkspaceNode``::
+
+    {
+      "index":   3,
+      "name":    "",
+      "focused": true,
+      "windows": [WindowNode, ...]
+    }
+
+``index`` is 1-based; ``name`` is empty when unset. ``focused`` marks the
+active (mapped/visible) workspace. For the active workspace, ``windows`` is
+ordered bottom-to-top by stacking order; for others the order is unspecified.
+
+``WindowNode``::
+
+    {
+      "id":        "stable-string-id",
+      "title":     "Window title",
+      "app_id":    "alacritty",
+      "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080},
+      "output":    "DP-1",
+      "z":         0,
+      "focused":   true,
+      "minimized": false,
+      "layout":    "tiled_left"
+    }
+
+``geometry``, ``output``, and ``z`` are **omitted** for windows that aren't
+currently mapped (minimized, or on a non-active workspace) — only the active
+workspace's windows have an on-screen rectangle, a host output, and a stacking
+position. ``z`` is the stacking index within the mapped stack: ``0`` is
+bottom-most, higher is closer to the top. ``layout`` is one of ``floating``,
+``tiled_left``, ``tiled_right``, or ``maximized``.
 
 Events
 ------
@@ -391,9 +463,17 @@ subcommand maps to one request:
       "type": "windows",
       "windows": [
         { "id": "...", "title": "tmux", "app_id": "alacritty",
-          "workspace": 1, "focused": true }
+          "workspace": 1, "focused": true,
+          "geometry": { "x": 0, "y": 0, "w": 960, "h": 1080 } }
       ]
     }
+
+    $ shoestring-ctl tree                # full layout tree (alias: get-tree)
+    {"type":"tree","outputs":[{"name":"DP-1","x":0,"y":0,"w":2560,"h":1440,"scale":1.0}],
+     "workspaces":[{"index":1,"name":"","focused":true,"windows":[
+       {"id":"...","title":"tmux","app_id":"alacritty",
+        "geometry":{"x":0,"y":0,"w":960,"h":1080},"output":"DP-1","z":0,
+        "focused":true,"minimized":false,"layout":"tiled_left"}]}],"minimized":[]}
 
     $ shoestring-ctl event-stream
     {"type":"workspace_changed","active":4}

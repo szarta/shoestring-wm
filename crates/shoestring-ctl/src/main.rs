@@ -55,6 +55,13 @@ enum Command {
     },
     /// List every connected output with its mode and scale.
     Outputs,
+    /// Dump the full window tree: outputs with their logical placement, plus
+    /// each workspace and the windows on it (geometry, stacking order, and
+    /// the output each window sits on). The `swaymsg -t get_tree` analogue —
+    /// the go-to query for layout scripting. Pair with `-p` for indented
+    /// output, or pipe to `jq`. Read-only and not gated by automation.
+    #[command(alias = "get-tree")]
+    Tree,
     /// Print the WM's diagnostics metrics: process resource gauges
     /// (`process.open_fds`, `process.rss_kb`, `process.fd_limit`) plus WM
     /// counts. Read-only and not gated by automation. A one-shot snapshot
@@ -285,6 +292,7 @@ fn main() -> Result<()> {
         Command::Windows => Request::Windows,
         Command::FindWindows { title, app_id } => Request::FindWindows { title, app_id },
         Command::Outputs => Request::Outputs,
+        Command::Tree => Request::GetTree,
         Command::Metrics { watch, interval } => {
             if watch {
                 Request::MetricsStream {

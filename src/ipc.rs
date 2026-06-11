@@ -35,7 +35,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use shoestring_ipc::{
-    default_socket_path, Event, OutputSummary, Request, Response, WindowSummary, SOCKET_ENV,
+    default_socket_path, Event, OutputNode, OutputSummary, Request, Response, WindowGeometry,
+    WindowNode, WindowSummary, WorkspaceNode, SOCKET_ENV,
 };
 use smithay::reexports::calloop::{
     generic::Generic, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
@@ -307,6 +308,18 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             Request::Outputs => {
                 let outputs = collect_outputs(state);
                 let _ = write_response(client, &Response::Outputs { outputs });
+                return true;
+            }
+            Request::GetTree => {
+                let (outputs, workspaces, minimized) = collect_tree(state);
+                let _ = write_response(
+                    client,
+                    &Response::Tree {
+                        outputs,
+                        workspaces,
+                        minimized,
+                    },
+                );
                 return true;
             }
             Request::EventStream => {
@@ -754,9 +767,153 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
                 app_id,
                 workspace,
                 focused: focused.as_ref() == Some(window),
+                geometry: window_geometry(state, window),
             }
         })
         .collect()
+}
+
+/// A window's on-screen rectangle in compositor-global logical coords, using
+/// the same convention as the layout code: location from the space, size from
+/// the window's `geometry()`. `None` when the window isn't mapped (minimized,
+/// or on a non-active workspace — those are unmapped from the space and so
+/// have no location).
+pub(crate) fn window_geometry(
+    state: &ShoestringWm,
+    window: &smithay::desktop::Window,
+) -> Option<WindowGeometry> {
+    let loc = state.space.element_location(window)?;
+    let size = window.geometry().size;
+    Some(WindowGeometry {
+        x: loc.x,
+        y: loc.y,
+        w: size.w,
+        h: size.h,
+    })
+}
+
+/// Name of the output a window's center sits on, by point containment against
+/// each output's logical geometry. `None` when the window is unmapped or its
+/// center falls outside every output.
+fn window_output(state: &ShoestringWm, window: &smithay::desktop::Window) -> Option<String> {
+    let geo = window_geometry(state, window)?;
+    let (cx, cy) = (geo.x + geo.w / 2, geo.y + geo.h / 2);
+    state
+        .space
+        .outputs()
+        .find(|o| {
+            state
+                .space
+                .output_geometry(o)
+                .map(|g| {
+                    cx >= g.loc.x
+                        && cx < g.loc.x + g.size.w
+                        && cy >= g.loc.y
+                        && cy < g.loc.y + g.size.h
+                })
+                .unwrap_or(false)
+        })
+        .map(|o| o.name())
+}
+
+/// Build the get_tree-style snapshot: outputs with their logical placement,
+/// plus every workspace that has windows (always including the active one)
+/// and the windows on it. Only the active workspace is mapped, so only its
+/// windows carry a `z` stacking index and geometry.
+fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, Vec<WindowNode>) {
+    use crate::layout::LayoutState;
+
+    let outputs = state
+        .space
+        .outputs()
+        .map(|o| {
+            let geo = state.space.output_geometry(o).unwrap_or_default();
+            let scale = match o.current_scale() {
+                smithay::output::Scale::Integer(i) => i as f64,
+                smithay::output::Scale::Fractional(f) => f,
+                _ => 1.0,
+            };
+            OutputNode {
+                name: o.name(),
+                x: geo.loc.x,
+                y: geo.loc.y,
+                w: geo.size.w,
+                h: geo.size.h,
+                scale,
+            }
+        })
+        .collect();
+
+    // Stacking order for mapped windows: `space.elements()` yields bottom to
+    // top, so the enumeration index is the Z position.
+    let z_of = |window: &smithay::desktop::Window| -> Option<u32> {
+        state
+            .space
+            .elements()
+            .position(|w| w == window)
+            .map(|i| i as u32)
+    };
+
+    let focused = state.focused_window();
+    let active = state.workspaces.active();
+
+    // Group every tracked window under its workspace.
+    let mut by_workspace: std::collections::BTreeMap<u8, Vec<WindowNode>> =
+        std::collections::BTreeMap::new();
+    for (window, handle) in &state.foreign_toplevels {
+        let ws = state
+            .workspaces
+            .windows_on_any()
+            .find(|(w, _)| w == window)
+            .map(|(_, ws)| ws.one_based())
+            .unwrap_or(0);
+        let (title, app_id) = window_title_app_id(window);
+        let layout = match state.layout.layout_state(window) {
+            LayoutState::Floating => "floating",
+            LayoutState::TiledLeft => "tiled_left",
+            LayoutState::TiledRight => "tiled_right",
+            LayoutState::Maximized => "maximized",
+        };
+        by_workspace.entry(ws).or_default().push(WindowNode {
+            id: handle.identifier(),
+            title,
+            app_id,
+            geometry: window_geometry(state, window),
+            output: window_output(state, window),
+            z: z_of(window),
+            focused: focused.as_ref() == Some(window),
+            minimized: state.layout.is_minimized(window),
+            layout: layout.to_string(),
+        });
+    }
+
+    // Sort the active workspace's windows by Z (bottom to top) so the order
+    // reflects the stack; unmapped windows (z=None) sink to the front.
+    if let Some(windows) = by_workspace.get_mut(&active.one_based()) {
+        windows.sort_by_key(|w| w.z);
+    }
+
+    // Windows with no workspace (key 0) are minimized — minimizing drops the
+    // workspace assignment (see `minimize_window`). Pull them out into the
+    // flat `minimized` list rather than inventing a workspace 0.
+    let minimized = by_workspace.remove(&0).unwrap_or_default();
+
+    // Always surface the active workspace even when empty, so a script can
+    // see "the focused workspace has no windows" rather than an absent entry.
+    by_workspace.entry(active.one_based()).or_default();
+
+    let names = state.workspaces.name_list();
+    let workspaces = by_workspace
+        .into_iter()
+        .map(|(index, windows)| WorkspaceNode {
+            index,
+            name: names.get(index as usize - 1).cloned().unwrap_or_default(),
+            focused: index == active.one_based(),
+            windows,
+        })
+        .collect();
+
+    (outputs, workspaces, minimized)
 }
 
 /// `(title, app_id)` for either an xdg toplevel or an X11 window.

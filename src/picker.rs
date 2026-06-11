@@ -144,6 +144,7 @@ impl ShoestringWm {
             app_id,
             workspace,
             focused: self.focused_window().as_ref() == Some(window),
+            geometry: crate::ipc::window_geometry(self, window),
         })
     }
 

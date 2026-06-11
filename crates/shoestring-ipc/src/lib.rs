@@ -53,6 +53,13 @@ pub enum Request {
     Windows,
     /// List every connected output.
     Outputs,
+    /// Snapshot the full window tree: every output with its logical
+    /// placement, plus each workspace and the windows on it (with geometry,
+    /// stacking order, and the output each window sits on). The
+    /// `swaymsg -t get_tree` analogue — the canonical query for layout
+    /// scripting. Reply is [`Response::Tree`]. Read-only and not gated by
+    /// automation (pure observation, like [`Request::Windows`]).
+    GetTree,
     /// Switch the connection into streaming mode: server sends one
     /// [`Response::Ok`] then a stream of [`Event`]s, one per line, forever.
     EventStream,
@@ -358,6 +365,20 @@ pub enum Response {
     Outputs {
         outputs: Vec<OutputSummary>,
     },
+    /// Full window tree for [`Request::GetTree`]: outputs with their logical
+    /// placement, every workspace and the windows on it, plus any minimized
+    /// windows (which belong to no workspace — minimizing drops a window's
+    /// workspace assignment, and unminimizing re-assigns it to whatever
+    /// workspace is active at restore time). A get_tree-style snapshot for
+    /// layout scripting.
+    Tree {
+        outputs: Vec<OutputNode>,
+        workspaces: Vec<WorkspaceNode>,
+        /// Minimized (workspace-less) windows. Each has `minimized: true`
+        /// and no `geometry` / `output` / `z` (unmapped). Empty when nothing
+        /// is minimized.
+        minimized: Vec<WindowNode>,
+    },
     /// Current state of the automation gate. Returned for both
     /// [`Request::SetAutomation`] and [`Request::AutomationStatus`].
     Automation {
@@ -422,6 +443,87 @@ pub struct WindowSummary {
     pub workspace: u8,
     /// `true` for the currently keyboard-focused window.
     pub focused: bool,
+    /// On-screen rectangle in compositor-global logical coords. `None` for
+    /// minimized windows (unmapped, so no rect) and windows on a non-active
+    /// workspace (only the active workspace is mapped). New field; older
+    /// payloads without it deserialize via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<WindowGeometry>,
+}
+
+/// A window's on-screen rectangle in compositor-global logical coords:
+/// `(x, y)` is the top-left, `(w, h)` the size. Same coordinate system as
+/// [`Request::MoveMouse`] / [`Response::PointerPosition`], so a script can
+/// aim the pointer at a window from its geometry directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// A window node in the tree returned by [`Request::GetTree`] — one mapped
+/// or minimized toplevel with everything a layout script needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowNode {
+    /// FT identifier, matching [`WindowSummary::id`].
+    pub id: String,
+    pub title: String,
+    pub app_id: String,
+    /// On-screen rectangle in global logical coords; `None` when unmapped
+    /// (minimized or on a non-active workspace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<WindowGeometry>,
+    /// Name of the output the window's center sits on; `None` when unmapped
+    /// or off every output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Stacking order within the currently mapped stack: `0` is bottom-most,
+    /// higher is closer to the top. `None` for windows that aren't mapped
+    /// (minimized, or on a non-active workspace — only the active workspace
+    /// is mapped, so only its windows have a Z position).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<u32>,
+    /// `true` for the currently keyboard-focused window.
+    pub focused: bool,
+    pub minimized: bool,
+    /// Tile/maximize state: `floating`, `tiled_left`, `tiled_right`, or
+    /// `maximized`.
+    pub layout: String,
+}
+
+/// A workspace and its windows in the tree returned by [`Request::GetTree`].
+/// shoestring-wm workspaces are global (not nested under an output), so they
+/// form a flat sibling list. Only workspaces that have windows — plus the
+/// active one — are reported.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceNode {
+    /// 1-based index.
+    pub index: u8,
+    /// Display name, or empty when unset.
+    pub name: String,
+    /// `true` for the active (mapped/visible) workspace.
+    pub focused: bool,
+    /// Windows on this workspace. For the active workspace, ordered bottom
+    /// to top by stacking order; for others, order is unspecified.
+    pub windows: Vec<WindowNode>,
+}
+
+/// An output and its logical placement in the tree returned by
+/// [`Request::GetTree`]. Unlike [`OutputSummary`] this carries the output's
+/// position in the global logical coordinate space, so window rectangles can
+/// be related to the output they land on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputNode {
+    pub name: String,
+    /// Logical rectangle: top-left + size in compositor-global logical coords.
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Logical scale, matching [`OutputSummary::scale`].
+    pub scale: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -903,6 +1005,123 @@ mod tests {
     }
 
     #[test]
+    fn get_tree_request_shape() {
+        let r = Request::GetTree;
+        assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"type":"get_tree"}"#);
+        let back: Request = serde_json::from_str(r#"{"type":"get_tree"}"#).unwrap();
+        assert!(matches!(back, Request::GetTree));
+    }
+
+    #[test]
+    fn window_summary_geometry_is_optional_and_back_compat() {
+        // A legacy payload with no `geometry` still deserializes (field is
+        // `#[serde(default)]`), and a None geometry is skipped on the wire so
+        // the minimal shape is unchanged from pre-geometry clients.
+        let legacy = r#"{"id":"a","title":"t","app_id":"x","workspace":1,"focused":false}"#;
+        let w: WindowSummary = serde_json::from_str(legacy).unwrap();
+        assert!(w.geometry.is_none());
+        assert_eq!(serde_json::to_string(&w).unwrap(), legacy);
+
+        let with_geo = WindowSummary {
+            id: "a".into(),
+            title: "t".into(),
+            app_id: "x".into(),
+            workspace: 1,
+            focused: false,
+            geometry: Some(WindowGeometry {
+                x: 0,
+                y: 0,
+                w: 640,
+                h: 480,
+            }),
+        };
+        let s = serde_json::to_string(&with_geo).unwrap();
+        assert!(s.contains(r#""geometry":{"x":0,"y":0,"w":640,"h":480}"#));
+    }
+
+    #[test]
+    fn tree_response_shape() {
+        let resp = Response::Tree {
+            outputs: vec![OutputNode {
+                name: "eDP-1".into(),
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+                scale: 1.0,
+            }],
+            workspaces: vec![WorkspaceNode {
+                index: 1,
+                name: String::new(),
+                focused: true,
+                windows: vec![WindowNode {
+                    id: "abc".into(),
+                    title: "t".into(),
+                    app_id: "a".into(),
+                    geometry: Some(WindowGeometry {
+                        x: 0,
+                        y: 0,
+                        w: 960,
+                        h: 1080,
+                    }),
+                    output: Some("eDP-1".into()),
+                    z: Some(0),
+                    focused: true,
+                    minimized: false,
+                    layout: "tiled_left".into(),
+                }],
+            }],
+            minimized: vec![WindowNode {
+                id: "m".into(),
+                title: "min".into(),
+                app_id: "a".into(),
+                geometry: None,
+                output: None,
+                z: None,
+                focused: false,
+                minimized: true,
+                layout: "floating".into(),
+            }],
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        let back: Response = serde_json::from_str(&s).unwrap();
+        match back {
+            Response::Tree {
+                outputs,
+                workspaces,
+                minimized,
+            } => {
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0].name, "eDP-1");
+                assert_eq!(workspaces[0].windows[0].z, Some(0));
+                assert_eq!(workspaces[0].windows[0].layout, "tiled_left");
+                assert_eq!(minimized.len(), 1);
+                assert!(minimized[0].minimized);
+                assert_eq!(minimized[0].z, None);
+            }
+            _ => panic!("expected Tree"),
+        }
+
+        // Unmapped window: geometry / output / z all skipped on the wire.
+        let node = WindowNode {
+            id: "m".into(),
+            title: String::new(),
+            app_id: String::new(),
+            geometry: None,
+            output: None,
+            z: None,
+            focused: false,
+            minimized: true,
+            layout: "floating".into(),
+        };
+        let s = serde_json::to_string(&node).unwrap();
+        assert!(!s.contains("geometry"));
+        assert!(!s.contains("\"z\""));
+        assert!(!s.contains("output"));
+        assert!(s.contains(r#""minimized":true"#));
+    }
+
+    #[test]
     fn pick_and_close_window_shapes() {
         let pick = Request::PickWindow;
         let s = serde_json::to_string(&pick).unwrap();
@@ -934,6 +1153,12 @@ mod tests {
                 app_id: "a".into(),
                 workspace: 2,
                 focused: true,
+                geometry: Some(WindowGeometry {
+                    x: 10,
+                    y: 20,
+                    w: 800,
+                    h: 600,
+                }),
             }),
         };
         let s = serde_json::to_string(&picked).unwrap();
