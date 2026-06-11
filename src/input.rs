@@ -19,6 +19,7 @@ use smithay::{
         RegistrationToken,
     },
     utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
+    wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint},
 };
 
 use crate::{
@@ -595,6 +596,62 @@ impl ShoestringWm {
                 let pointer = self.seat.get_pointer().unwrap();
                 let delta = event.delta();
                 let current = pointer.current_location();
+
+                // A pointer constraint on the surface under the cursor changes
+                // how this motion is applied: a *locked* pointer receives no
+                // absolute motion at all (only the relative deltas below —
+                // what FPS games and RDP/VNC clients want), while a *confined*
+                // pointer is clamped to its region/surface. An inactive or
+                // out-of-region constraint doesn't apply.
+                let under = self.surface_under(current);
+                let mut pointer_locked = false;
+                let mut pointer_confined = false;
+                let mut confine_region = None;
+                if let Some((surface, surface_loc)) = under.as_ref() {
+                    with_pointer_constraint(surface, &pointer, |constraint| {
+                        let Some(constraint) = constraint else {
+                            return;
+                        };
+                        if !constraint.is_active() {
+                            return;
+                        }
+                        // A region-scoped constraint only bites while the
+                        // cursor is inside that surface-local region.
+                        if !constraint
+                            .region()
+                            .is_none_or(|r| r.contains((current - *surface_loc).to_i32_round()))
+                        {
+                            return;
+                        }
+                        match &*constraint {
+                            PointerConstraint::Locked(_) => pointer_locked = true,
+                            PointerConstraint::Confined(c) => {
+                                pointer_confined = true;
+                                confine_region = c.region().cloned();
+                            }
+                        }
+                    });
+                }
+
+                // Relative motion fires regardless of locking — for a locked
+                // pointer it is the only motion the client ever sees.
+                pointer.relative_motion(
+                    self,
+                    under.clone(),
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: event.delta_unaccel(),
+                        utime: event.time(),
+                    },
+                );
+
+                // Locked: the cursor stays put. Flush the frame and stop —
+                // no absolute motion, no focus-follow.
+                if pointer_locked {
+                    pointer.frame(self);
+                    return;
+                }
+
                 let mut new = current + delta;
                 if let Some(bounds) = workspace_bounds(&self.space) {
                     new.x = new
@@ -604,27 +661,55 @@ impl ShoestringWm {
                         .y
                         .clamp(bounds.loc.y as f64, (bounds.loc.y + bounds.size.h) as f64);
                 }
-                let under = self.surface_under(new);
+
+                let new_under = self.surface_under(new);
+
+                // Confined: reject any motion that would leave the constrained
+                // surface or step outside its confine region.
+                if pointer_confined {
+                    if let Some((surface, surface_loc)) = under.as_ref() {
+                        if new_under.as_ref().map(|(s, _)| s) != Some(surface) {
+                            pointer.frame(self);
+                            return;
+                        }
+                        if let Some(region) = &confine_region {
+                            if !region.contains((new - *surface_loc).to_i32_round()) {
+                                pointer.frame(self);
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 pointer.motion(
                     self,
-                    under.clone(),
+                    new_under.clone(),
                     &MotionEvent {
                         location: new,
                         serial,
                         time: event.time_msec(),
                     },
                 );
-                pointer.relative_motion(
-                    self,
-                    under,
-                    &RelativeMotionEvent {
-                        delta,
-                        delta_unaccel: event.delta_unaccel(),
-                        utime: event.time(),
-                    },
-                );
                 pointer.frame(self);
                 self.maybe_pointer_focus(new);
+
+                // Activate a constraint once the cursor enters its region (the
+                // client armed it earlier, but it only takes hold in-region).
+                // A constraint created over the current location is activated
+                // directly in `new_constraint`.
+                if let Some((surface, surface_loc)) = new_under.as_ref() {
+                    with_pointer_constraint(surface, &pointer, |constraint| {
+                        if let Some(constraint) = constraint {
+                            if !constraint.is_active()
+                                && constraint
+                                    .region()
+                                    .is_none_or(|r| r.contains((new - *surface_loc).to_i32_round()))
+                            {
+                                constraint.activate();
+                            }
+                        }
+                    });
+                }
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(output) = self.space.outputs().next() else {

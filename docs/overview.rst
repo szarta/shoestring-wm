@@ -94,6 +94,11 @@ Implemented today:
 - wlr-foreign-toplevel-management (``zwlr_foreign_toplevel_management_v1``):
   the writable taskbar protocol — waybar-style bars can activate, close,
   minimize and maximize windows and read each window's state.
+- Pointer lock / confinement (``zwp_pointer_constraints_v1``) with
+  relative motion (``zwp_relative_pointer_v1``): FPS games and RDP/VNC
+  clients can lock the cursor in place (receiving only relative deltas)
+  or confine it to a region of their surface. A lock activates while the
+  pointer is over the requesting surface and releases when it leaves.
 - xcursor sprite rendering at the pointer.
 - IPC server with query + event-stream subscriptions, plus key/text/
   click injection, action dispatch, find-windows regex search, command

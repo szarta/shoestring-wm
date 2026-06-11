@@ -11,17 +11,19 @@ mod xdg_decoration;
 mod xdg_shell;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
-use smithay::input::pointer::Focus;
+use smithay::input::pointer::{Focus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::Serial;
+use smithay::utils::{Logical, Point};
 use smithay::wayland::compositor::{get_parent, with_states};
 use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelListHandler, ForeignToplevelListState,
 };
 use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler};
 use smithay::wayland::output::OutputHandler;
+use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsHandler};
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
@@ -74,6 +76,51 @@ impl SeatHandler for ShoestringWm {
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
+    }
+}
+
+impl PointerConstraintsHandler for ShoestringWm {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        // A constraint takes effect only while the cursor is over the surface
+        // that requested it. If the pointer is already there, activate now;
+        // otherwise the input motion handler activates it on entry. (Smithay
+        // auto-deactivates on pointer leave — see its seat::pointer impl — so
+        // there's no matching teardown here.)
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+
+    fn remove_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        // When the surface's last constraint is gone, drop the cursor back to
+        // wherever the (formerly locked, hence hidden) client said it was
+        // drawing one, so it doesn't reappear at a stale location.
+        if with_pointer_constraint(surface, pointer, |c| c.is_none()) {
+            if let Some((hint_surface, hint_loc)) = self.pointer_constraint_cursor_hint.take() {
+                if &hint_surface == surface {
+                    if let Some(origin) = self.surface_global_origin(surface) {
+                        pointer.set_location(origin + hint_loc);
+                    }
+                }
+            }
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        surface: &WlSurface,
+        pointer: &PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        // Only meaningful while the constraint is active (a locked pointer
+        // hides the cursor); stash it for `remove_constraint` to restore.
+        if with_pointer_constraint(surface, pointer, |c| c.is_some_and(|c| c.is_active())) {
+            self.pointer_constraint_cursor_hint = Some((surface.clone(), location));
+        }
     }
 }
 

@@ -139,6 +139,26 @@ pub struct ShoestringWm {
     pub lock_session: Option<crate::handlers::session_lock::LockState>,
 
     pub seat: Seat<Self>,
+    /// `zwp_pointer_constraints_v1`: lets a focused client lock the pointer in
+    /// place or confine it to a region — pointer-lock for FPS games and
+    /// RDP/VNC clients. Held only to keep the global registered; enforcement
+    /// lives in [`crate::input`]'s motion handling and goes through
+    /// `with_pointer_constraint` (keyed on surface data, not this state).
+    #[allow(dead_code)]
+    pub pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState,
+    /// `zwp_relative_pointer_v1`: unaccelerated relative-motion deltas, the
+    /// required companion to pointer constraints (a locked pointer reports
+    /// motion solely through this). Delivered via the existing
+    /// `PointerHandle::relative_motion` call on every libinput motion event;
+    /// held only to keep the global registered.
+    #[allow(dead_code)]
+    pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    /// Latest cursor-position hint from a locked-pointer client: the surface
+    /// it named plus a surface-local point. When the lock is released the
+    /// visible cursor is dropped back here (it was hidden while locked).
+    /// Cleared once no constraint remains on the surface. See the
+    /// `PointerConstraintsHandler` impl in [`crate::handlers`].
+    pub pointer_constraint_cursor_hint: Option<(WlSurface, Point<f64, Logical>)>,
 
     pub ipc: Option<crate::ipc::Server>,
     /// Diagnostics registry: the latest sampled process/WM metrics plus
@@ -336,6 +356,15 @@ impl ShoestringWm {
         .unwrap();
         seat.add_pointer();
 
+        // Pointer lock/confine (FPS games, RDP) plus its required companion,
+        // relative-pointer. Both are plain always-on globals: constraint
+        // enforcement lives in the input motion path, and relative motion is
+        // already emitted on every libinput delta. Backend-agnostic.
+        let pointer_constraints =
+            smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
+        let relative_pointer =
+            smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
+
         let automation_enabled = config.general.automation_enabled;
 
         // Only advertise ext_idle_notify_v1 when the user opted in. Creating
@@ -394,6 +423,9 @@ impl ShoestringWm {
             idle_notifier,
             lock_session: None,
             seat,
+            pointer_constraints,
+            relative_pointer,
+            pointer_constraint_cursor_hint: None,
             ipc: None,
             metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
@@ -535,6 +567,19 @@ impl ShoestringWm {
         }
 
         None
+    }
+
+    /// Global-space origin (top-left) of the mapped window backing `surface`,
+    /// for translating a surface-local point into compositor-global coords.
+    /// Used to restore the visible cursor from a locked-pointer client's
+    /// cursor-position hint when its lock is released. `None` if no mapped
+    /// window owns the surface.
+    pub fn surface_global_origin(&self, surface: &WlSurface) -> Option<Point<f64, Logical>> {
+        let window = self
+            .space
+            .elements()
+            .find(|w| crate::window_ext::matches_surface(w, surface))?;
+        self.space.element_location(window).map(|loc| loc.to_f64())
     }
 
     /// The window whose toplevel surface currently holds keyboard focus.
