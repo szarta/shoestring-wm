@@ -218,6 +218,10 @@ pub fn broadcast_done(state: &mut crate::state::ShoestringWm) {
 
 /// Announce a newly-connected output to every bound manager and bump the
 /// serial.  Call this after the output is fully initialised and mapped.
+///
+/// Only the tty/udev backend hotplugs outputs; the winit backend has a single
+/// static output, so this is dead code there.
+#[cfg(feature = "tty")]
 pub fn broadcast_head_added(state: &mut crate::state::ShoestringWm, output: &Output) {
     let dh = state.display_handle.clone();
     let managers: Vec<_> = state.output_management.managers.clone();
@@ -234,6 +238,10 @@ pub fn broadcast_head_added(state: &mut crate::state::ShoestringWm, output: &Out
 /// Send `finished` on every head that belongs to `output`, remove them from
 /// the tracking list, and bump the serial.  Call this before unmapping the
 /// output.
+///
+/// Tty/udev backend only (output removal is a DRM hotplug event); dead code
+/// under winit.
+#[cfg(feature = "tty")]
 pub fn broadcast_head_removed(state: &mut crate::state::ShoestringWm, output: &Output) {
     let heads = std::mem::take(&mut state.output_management.heads);
     let mut kept = Vec::with_capacity(heads.len());

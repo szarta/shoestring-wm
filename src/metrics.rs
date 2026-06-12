@@ -285,12 +285,19 @@ mod tests {
 
     #[test]
     fn open_fds_and_limit_are_readable() {
-        // On Linux these always resolve; the test doubles as a smoke check
-        // that the /proc + getrlimit plumbing works in the build env.
-        let fds = read_open_fds().expect("read /proc/self/fd");
-        assert!(fds > 0);
+        // getrlimit is portable (Linux + the BSDs), so the limit always
+        // resolves — assert it unconditionally.
         let limit = read_fd_limit().expect("getrlimit");
-        assert!(limit >= fds);
+        assert!(limit > 0);
+        // The fd count comes from /proc/self/fd, which only exists on Linux
+        // with procfs mounted. Where present it must be a sane positive count
+        // within the limit; where absent (e.g. FreeBSD, which mounts no
+        // procfs by default) read_open_fds is None and the gauge is simply
+        // omitted — that's graceful degradation, not a test failure.
+        if let Some(fds) = read_open_fds() {
+            assert!(fds > 0);
+            assert!(limit >= fds);
+        }
     }
 
     #[test]

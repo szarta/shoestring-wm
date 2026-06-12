@@ -168,12 +168,34 @@ FreeBSD
         drm-kmod mesa-libs \
         libinput seatd libdisplay-info
 
-(PAM is provided by the base system.)
+For just the winit dev backend (which is the verified-working
+configuration on FreeBSD), only the first line is needed::
+
+    pkg install rust pkgconf wayland libxkbcommon
+
+**Linker path.** ``pkg`` installs libraries under ``/usr/local/lib``,
+which the base ``ld`` does not search by default, so the link step fails
+with ``unable to find library -lxkbcommon``. Point the linker at it via
+``RUSTFLAGS`` (or a ``.cargo/config.toml``)::
+
+    RUSTFLAGS="-L/usr/local/lib" \
+        cargo build --release --no-default-features --features winit -p shoestring-wm
+
+    # …or persist it for the checkout:
+    mkdir -p .cargo
+    printf '[build]\nrustflags = ["-L", "/usr/local/lib"]\n' > .cargo/config.toml
 
 DRM-KMS support on FreeBSD depends on the ``drm-kmod`` port matching
 your kernel; verify ``/dev/dri/card0`` exists after a reboot. The
 ``udev`` userland shim is provided automatically when ``libinput`` is
 installed.
+
+**Known gaps on FreeBSD.** ``shoestring-lock`` does not build: its
+``pam-client2`` dependency hardcodes Linux's ``const`` PAM message type,
+which mismatches FreeBSD's ``char *``. The fd-leak and RSS metrics gauges
+read ``/proc`` and are silently omitted when no procfs is mounted (the
+default); leak *detection* is therefore Linux-only. Neither affects the
+core compositor or the winit dev backend.
 
 NixOS
 ~~~~~

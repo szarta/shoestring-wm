@@ -23,7 +23,7 @@ use smithay::{
     utils::{Logical, Point},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
-        dmabuf::{DmabufGlobal, DmabufState},
+        dmabuf::DmabufState,
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
@@ -38,6 +38,10 @@ use smithay::{
         viewporter::ViewporterState,
     },
 };
+
+// Held only by the tty/udev backend (see `dmabuf_global`); unused under winit.
+#[cfg(feature = "tty")]
+use smithay::wayland::dmabuf::DmabufGlobal;
 
 /// `(pointer_element_snapshot, pointer_location, (hotspot_x, hotspot_y))`.
 pub type CursorSnapshot = (
@@ -123,7 +127,9 @@ pub struct ShoestringWm {
     /// for readback) respects the gate.
     pub dmabuf_state: DmabufState,
     /// `Some` once the dmabuf global has been created (held so it stays
-    /// registered). Created at most once, on the first udev `device_added`.
+    /// registered). Created at most once, on the first udev `device_added`,
+    /// so it only exists on the tty backend.
+    #[cfg(feature = "tty")]
     pub dmabuf_global: Option<DmabufGlobal>,
     /// dmabuf formats the primary GPU's renderer can import/render, captured
     /// when the global is created. Reused to advertise the screencopy
@@ -450,6 +456,7 @@ impl ShoestringWm {
             output_management,
             screencopy,
             dmabuf_state: DmabufState::new(),
+            #[cfg(feature = "tty")]
             dmabuf_global: None,
             dmabuf_formats: None,
             session_lock_state,
