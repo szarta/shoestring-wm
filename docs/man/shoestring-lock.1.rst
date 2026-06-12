@@ -29,9 +29,9 @@ Options
 -------
 
 **--pam-service** *NAME*
-    PAM service stack to authenticate against. When omitted, the first
-    of ``system-auth``, ``login``, ``passwd`` that exists under
-    ``/etc/pam.d`` is used, falling back to ``login``.
+    PAM service stack to authenticate against. Defaults to
+    ``shoestring-lock`` — a dedicated policy shipped with the locker (see
+    *Authentication*). Override only to substitute a custom stack.
 
 **--font** *PATH*
     TrueType/OpenType font for the prompt text. Falls back to
@@ -54,6 +54,23 @@ The user to authenticate is taken from ``$USER``. A minimal PAM
 conversation answers password (echo-off) prompts with the typed input;
 echo-on prompts (e.g. interactive 2FA) are not handled. The session
 unlocks only when both ``authenticate`` and ``acct_mgmt`` succeed.
+
+Authentication uses the dedicated ``shoestring-lock`` PAM service rather
+than the system ``login`` stack. This is deliberate: on FreeBSD/OpenPAM
+the ``login`` service begins with ``auth sufficient pam_self.so``, which
+succeeds for the *calling* user with no password — a locker on that
+service would unlock on any input. The shipped policy instead performs a
+real password check while keeping the binary unprivileged: on Linux via
+``pam_unix`` (which calls the setuid ``unix_chkpwd`` from ``libpam-modules``
+/ ``pam``); on FreeBSD via ``unix-selfauth`` (the setuid
+``unix-selfauth-helper`` from the *security/unix-selfauth-helper* port,
+the same mechanism ``swaylock`` uses).
+
+Packaging installs the policy at ``/etc/pam.d/shoestring-lock``
+(FreeBSD: ``/usr/local/etc/pam.d/shoestring-lock``). A **source install
+must copy the matching file from** ``resources/pam/``; without it PAM
+resolves the ``other`` fallback (deny) and every unlock attempt fails
+closed.
 
 Environment
 -----------

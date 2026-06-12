@@ -190,12 +190,28 @@ your kernel; verify ``/dev/dri/card0`` exists after a reboot. The
 ``udev`` userland shim is provided automatically when ``libinput`` is
 installed.
 
-**Known gaps on FreeBSD.** ``shoestring-lock`` does not build: its
-``pam-client2`` dependency hardcodes Linux's ``const`` PAM message type,
-which mismatches FreeBSD's ``char *``. The fd-leak and RSS metrics gauges
-read ``/proc`` and are silently omitted when no procfs is mounted (the
-default); leak *detection* is therefore Linux-only. Neither affects the
-core compositor or the winit dev backend.
+**The screen locker on FreeBSD.** ``shoestring-lock`` builds and runs on
+FreeBSD (via a vendored, OpenPAM-portable ``pam-client2`` under
+``third_party/``). It authenticates through a dedicated ``shoestring-lock``
+PAM policy that, on FreeBSD, delegates to the setuid
+``unix-selfauth-helper`` — so the locker binary itself stays unprivileged.
+A source install must therefore install both:
+
+.. code-block:: console
+
+    # pkg install unix-selfauth-helper
+    # install -m 644 resources/pam/shoestring-lock.freebsd \
+        /usr/local/etc/pam.d/shoestring-lock
+
+Without that policy file PAM denies every unlock (fails closed). Do **not**
+point the locker at the system ``login`` service on FreeBSD: it begins with
+``auth sufficient pam_self.so``, which unlocks for the calling user with no
+password.
+
+**Known gaps on FreeBSD.** The fd-leak and RSS metrics gauges read
+``/proc`` and are silently omitted when no procfs is mounted (the default);
+leak *detection* is therefore Linux-only. This does not affect the core
+compositor or the winit dev backend.
 
 NixOS
 ~~~~~

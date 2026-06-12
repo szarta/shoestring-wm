@@ -153,6 +153,10 @@ assets = [
     ["docs/_build/man/shoestring-screenshot.1", "usr/share/man/man1/", "644"],
     ["README.md",                            "usr/share/doc/shoestring-wm/README.md", "644"],
     ["LICENSE",                              "usr/share/doc/shoestring-wm/", "644"],
+    # Dedicated PAM policy for the screen locker. Installed under /etc so
+    # cargo-deb treats it as a conffile (preserved across upgrades). Without
+    # it shoestring-lock fails closed (PAM `other` = deny).
+    ["resources/pam/shoestring-lock.linux",  "etc/pam.d/shoestring-lock", "644"],
 ]
 
 # --- Fedora/RHEL packaging (cargo-generate-rpm) --------------------------
@@ -196,6 +200,9 @@ assets = [
     { source = "docs/_build/man/shoestring-screenshot.1", dest = "/usr/share/man/man1/shoestring-screenshot.1", mode = "0644", doc = true },
     { source = "README.md",                            dest = "/usr/share/doc/shoestring-wm/README.md", mode = "0644", doc = true },
     { source = "LICENSE",                              dest = "/usr/share/licenses/shoestring-wm/LICENSE", mode = "0644", doc = true },
+    # Dedicated PAM policy for the screen locker; config so rpm preserves
+    # local edits across upgrades. Without it shoestring-lock fails closed.
+    { source = "resources/pam/shoestring-lock.linux",  dest = "/etc/pam.d/shoestring-lock", mode = "0644", config = true },
 ]
 
 [package.metadata.generate-rpm.requires]

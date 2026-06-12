@@ -221,8 +221,8 @@ const FONT_CANDIDATES: &[&str] = &[
 #[derive(Debug, Parser)]
 #[command(name = "shoestring-lock", version, about)]
 struct Cli {
-    /// PAM service name; defaults to `system-auth` then `login` depending
-    /// on what's installed. Override to use a custom stack.
+    /// PAM service name. Defaults to `shoestring-lock` — a dedicated policy
+    /// shipped with the locker (see packaging). Override for a custom stack.
     #[arg(long)]
     pam_service: Option<String>,
 
@@ -329,7 +329,10 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     let font = load_font(cli.font.as_deref())?;
-    let pam_service = cli.pam_service.unwrap_or_else(pick_pam_service);
+    let pam_service = cli
+        .pam_service
+        .unwrap_or_else(|| DEFAULT_PAM_SERVICE.to_string());
+    warn_if_pam_service_missing(&pam_service);
     let hostname = read_hostname();
 
     let conn = Connection::connect_to_env().context("connect WAYLAND_DISPLAY")?;
@@ -975,13 +978,33 @@ fn verify_password(state: &mut State) {
     }
 }
 
-fn pick_pam_service() -> String {
-    for s in ["system-auth", "login", "passwd"] {
-        if Path::new(&format!("/etc/pam.d/{s}")).exists() {
-            return s.into();
-        }
+/// Default PAM service. We ship a dedicated policy at
+/// `/etc/pam.d/shoestring-lock` (FreeBSD: `/usr/local/etc/pam.d/shoestring-lock`)
+/// so the locker verifies the *current* user's password through a stack we
+/// control. This is deliberately NOT the generic `login` service: on
+/// FreeBSD/OpenPAM `login` begins with `auth sufficient pam_self.so`, which
+/// succeeds for the calling user with no password — a locker using it would
+/// unlock on any input. The shipped policy uses the platform's real password
+/// check (Linux: `pam_unix` via the setuid `unix_chkpwd`; FreeBSD: the setuid
+/// `unix-selfauth-helper`), so the locker binary itself stays unprivileged.
+const DEFAULT_PAM_SERVICE: &str = "shoestring-lock";
+
+/// Warn if no policy file backs `service`. Without one, PAM resolves the
+/// `other` fallback (deny, on a sane system) and every unlock attempt fails
+/// closed — which presents as "the locker rejects my correct password".
+/// Packaging installs the file; source installs must copy it (see docs).
+fn warn_if_pam_service_missing(service: &str) {
+    let candidates = [
+        format!("/etc/pam.d/{service}"),
+        format!("/usr/local/etc/pam.d/{service}"),
+    ];
+    if !candidates.iter().any(|p| Path::new(p).exists()) {
+        tracing::warn!(
+            service,
+            "no PAM policy at /etc/pam.d/ or /usr/local/etc/pam.d/; unlock will \
+             fail closed — install the shipped shoestring-lock service file"
+        );
     }
-    "login".into()
 }
 
 // ---- Drawing ------------------------------------------------------------
