@@ -1,0 +1,9 @@
+shoestring-wm is a lightweight Rust Wayland window manager built on
+Smithay, shipped with its companion tools: a status bar, dmenu-style
+launcher, notification daemon, screen locker, screenshot and region
+pickers, a confirmation helper, and an IPC control client.
+
+It targets a low-dependency desktop and exposes a Unix-socket JSON IPC
+so the running compositor can be queried, scripted, and automated. Once
+installed it appears in the display manager's session menu; pick
+"shoestring-wm" at the login screen and log in.
