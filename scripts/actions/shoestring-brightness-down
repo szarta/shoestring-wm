@@ -1,5 +1,24 @@
-#!/usr/bin/env bash
-# Bump screen brightness down 5%. brightnessctl's default --min-value=1
-# already prevents a fully-black screen.
-set -euo pipefail
-brightnessctl set 5%-
+#!/bin/sh
+# Bump screen brightness down 5%, with a 1% floor so the screen never
+# blacks out fully. Cross-platform: brightnessctl on Linux, backlight(8)
+# on FreeBSD. POSIX sh so it runs on a stock FreeBSD with no bash.
+set -eu
+
+case "$(uname -s)" in
+    Linux)
+        # brightnessctl's default --min-value=1 already prevents black.
+        brightnessctl set 5%-
+        ;;
+    FreeBSD)
+        # backlight(8) has no floor option and `decr` clamps at 0, which
+        # would black the panel — compute the next level with a 1% floor.
+        cur=$(backlight -q)
+        new=$((cur - 5))
+        [ "$new" -lt 1 ] && new=1
+        backlight "$new"
+        ;;
+    *)
+        echo "shoestring-brightness-down: unsupported OS $(uname -s)" >&2
+        exit 1
+        ;;
+esac

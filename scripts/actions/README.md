@@ -10,8 +10,8 @@ hard-coding `wpctl` / `brightnessctl` / `pkill` flags.
 | `shoestring-volume-down`      | Default sink -5%                                        | `wpctl`         |
 | `shoestring-volume-mute`      | Toggle mute on default sink                             | `wpctl`         |
 | `shoestring-mic-mute`         | Toggle mute on default source (mic)                     | `wpctl`         |
-| `shoestring-brightness-up`    | Screen brightness +5%                                   | `brightnessctl` |
-| `shoestring-brightness-down`  | Screen brightness -5% (floor 1% so screen never blacks) | `brightnessctl` |
+| `shoestring-brightness-up`    | Screen brightness +5%                                   | `brightnessctl` (Linux) / `backlight(8)` (FreeBSD) |
+| `shoestring-brightness-down`  | Screen brightness -5% (floor 1% so screen never blacks) | `brightnessctl` (Linux) / `backlight(8)` (FreeBSD) |
 | `shoestring-logout`           | SIGTERM the running `shoestring-wm` for clean shutdown  | `pkill`         |
 
 Lock is not wrapped — invoke `shoestring-ctl lock` directly so the
