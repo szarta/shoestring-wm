@@ -1,0 +1,138 @@
+# OpenPAM (FreeBSD/NetBSD/macOS/iOS/DragonFly) portability for pam-client2 0.5.5
+# Apply from the crate root with: git apply openpam-portability.patch
+# (build.rs is added separately; Cargo.toml needs build = "build.rs".)
+#
+--- a/src/ffi.rs	2006-07-23 21:21:28.000000000 -0400
++++ b/src/ffi.rs	2026-06-12 10:29:27.394248521 -0400
+@@ -22,6 +22,18 @@
+ use std::mem::size_of;
+ use std::slice;
+ 
++/// Pointer type of `pam_message.msg`.
++///
++/// Linux-PAM declares the field as `const char *`, whereas OpenPAM
++/// declares it as `char *`. `pam-sys2` mirrors that per-implementation,
++/// so the conversation helpers below must accept whichever mutability the
++/// active platform uses or they fail to type-check against
++/// `pam_message.msg`. The `openpam` cfg is set by `build.rs`.
++#[cfg(openpam)]
++type MsgContentPtr = *mut c_char;
++#[cfg(not(openpam))]
++type MsgContentPtr = *const c_char;
++
+ /// Wraps `callback` along with [`pam_converse<T>`] for handing to libpam.
+ pub(crate) fn into_pam_conv<T: ConversationHandler>(callback: Box<T>) -> PamConversation {
+ 	PamConversation {
+@@ -110,7 +122,7 @@
+ /// # Safety
+ /// This is sound as long as the message type implies a non-binary message
+ /// and the PAM modules play by the rules.
+-unsafe fn msg_content_as_cstr(msg: &*const c_char) -> &CStr {
++unsafe fn msg_content_as_cstr(msg: &MsgContentPtr) -> &CStr {
+ 	if msg.is_null() {
+ 		CStr::from_bytes_with_nul_unchecked(b"\0")
+ 	} else {
+@@ -125,7 +137,9 @@
+ /// # Safety
+ /// This is sound as long as the message type implies a non-binary message
+ /// and the PAM modules play by the rules.
+-unsafe fn msg_content_to_cstr(msg: &*const c_char) -> &CStr {
++// Only the Linux-PAM `PAM_RADIO_TYPE` path uses this.
++#[cfg(target_os = "linux")]
++unsafe fn msg_content_to_cstr(msg: &MsgContentPtr) -> &CStr {
+ 	if msg.is_null() {
+ 		CStr::from_bytes_with_nul_unchecked(b"\0")
+ 	} else {
+@@ -140,8 +154,10 @@
+ /// # Safety
+ /// This is sound as long as the message type implies a binary message
+ /// and the PAM modules play by the rules.
++// Only the Linux-PAM `PAM_BINARY_PROMPT` path uses this.
++#[cfg(target_os = "linux")]
+ #[allow(clippy::cast_sign_loss)]
+-unsafe fn msg_content_to_bin(msg: &*const c_char) -> (u8, &[u8]) {
++unsafe fn msg_content_to_bin(msg: &MsgContentPtr) -> (u8, &[u8]) {
+ 	if msg.is_null() {
+ 		(0, &[])
+ 	} else {
+--- a/src/lib.rs	2006-07-23 21:21:28.000000000 -0400
++++ b/src/lib.rs	2026-06-12 10:24:44.323170645 -0400
+@@ -217,7 +217,12 @@
+ 	AUTHTOK_EXPIRED = PAM_AUTHTOK_EXPIRED as isize,
+ 	MODULE_UNKNOWN = PAM_MODULE_UNKNOWN as isize,
+ 	BAD_ITEM = PAM_BAD_ITEM as isize,
++	// `PAM_CONV_AGAIN` / `PAM_INCOMPLETE` are Linux-PAM extensions; OpenPAM
++	// has no such return codes and never produces them, so these variants
++	// only exist on Linux-PAM.
++	#[cfg(not(openpam))]
+ 	CONV_AGAIN = PAM_CONV_AGAIN as isize,
++	#[cfg(not(openpam))]
+ 	INCOMPLETE = PAM_INCOMPLETE as isize,
+ }
+ 
+@@ -252,7 +257,9 @@
+             ErrorCode::AUTHTOK_EXPIRED => PAM_AUTHTOK_EXPIRED as c_int,
+             ErrorCode::MODULE_UNKNOWN => PAM_MODULE_UNKNOWN as c_int,
+             ErrorCode::BAD_ITEM => PAM_BAD_ITEM as c_int,
++            #[cfg(not(openpam))]
+             ErrorCode::CONV_AGAIN => PAM_CONV_AGAIN as c_int,
++            #[cfg(not(openpam))]
+             ErrorCode::INCOMPLETE => PAM_INCOMPLETE as c_int,
+         }
+     }
+@@ -284,7 +291,9 @@
+ 			PAM_AUTHTOK_EXPIRED => Some(ErrorCode::AUTHTOK_EXPIRED),
+ 			PAM_MODULE_UNKNOWN => Some(ErrorCode::MODULE_UNKNOWN),
+ 			PAM_BAD_ITEM => Some(ErrorCode::BAD_ITEM),
++			#[cfg(not(openpam))]
+ 			PAM_CONV_AGAIN => Some(ErrorCode::CONV_AGAIN),
++			#[cfg(not(openpam))]
+ 			PAM_INCOMPLETE => Some(ErrorCode::INCOMPLETE),
+ 			_ => None,
+ 		}
+--- a/src/error.rs	2006-07-23 21:21:28.000000000 -0400
++++ b/src/error.rs	2026-06-12 10:24:52.700202858 -0400
+@@ -301,6 +301,7 @@
+ 	fn from(error: ErrorWith<T>) -> Self {
+ 		io::Error::new(
+ 			match error.code {
++				#[cfg(not(openpam))]
+ 				ErrorCode::INCOMPLETE => io::ErrorKind::Interrupted,
+ 				ErrorCode::BAD_ITEM | ErrorCode::USER_UNKNOWN => io::ErrorKind::NotFound,
+ 				ErrorCode::CRED_INSUFFICIENT | ErrorCode::PERM_DENIED => {
+--- a/src/context.rs	2006-07-23 21:21:28.000000000 -0400
++++ b/src/context.rs	2026-06-12 10:29:54.966131018 -0400
+@@ -18,7 +18,11 @@
+ 
+ use crate::{ExtResult, Flag, Result, PAM_SUCCESS};
+ 
+-use libc::{c_char, c_int, c_void};
++use libc::{c_int, c_void};
++// `c_char` / `slice` are only referenced by the Linux-only `PAM_XAUTHDATA`
++// support below.
++#[cfg(any(target_os = "linux", doc))]
++use libc::c_char;
+ use pam_sys::pam_conv as PamConversation;
+ use pam_sys::pam_handle_t as RawPamHandle;
+ use pam_sys::{
+@@ -31,7 +35,9 @@
+ use std::mem::ManuallyDrop;
+ use std::os::unix::ffi::OsStrExt;
+ use std::ptr::NonNull;
+-use std::{ptr, slice};
++use std::ptr;
++#[cfg(any(target_os = "linux", doc))]
++use std::slice;
+ 
+ /// Internal: Builds getters/setters for string-typed PAM items.
+ macro_rules! impl_pam_str_item {
+--- a/src/resp_buf.rs	2006-07-23 21:21:28.000000000 -0400
++++ b/src/resp_buf.rs	2026-06-12 10:29:37.196285519 -0400
+@@ -110,6 +110,7 @@
+ 	/// # Panics
+ 	/// Panics if the index is out of range, memory could not be allocated
+ 	/// or the length of the response exceeds `u32::MAX - 5`.
++	#[cfg(target_os = "linux")]
+ 	#[inline]
+ 	#[allow(clippy::cast_possible_truncation)]
+ 	pub fn put_binary(&mut self, index: usize, response_type: u8, response: &[u8]) {

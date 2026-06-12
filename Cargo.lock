@@ -1492,8 +1492,6 @@ dependencies = [
 [[package]]
 name = "pam-client2"
 version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "407daa00f98b05147dbbaa6d2f6bce574e76794fa4952a5b38764681a23dde5f"
 dependencies = [
  "bitflags 2.11.1",
  "libc",

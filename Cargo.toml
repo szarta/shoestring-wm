@@ -25,6 +25,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
+# shoestring-lock authenticates via pam-client2, which only compiles
+# against Linux-PAM: it hardcodes `const char *` for `pam_message.msg`
+# (OpenPAM uses `char *` -> 8x E0308) and references the Linux-PAM-only
+# `PAM_CONV_AGAIN` / `PAM_INCOMPLETE` codes (absent on OpenPAM -> E0425).
+# That left shoestring-lock the one workspace crate that wouldn't build on
+# FreeBSD/NetBSD/macOS. We vendor a minimal fork that cfg-gates both behind
+# an `openpam` flag (set by its build.rs, mirroring pam-sys2's target
+# selection); behaviour on Linux is byte-for-byte upstream. See
+# third_party/pam-client2/PATCH.md.
+# Upstream report/MR: https://gitlab.com/LeChatP/rust-pam-client/
+[patch.crates-io]
+pam-client2 = { path = "third_party/pam-client2" }
+
 [package]
 name = "shoestring-wm"
 version.workspace = true
