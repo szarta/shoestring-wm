@@ -25,19 +25,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
-# shoestring-lock authenticates via pam-client2, which only compiles
-# against Linux-PAM: it hardcodes `const char *` for `pam_message.msg`
-# (OpenPAM uses `char *` -> 8x E0308) and references the Linux-PAM-only
-# `PAM_CONV_AGAIN` / `PAM_INCOMPLETE` codes (absent on OpenPAM -> E0425).
-# That left shoestring-lock the one workspace crate that wouldn't build on
-# FreeBSD/NetBSD/macOS. We vendor a minimal fork that cfg-gates both behind
-# an `openpam` flag (set by its build.rs, mirroring pam-sys2's target
-# selection); behaviour on Linux is byte-for-byte upstream. See
-# third_party/pam-client2/PATCH.md.
-# Upstream report/MR: https://gitlab.com/LeChatP/rust-pam-client/
-[patch.crates-io]
-pam-client2 = { path = "third_party/pam-client2" }
-
 [package]
 name = "shoestring-wm"
 version.workspace = true
@@ -216,3 +203,22 @@ wayland-protocols-wlr = { version = "0.3", features = ["client", "wayland-client
 # Used by tests/pointer_constraints.rs: speak zwp_pointer_constraints_v1 +
 # zwp_relative_pointer_v1 as a client. Both live behind the `unstable` feature.
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "wayland-client"] }
+
+# shoestring-lock authenticates via pam-client2, which only compiles
+# against Linux-PAM: it hardcodes `const char *` for `pam_message.msg`
+# (OpenPAM uses `char *` -> 8x E0308) and references the Linux-PAM-only
+# `PAM_CONV_AGAIN` / `PAM_INCOMPLETE` codes (absent on OpenPAM -> E0425).
+# That left shoestring-lock the one workspace crate that wouldn't build on
+# FreeBSD/NetBSD/macOS. We vendor a minimal fork that cfg-gates both behind
+# an `openpam` flag (set by its build.rs, mirroring pam-sys2's target
+# selection); behaviour on Linux is byte-for-byte upstream. See
+# third_party/pam-client2/PATCH.md.
+# Upstream report/MR: https://gitlab.com/LeChatP/rust-pam-client/
+#
+# KEEP THIS SECTION LAST. The FreeBSD ports cargo framework
+# (Mk/Scripts/cargo-crates-git-configure.awk) comments out every `git =`
+# line that appears *after* a `[patch.crates-io]` header. With this block
+# above the smithay git dependencies it silently orphaned them and broke
+# `make stage` (packaging/freebsd). Below them, it's harmless.
+[patch.crates-io]
+pam-client2 = { path = "third_party/pam-client2" }
