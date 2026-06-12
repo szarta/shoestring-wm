@@ -520,6 +520,17 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::SetWindowName {
+                id: window_id,
+                name,
+            } => {
+                let resp = match state.set_window_name_by_id(&window_id, &name) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::InjectClick { button, x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -754,7 +765,7 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
         .foreign_toplevels
         .iter()
         .map(|(window, handle)| {
-            let (title, app_id) = window_title_app_id(window);
+            let (title, app_id) = effective_title_app_id(state, window);
             let workspace = state
                 .workspaces
                 .windows_on_any()
@@ -867,7 +878,7 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             .find(|(w, _)| w == window)
             .map(|(_, ws)| ws.one_based())
             .unwrap_or(0);
-        let (title, app_id) = window_title_app_id(window);
+        let (title, app_id) = effective_title_app_id(state, window);
         let layout = match state.layout.layout_state(window) {
             LayoutState::Floating => "floating",
             LayoutState::TiledLeft => "tiled_left",
@@ -915,6 +926,25 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
         .collect();
 
     (outputs, workspaces, minimized)
+}
+
+/// `(effective_title, app_id)` for a window: the IPC-set name override
+/// (see [`Request::SetWindowName`]) when one is present, otherwise the
+/// client's own title. `app_id` is never overridden. This is the title the
+/// WM reports everywhere on its own IPC surface (`windows`, `get_tree`,
+/// `find_windows`, the `window_title_changed` event) so a bar or window-jump
+/// menu shows and matches on the override.
+pub(crate) fn effective_title_app_id(
+    state: &ShoestringWm,
+    window: &smithay::desktop::Window,
+) -> (String, String) {
+    let (title, app_id) = window_title_app_id(window);
+    let title = state
+        .window_name_overrides
+        .get(window)
+        .cloned()
+        .unwrap_or(title);
+    (title, app_id)
 }
 
 /// `(title, app_id)` for either an xdg toplevel or an X11 window.

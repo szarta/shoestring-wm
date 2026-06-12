@@ -123,9 +123,14 @@ fn sync_foreign_toplevel(state: &mut ShoestringWm, window: &Window) {
     }
     if changed {
         handle.send_done();
+        // wlr-foreign-toplevel taskbars (above) see the raw client title; the
+        // WM's own IPC consumers (bar, window-jump menu) see the *effective*
+        // title, so an IPC-set name override isn't clobbered when the client
+        // later changes its own title.
+        let (effective_title, _) = crate::ipc::effective_title_app_id(state, window);
         state.emit_ipc(shoestring_ipc::Event::WindowTitleChanged {
             id: handle.identifier(),
-            title: title.unwrap_or_default(),
+            title: effective_title,
             app_id: app_id.unwrap_or_default(),
         });
     }

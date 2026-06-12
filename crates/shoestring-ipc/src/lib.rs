@@ -212,6 +212,27 @@ pub enum Request {
     /// is [`Response::Ok`] on success, [`Response::Error`] if no
     /// window matches.
     FocusWindow { id: String },
+    /// Override the display name of the toplevel matching `id` (an
+    /// `ext-foreign-toplevel-list-v1` identifier, as carried by
+    /// [`WindowSummary::id`]). The override takes precedence over the
+    /// client's `xdg_toplevel` title everywhere the WM reports a title:
+    /// the `windows` / `get_tree` snapshots, the `find_windows` match
+    /// surface, and the [`Event::WindowTitleChanged`] stream — so a bar
+    /// or window-jump menu shows (and matches on) the override rather
+    /// than the client-supplied title.
+    ///
+    /// An empty `name` clears the override, reverting to the client's
+    /// own title. The override never touches `app_id`, and it is *not*
+    /// forwarded to wlr-foreign-toplevel-management taskbars (those keep
+    /// seeing the raw client title). The override is keyed by the live
+    /// window and is dropped when the window closes — it does not persist.
+    ///
+    /// Setting (or clearing) the name broadcasts an
+    /// [`Event::WindowTitleChanged`] carrying the new effective title.
+    /// Reply is [`Response::Ok`] on success, [`Response::Error`] if no
+    /// window matches. Not gated by automation (a benign display tweak,
+    /// like [`Request::FocusWindow`]).
+    SetWindowName { id: String, name: String },
     /// Run a named bind `Action` server-side, exactly as if a keybind
     /// had fired. Unlike [`Request::InjectKey`] this does *not* route
     /// through the focused surface — Super+Shift+Q won't fire because
@@ -1140,6 +1161,21 @@ mod tests {
         assert_eq!(s, r#"{"type":"focus_window","id":"abc"}"#);
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Request::FocusWindow { id } if id == "abc"));
+
+        let set_name = Request::SetWindowName {
+            id: "abc".into(),
+            name: "Build log".into(),
+        };
+        let s = serde_json::to_string(&set_name).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"set_window_name","id":"abc","name":"Build log"}"#
+        );
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Request::SetWindowName { id, name } if id == "abc" && name == "Build log"
+        ));
 
         let cancelled = Response::PickedWindow { window: None };
         assert_eq!(

@@ -192,6 +192,18 @@ enum Command {
         /// FT identifier of the window to focus.
         id: String,
     },
+    /// Override a window's display name, keyed by its
+    /// `ext-foreign-toplevel-list-v1` identifier. The override wins over the
+    /// client's own title everywhere the WM reports a title (`windows`,
+    /// `get_tree`, `find-windows`, the `window_title_changed` event), so bars
+    /// and window-jump menus show and match on it. Pass an empty NAME to clear
+    /// the override and revert to the client's title.
+    SetName {
+        /// FT identifier of the window to rename.
+        id: String,
+        /// New display name; empty string clears the override.
+        name: String,
+    },
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -331,6 +343,7 @@ fn main() -> Result<()> {
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
         Command::FocusWindow { id } => Request::FocusWindow { id },
+        Command::SetName { id, name } => Request::SetWindowName { id, name },
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,
         },

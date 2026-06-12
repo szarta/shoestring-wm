@@ -86,6 +86,7 @@ impl XdgShellHandler for ShoestringWm {
         self.workspaces.forget(&window);
         self.rules_applied.remove(&window);
         self.pending_initial_center.remove(&window);
+        self.window_name_overrides.remove(&window);
         // Drop on our Arc clone is NOT enough: smithay's `new_toplevel`
         // hands each bound client (the bar, etc.) its own Arc clone via
         // the resource user-data, so `closed` is only sent once the LAST

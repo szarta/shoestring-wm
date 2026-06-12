@@ -111,6 +111,20 @@ Each request is a JSON object with a ``type`` discriminator:
        needed and switches to its workspace if it lives elsewhere,
        then raises + activates it the same way a click does. Returns
        ``error`` if no window matches.
+   * - ``{"type": "set_window_name", "id": "...", "name": "..."}``
+     - Override the display name of the window with the given identifier.
+       The override wins over the client's ``xdg_toplevel`` title
+       everywhere the WM reports a title — the ``windows`` and
+       ``get_tree`` snapshots, the ``find_windows`` match surface, and
+       the ``window_title_changed`` event — so a bar or window-jump menu
+       shows and matches on it. An empty ``name`` clears the override and
+       reverts to the client's own title. ``app_id`` is never affected,
+       and the override is **not** forwarded to
+       wlr-foreign-toplevel-management taskbars (they keep the raw client
+       title). The override is keyed by the live window and dropped when
+       it closes — it does not persist. Setting or clearing it broadcasts
+       a ``window_title_changed`` event with the new effective title.
+       Returns ``error`` if no window matches. Not gated by automation.
    * - ``{"type": "find_windows", "title": "...", "app_id": "..."}``
      - List every mapped window whose ``title`` and ``app_id`` match
        the supplied regular expressions. Each filter is independent and
@@ -406,7 +420,11 @@ Each event is tagged by ``type``.
     window holds keyboard focus.
 
 ``window_title_changed``
-    ``{"type": "window_title_changed", "id": "...", "title": "...", "app_id": "..."}``
+    ``{"type": "window_title_changed", "id": "...", "title": "...", "app_id": "..."}``.
+    ``title`` is the *effective* title: the override set via
+    ``set_window_name`` when one is active, otherwise the client's own
+    title. Fired both when the client changes its title and when an
+    override is set or cleared.
 
 ``window_moved_to_workspace``
     ``{"type": "window_moved_to_workspace", "id": "...", "workspace": <1..count>}``.

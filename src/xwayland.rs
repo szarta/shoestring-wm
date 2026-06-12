@@ -240,6 +240,7 @@ impl XwmHandler for ShoestringWm {
             self.workspaces.forget(&window);
             self.pending_initial_center.remove(&window);
             self.rules_applied.remove(&window);
+            self.window_name_overrides.remove(&window);
             // Same FT cleanup the xdg destroy path runs — see
             // shoestring_wm_ft_drop memory note: dropping our Arc on the
             // handle is not enough, must explicitly remove_toplevel.

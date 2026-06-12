@@ -176,6 +176,33 @@ impl ShoestringWm {
         Ok(())
     }
 
+    /// Set (or, with an empty `name`, clear) the display-name override for the
+    /// toplevel whose FT identifier matches `id`. The override supersedes the
+    /// client's `xdg_toplevel` title everywhere the WM reports a title (see
+    /// [`crate::ipc::effective_title_app_id`]). Emits a `window_title_changed`
+    /// event carrying the new effective title so bars/menus update live.
+    pub fn set_window_name_by_id(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let (window, identifier) = self
+            .foreign_toplevels
+            .iter()
+            .find(|(_, h)| h.identifier() == id)
+            .map(|(w, h)| (w.clone(), h.identifier()))
+            .ok_or_else(|| format!("no window with id {id:?}"))?;
+        if name.is_empty() {
+            self.window_name_overrides.remove(&window);
+        } else {
+            self.window_name_overrides
+                .insert(window.clone(), name.to_string());
+        }
+        let (title, app_id) = crate::ipc::effective_title_app_id(self, &window);
+        self.emit_ipc(shoestring_ipc::Event::WindowTitleChanged {
+            id: identifier,
+            title,
+            app_id,
+        });
+        Ok(())
+    }
+
     /// Bring `window` to the foreground: restore it from the minimized stack if
     /// needed, switch to its workspace if it lives elsewhere, then run the same
     /// focus/raise/activate path as a click. Shared by the IPC `focus_window`

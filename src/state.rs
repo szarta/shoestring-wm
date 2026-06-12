@@ -85,6 +85,14 @@ pub struct ShoestringWm {
     /// destroy is sufficient cleanup. Title/app_id changes are pushed in
     /// [`crate::handlers::compositor`]'s commit hook.
     pub foreign_toplevels: HashMap<Window, ForeignToplevelHandle>,
+    /// IPC-set display-name overrides, keyed by the live window. When present,
+    /// the value supersedes the client's `xdg_toplevel` title everywhere the WM
+    /// reports a title (the `windows`/`get_tree` snapshots, `find_windows`
+    /// matching, the `window_title_changed` event). Set/cleared via
+    /// [`Request::SetWindowName`](shoestring_ipc::Request::SetWindowName) and
+    /// dropped when the window closes. Not forwarded to
+    /// wlr-foreign-toplevel-management taskbars, which keep the raw client title.
+    pub window_name_overrides: HashMap<Window, String>,
     /// wlr-foreign-toplevel-management: the *writable* sibling of
     /// `foreign_toplevels` (the read-only ext list). Lets waybar-style taskbars
     /// activate/close/minimize/maximize windows and read their state. Hand-wired
@@ -431,6 +439,7 @@ impl ShoestringWm {
             layer_shell_state,
             foreign_toplevel_list,
             foreign_toplevels: HashMap::new(),
+            window_name_overrides: HashMap::new(),
             foreign_toplevel_mgmt,
             shm_state,
             viewporter_state,
