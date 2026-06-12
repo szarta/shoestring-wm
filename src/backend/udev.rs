@@ -1310,6 +1310,12 @@ impl ShoestringWm {
         // borrow precludes calling &self methods further down.
         let locked = self.is_locked();
         let lock_surface = self.lock_surface_for(&output);
+        // Likewise capture the fullscreen window (if any) on this output now:
+        // the render path renders only it, dropping the bar/layer surfaces it
+        // covers. Skipped while locked (the lock surface owns the screen).
+        let fullscreen = (!locked)
+            .then(|| crate::layout::fullscreen_window_on(&self.space, &self.layout, &output))
+            .flatten();
 
         let Some(udev) = self.udev.as_mut() else {
             return;
@@ -1343,13 +1349,12 @@ impl ShoestringWm {
             // Drop all client windows from the composition while locked.
             Vec::new()
         } else {
-            smithay::desktop::space::space_render_elements(
+            crate::drawing::output_space_elements(
                 &mut renderer,
-                [&self.space],
+                &self.space,
                 &output,
-                1.0,
+                fullscreen.as_ref(),
             )
-            .unwrap_or_default()
         };
 
         // Cursor goes on top: build pointer elements from a captured snapshot

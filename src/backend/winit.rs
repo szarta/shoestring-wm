@@ -3,7 +3,10 @@ use std::time::Duration;
 use anyhow::Result;
 use smithay::{
     backend::{
-        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
+        renderer::{
+            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
+            gles::GlesRenderer,
+        },
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -145,10 +148,6 @@ pub fn init_winit(
                                 scale,
                             )
                         };
-                    // Empty space while locked so no client content leaks.
-                    let empty_space =
-                        smithay::desktop::Space::<smithay::desktop::Window>::default();
-                    let render_space = if locked { &empty_space } else { &state.space };
                     let clear = if locked {
                         [0.0, 0.0, 0.0, 1.0]
                     } else {
@@ -169,23 +168,45 @@ pub fn init_winit(
                         &cursor_elements,
                     );
 
-                    smithay::desktop::space::render_output::<
-                        _,
-                        crate::drawing::PointerRenderElement<GlesRenderer>,
-                        _,
-                        _,
-                    >(
-                        &output,
-                        renderer,
-                        &mut framebuffer,
-                        1.0,
-                        0,
-                        [render_space],
-                        &cursor_elements,
-                        &mut damage_tracker,
-                        clear,
-                    )
-                    .unwrap();
+                    // A fullscreen window on this output is rendered alone,
+                    // dropping the bar/layer surfaces it covers. While locked we
+                    // render an empty scene so no client content leaks.
+                    let fullscreen = if locked {
+                        None
+                    } else {
+                        crate::layout::fullscreen_window_on(&state.space, &state.layout, &output)
+                    };
+                    let space_elements = if locked {
+                        Vec::new()
+                    } else {
+                        crate::drawing::output_space_elements(
+                            renderer,
+                            &state.space,
+                            &output,
+                            fullscreen.as_ref(),
+                        )
+                    };
+                    // Cursor (custom) goes on top, then the space stack —
+                    // render_output draws first-element-first.
+                    let mut elements: Vec<
+                        crate::drawing::OutputRenderElements<
+                            GlesRenderer,
+                            WaylandSurfaceRenderElement<GlesRenderer>,
+                        >,
+                    > = Vec::with_capacity(cursor_elements.len() + space_elements.len());
+                    elements.extend(
+                        cursor_elements
+                            .into_iter()
+                            .map(crate::drawing::OutputRenderElements::Pointer),
+                    );
+                    elements.extend(
+                        space_elements
+                            .into_iter()
+                            .map(crate::drawing::OutputRenderElements::Space),
+                    );
+                    damage_tracker
+                        .render_output(renderer, &mut framebuffer, 0, &elements, clear)
+                        .unwrap();
                 }
                 backend.submit(Some(&[damage])).unwrap();
 

@@ -289,6 +289,23 @@ pub fn set_fullscreen(
     apply_geometry(space, window, output_geo, LayoutState::Fullscreen);
 }
 
+/// The window currently fullscreen on `output`, if any. The render path uses
+/// this to drop the layer-shell surfaces (bars/docks) and other windows that a
+/// fullscreen surface covers edge-to-edge, so they don't paint over it.
+pub fn fullscreen_window_on(
+    space: &Space<Window>,
+    layout: &LayoutManager,
+    output: &Output,
+) -> Option<Window> {
+    space
+        .elements()
+        .find(|w| {
+            layout.layout_state(w) == LayoutState::Fullscreen
+                && space.outputs_for_element(w).iter().any(|o| o == output)
+        })
+        .cloned()
+}
+
 /// Leave fullscreen, returning to the layout captured on entry (floating,
 /// tiled, or maximized). No-op if `window` is not currently fullscreen.
 pub fn unset_fullscreen(space: &mut Space<Window>, layout: &mut LayoutManager, window: &Window) {
