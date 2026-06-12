@@ -1,0 +1,66 @@
+name: WLCS
+
+# Wayland Conformance Test Suite. Builds the cdylib WLCS plugin
+# (crates/wlcs-shoestring, excluded from the workspace) and runs the full suite
+# against it, gating on the tracked xfail skip-list (tests/wlcs/run-wlcs.sh).
+#
+# DEFERRED — manual-trigger only for now (see todo #87). The harness works, but
+# the baseline is 162/1225 passing and tests/wlcs/skip-list.txt is not yet
+# seeded, so a push/PR gate would be red. Once the skip-list is seeded with the
+# current failures (and the wlcs-tagged feature tasks shrink it), replace the
+# `on:` block below with:
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin WLCS: it adds tests over time, and the xfail skip-list is only stable
+  # against a fixed suite. Bump deliberately (and re-seed) rather than tracking
+  # a moving branch.
+  WLCS_REF: v1.8.1
+
+jobs:
+  wlcs:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # WLCS build-deps (from its debian/control) plus a Rust toolchain for the
+      # plugin. libwayland-dev is for the C++ suite; the plugin itself dlopens
+      # libwayland at runtime and needs no -dev package.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config cmake \
+            libwayland-dev libboost-dev \
+            libgtest-dev libgmock-dev \
+            python3
+
+      - name: Build & install WLCS ${{ env.WLCS_REF }}
+        run: |
+          git clone --depth 1 --branch "$WLCS_REF" \
+            https://github.com/canonical/wlcs.git /tmp/wlcs
+          cmake -S /tmp/wlcs -B /tmp/wlcs/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/wlcs/build -j"$(nproc)"
+          sudo cmake --install /tmp/wlcs/build
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The plugin is its own (excluded) cargo workspace, so cache it under its
+      # manifest dir.
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/wlcs-shoestring
+
+      - name: Build WLCS plugin
+        run: cargo build --release --manifest-path crates/wlcs-shoestring/Cargo.toml
+
+      - name: Run WLCS (xfail-gated)
+        run: tests/wlcs/run-wlcs.sh crates/wlcs-shoestring/target/release/libwlcs_shoestring.so

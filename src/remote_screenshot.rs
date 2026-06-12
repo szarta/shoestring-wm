@@ -48,7 +48,7 @@ pub struct Pending {
     /// IPC client whose `Request::Screenshot` we're answering. Held by
     /// `Rc` so the connection stays alive across calloop iterations
     /// without being re-borrowed from the IPC server.
-    pub client: Rc<RefCell<crate::ipc::Client>>,
+    pub(crate) client: Rc<RefCell<crate::ipc::Client>>,
     pub client_id: crate::ipc::ClientId,
     /// PID of the spawned `shoestring-screenshot`, used to match the
     /// reaped-status record from the SIGCHLD drain.
@@ -104,7 +104,7 @@ impl ShoestringWm {
     /// machinery. Returns `Ok(path)` once spawn succeeds; the path is the
     /// destination we asked the child to write to. The eventual IPC reply
     /// reports the same path on success.
-    pub fn spawn_remote_screenshot(
+    pub(crate) fn spawn_remote_screenshot(
         &mut self,
         client_id: crate::ipc::ClientId,
         client: Rc<RefCell<crate::ipc::Client>>,

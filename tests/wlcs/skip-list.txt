@@ -1,0 +1,23 @@
+# WLCS xfail skip-list — tests we knowingly do not pass yet.
+#
+# Format: one gtest full test name per line (`Suite.Case`, or parameterized
+# `Suite/Case.Param/0`), followed by `# <reason>`. Blank lines and lines
+# starting with `#` are ignored. See check-results.py for the semantics:
+#   - a failing test listed here is an EXPECTED failure (xfail), non-fatal;
+#   - a failing test NOT listed here fails the build (regression / new gap);
+#   - a PASSING test listed here also fails the build — remove it from the
+#     list once we genuinely pass it, so it can't silently regress.
+#
+# Pinned suite: WLCS v1.8.1 (see .github/workflows/wlcs.yml). Re-seed on bump.
+#
+# STATUS (todo #87): NOT YET SEEDED — the harness is deferred. Current baseline
+# is 162/1225 passing; the ~1063 failures are real feature gaps tracked as the
+# `wlcs`-tagged tasks (130-139): touch, input regions, layer-shell layout,
+# popups, subsurfaces, foreign-toplevel handles, etc. Until this file is seeded
+# with those failures, .github/workflows/wlcs.yml stays manual-trigger only
+# (running it reports the full failure set, which is how you seed this list).
+#
+# Seed/refresh locally (paste the UNEXPECTED FAILURES list in, with reasons):
+#   cargo build --manifest-path crates/wlcs-shoestring/Cargo.toml
+#   WLCS=/path/to/wlcs tests/wlcs/run-wlcs.sh \
+#     crates/wlcs-shoestring/target/debug/libwlcs_shoestring.so
