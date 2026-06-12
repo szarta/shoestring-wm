@@ -3,7 +3,7 @@ use smithay::{
         find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, PopupKind,
         PopupManager, Space, Window,
     },
-    reexports::wayland_server::protocol::{wl_seat, wl_surface::WlSurface},
+    reexports::wayland_server::protocol::{wl_output, wl_seat, wl_surface::WlSurface},
     utils::{Logical, Serial, Size},
     wayland::{
         compositor::with_states,
@@ -115,6 +115,24 @@ impl XdgShellHandler for ShoestringWm {
         });
         self.unconstrain_popup(&surface);
         surface.send_repositioned(token);
+    }
+
+    // App-driven fullscreen (games, mpv, fullscreen video). `output` is the
+    // client's preferred monitor, if any. unset restores the prior layout.
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        output: Option<wl_output::WlOutput>,
+    ) {
+        if let Some(window) = self.find_window(&surface) {
+            self.fullscreen_window(&window, output);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.find_window(&surface) {
+            self.unfullscreen_window(&window);
+        }
     }
 
     // move/resize requests are wired up in M3 (Super+drag pointer grabs).

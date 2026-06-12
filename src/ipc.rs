@@ -873,6 +873,7 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             LayoutState::TiledLeft => "tiled_left",
             LayoutState::TiledRight => "tiled_right",
             LayoutState::Maximized => "maximized",
+            LayoutState::Fullscreen => "fullscreen",
         };
         by_workspace.entry(ws).or_default().push(WindowNode {
             id: handle.identifier(),

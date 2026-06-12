@@ -14,9 +14,13 @@ use smithay::{
             RelativeMotionEvent,
         },
     },
-    reexports::calloop::{
-        timer::{TimeoutAction, Timer},
-        RegistrationToken,
+    output::Output,
+    reexports::{
+        calloop::{
+            timer::{TimeoutAction, Timer},
+            RegistrationToken,
+        },
+        wayland_server::protocol::wl_output::WlOutput,
     },
     utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
     wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint},
@@ -283,6 +287,30 @@ impl ShoestringWm {
             return;
         };
         layout::set_layout(&mut self.space, &mut self.layout, &window, target);
+    }
+
+    /// Put `window` into app-driven fullscreen (xdg `set_fullscreen`, X11, or
+    /// foreign-toplevel-management). `output`, when the client names one,
+    /// selects which monitor to cover; otherwise the window's current output is
+    /// used. Unlike Maximize, fullscreen covers the whole output edge-to-edge,
+    /// ignoring layer-shell exclusive zones (bars/docks).
+    pub fn fullscreen_window(&mut self, window: &Window, output: Option<WlOutput>) {
+        let geo = output
+            .and_then(|wl| Output::from_resource(&wl))
+            .and_then(|o| self.space.output_geometry(&o))
+            .or_else(|| layout::output_rect_for(&self.space, window));
+        let Some(geo) = geo else {
+            tracing::debug!("fullscreen: no output geometry, ignoring request");
+            return;
+        };
+        layout::set_fullscreen(&mut self.space, &mut self.layout, window, geo);
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+    }
+
+    /// Leave app-driven fullscreen, restoring the pre-fullscreen layout.
+    pub fn unfullscreen_window(&mut self, window: &Window) {
+        layout::unset_fullscreen(&mut self.space, &mut self.layout, window);
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
     }
 
     fn minimize_focused(&mut self) {
