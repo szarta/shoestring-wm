@@ -92,12 +92,14 @@ pub fn pick_color(
 
 /// Parse the contents of `/sys/class/power_supply/BAT*/capacity`.
 /// Public so tests can exercise it without sysfs present.
+#[allow(dead_code)] // used by linux module + tests; dead on non-Linux build
 pub fn parse_capacity_str(s: &str) -> Option<u8> {
     s.trim().parse::<u32>().ok().map(|v| v.min(100) as u8)
 }
 
 /// Parse the contents of `/sys/class/power_supply/BAT*/status`.
 /// Public so tests can exercise it without sysfs present.
+#[allow(dead_code)] // used by linux module + tests; dead on non-Linux build
 pub fn parse_status_str(s: &str) -> BatteryState {
     match s.trim() {
         "Charging" => BatteryState::Charging,
