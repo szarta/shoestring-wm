@@ -82,9 +82,23 @@ impl ShoestringWm {
                 for w in warnings {
                     tracing::warn!(target: "shoestring_wm::config", "{w}");
                 }
+                // Detect an XKB change before the swap: rebuilding the keymap
+                // resets the active layout to the first entry, so we only do it
+                // when the xkb_* fields actually changed (not on every reload).
+                let xkb_changed = {
+                    let (a, b) = (&self.config.general, &cfg.general);
+                    a.xkb_layout != b.xkb_layout
+                        || a.xkb_variant != b.xkb_variant
+                        || a.xkb_options != b.xkb_options
+                        || a.xkb_rules != b.xkb_rules
+                        || a.xkb_model != b.xkb_model
+                };
                 self.config = cfg;
                 self.bindings = table;
                 self.reapply_input_config();
+                if xkb_changed {
+                    self.reapply_xkb_config();
+                }
                 tracing::info!(path = %path.display(), "config reloaded");
                 self.emit_ipc(shoestring_ipc::Event::ConfigReloaded);
                 Ok(())
@@ -113,6 +127,40 @@ impl ShoestringWm {
 
     #[cfg(not(feature = "tty"))]
     fn reapply_input_config(&mut self) {}
+
+    /// Rebuild the keyboard keymap from `[general].xkb_*` after a reload that
+    /// changed those fields. Resets the active layout to the first entry, so
+    /// the caller gates this on an actual change. Strings are cloned up front
+    /// so the seat call (which takes `&mut self` as event data) doesn't
+    /// collide with the config borrow.
+    fn reapply_xkb_config(&mut self) {
+        let g = &self.config.general;
+        let (rules, model, layout, variant, options) = (
+            g.xkb_rules.clone(),
+            g.xkb_model.clone(),
+            g.xkb_layout.clone(),
+            g.xkb_variant.clone(),
+            g.xkb_options.clone(),
+        );
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let xkb_config = smithay::input::keyboard::XkbConfig {
+            rules: &rules,
+            model: &model,
+            layout: &layout,
+            variant: &variant,
+            options,
+        };
+        match keyboard.set_xkb_config(self, xkb_config) {
+            Ok(()) => tracing::info!(layout = %layout, "keyboard layout reconfigured"),
+            Err(e) => tracing::warn!(
+                ?e,
+                layout = %layout,
+                "config reload: invalid XKB config, keymap unchanged"
+            ),
+        }
+    }
 
     /// Notify-thread callback path: a filesystem event arrived. (Re-)arm
     /// the debounce timer; the previous one is removed so an unbroken

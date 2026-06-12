@@ -126,6 +126,34 @@ The ``[general]`` section
        annoyance, and not advertising the global means a stray idle
        client simply finds nothing to talk to. Set ``true`` on a laptop
        where you do want idle dimming/locking.
+   * - ``xkb_layout``
+     - string
+     - ``""``
+     - Comma-separated XKB layout codes — ``"us"``, ``"us,de"``,
+       ``"fr,ru"``. With more than one, the ``cycle-layout`` action
+       (Super+Space by default) switches between them at runtime. Empty
+       uses xkbcommon's default (``XKB_DEFAULT_LAYOUT``, usually ``us``).
+   * - ``xkb_variant``
+     - string
+     - ``""``
+     - Comma-separated variants, one per layout — e.g. ``"dvorak"`` or
+       ``",nodeadkeys"`` (default variant for the first layout, nodeadkeys
+       for the second). Empty uses each layout's default variant.
+   * - ``xkb_options``
+     - string
+     - unset
+     - Comma-separated XKB options — non-layout tweaks like
+       ``"ctrl:nocaps"`` (Caps Lock acts as Ctrl) or
+       ``"grp:alt_shift_toggle"`` (also switch layouts with Alt+Shift).
+   * - ``xkb_rules`` / ``xkb_model``
+     - string
+     - ``""``
+     - Rarely changed. Rules file (usually ``"evdev"``) and keyboard model
+       (e.g. ``"pc105"``). Empty uses the xkbcommon defaults.
+
+Layout/variant/options/rules/model changes apply on config reload
+(rebuilding the keymap); an invalid combination is rejected with a warning,
+leaving the previous keymap in place.
 
 Example::
 
@@ -139,6 +167,8 @@ Example::
     automation_enabled = false
     screen_capture_enabled = false
     idle_notifications_enabled = false
+    xkb_layout = "us,de"
+    xkb_options = "grp:alt_shift_toggle"
 
 The ``[workspaces]`` section
 ----------------------------
@@ -390,6 +420,13 @@ Each action type and its fields:
     raising it (the Alt+Tab switcher). Repeated presses round-robin
     through every window and wrap around. Does nothing when the
     workspace has fewer than two windows.
+
+``cycle-layout``
+    Switch to the next keyboard layout listed in ``[general].xkb_layout``,
+    wrapping at the end. Bound to Super+Space by default. A no-op when only
+    one layout is configured. Only the active layout index changes — no
+    keymap rebuild — and the new state is sent to the focused client
+    immediately.
 
 ``focus-workspace``
     Switch every output to show workspace ``index`` (1-based, 1..=16).

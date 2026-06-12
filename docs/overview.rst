@@ -100,6 +100,9 @@ Implemented today:
   or confine it to a region of their surface. A lock activates while the
   pointer is over the requesting surface and releases when it leaves.
 - xcursor sprite rendering at the pointer.
+- Configurable XKB keyboard layouts (``[general].xkb_layout`` and
+  friends), with multiple layouts and a ``cycle-layout`` action
+  (``Super+Space`` by default) to switch between them at runtime.
 - IPC server with query + event-stream subscriptions, plus key/text/
   click injection, action dispatch, find-windows regex search, command
   execution, and screenshot capture (the last four gated by a runtime

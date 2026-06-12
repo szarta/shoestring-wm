@@ -348,12 +348,38 @@ impl ShoestringWm {
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
-        seat.add_keyboard(
-            Default::default(),
-            config.general.repeat_delay,
-            config.general.repeat_rate,
-        )
-        .unwrap();
+        // Build the XKB keymap from [general].xkb_* (layouts, variants,
+        // options, rules, model). Empty fields fall back to xkbcommon's own
+        // defaults, so the common single-layout case needs no config.
+        let xkb_config = smithay::input::keyboard::XkbConfig {
+            rules: &config.general.xkb_rules,
+            model: &config.general.xkb_model,
+            layout: &config.general.xkb_layout,
+            variant: &config.general.xkb_variant,
+            options: config.general.xkb_options.clone(),
+        };
+        if seat
+            .add_keyboard(
+                xkb_config,
+                config.general.repeat_delay,
+                config.general.repeat_rate,
+            )
+            .is_err()
+        {
+            // A bad layout/variant/option must not wedge the whole session —
+            // warn and come up with the default keymap instead.
+            tracing::warn!(
+                layout = %config.general.xkb_layout,
+                variant = %config.general.xkb_variant,
+                "invalid XKB config; falling back to the default keymap"
+            );
+            seat.add_keyboard(
+                Default::default(),
+                config.general.repeat_delay,
+                config.general.repeat_rate,
+            )
+            .unwrap();
+        }
         seat.add_pointer();
 
         // Pointer lock/confine (FPS games, RDP) plus its required companion,

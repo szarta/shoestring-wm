@@ -369,6 +369,31 @@ pub struct General {
     /// to `true` on a laptop where you do want idle dimming/locking.
     #[serde(default)]
     pub idle_notifications_enabled: bool,
+    /// XKB keyboard layout(s): a comma-separated list of layout codes — e.g.
+    /// `"us"`, `"us,de"`, `"fr,ru"`. With more than one, `Action::CycleLayout`
+    /// (bound to Super+Space by default) switches between them at runtime.
+    /// Empty uses xkbcommon's default (the `XKB_DEFAULT_LAYOUT` environment
+    /// variable, usually `us`).
+    #[serde(default)]
+    pub xkb_layout: String,
+    /// XKB variant(s), comma-separated, one per layout — e.g. `"dvorak"`, or
+    /// `",nodeadkeys"` (default variant for the first layout, nodeadkeys for
+    /// the second). Empty uses the default variant of each layout.
+    #[serde(default)]
+    pub xkb_variant: String,
+    /// XKB options, comma-separated — non-layout tweaks like `"ctrl:nocaps"`
+    /// (Caps Lock acts as Ctrl) or `"grp:alt_shift_toggle"` (also switch
+    /// layouts with Alt+Shift). Unset leaves xkbcommon's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xkb_options: Option<String>,
+    /// XKB rules file (rarely changed; usually `"evdev"`). Empty uses the
+    /// xkbcommon default.
+    #[serde(default)]
+    pub xkb_rules: String,
+    /// XKB keyboard model (rarely changed; e.g. `"pc105"`). Empty uses the
+    /// xkbcommon default.
+    #[serde(default)]
+    pub xkb_model: String,
 }
 
 fn default_repeat_delay() -> i32 {
@@ -403,6 +428,11 @@ impl Default for General {
             automation_enabled: false,
             screen_capture_enabled: false,
             idle_notifications_enabled: false,
+            xkb_layout: String::new(),
+            xkb_variant: String::new(),
+            xkb_options: None,
+            xkb_rules: String::new(),
+            xkb_model: String::new(),
         }
     }
 }
@@ -488,6 +518,10 @@ pub enum Action {
     /// itself drive the protocol so a misconfigured / missing binary
     /// just logs and leaves the session unlocked.
     Lock,
+    /// Cycle the active keyboard layout to the next entry in
+    /// [`General::xkb_layout`], wrapping at the end. A no-op when only one
+    /// layout is configured. Bound to Super+Space by default.
+    CycleLayout,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -643,6 +677,14 @@ impl Config {
                 mods: super_shift(),
                 key: "l".into(),
                 action: Action::Lock,
+            },
+            // Cycle keyboard layout (Super+Space), matching the GNOME/macOS
+            // muscle memory. A no-op until [general].xkb_layout lists more
+            // than one layout.
+            Binding {
+                mods: super_only(),
+                key: "space".into(),
+                action: Action::CycleLayout,
             },
             // Workspace navigation — mirrors the user's Openbox W-h / W-l.
             Binding {
@@ -976,6 +1018,50 @@ middle_emulation = true
     #[test]
     fn input_unknown_enum_value_rejected() {
         assert!(toml::from_str::<Config>("[input]\naccel_profile = \"turbo\"\n").is_err());
+    }
+
+    #[test]
+    fn xkb_defaults_are_empty() {
+        let g = Config::default().general;
+        assert!(g.xkb_layout.is_empty());
+        assert!(g.xkb_variant.is_empty());
+        assert!(g.xkb_options.is_none());
+        assert!(g.xkb_rules.is_empty());
+        assert!(g.xkb_model.is_empty());
+    }
+
+    #[test]
+    fn xkb_config_parses() {
+        let cfg: Config = toml::from_str(
+            "[general]\nxkb_layout = \"us,de\"\nxkb_variant = \",nodeadkeys\"\nxkb_options = \"grp:alt_shift_toggle,ctrl:nocaps\"\nxkb_model = \"pc105\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.general.xkb_layout, "us,de");
+        assert_eq!(cfg.general.xkb_variant, ",nodeadkeys");
+        assert_eq!(
+            cfg.general.xkb_options.as_deref(),
+            Some("grp:alt_shift_toggle,ctrl:nocaps")
+        );
+        assert_eq!(cfg.general.xkb_model, "pc105");
+    }
+
+    #[test]
+    fn cycle_layout_action_parses() {
+        let b: Binding = toml::from_str(
+            "mods = [\"Super\"]\nkey = \"space\"\naction = { type = \"cycle-layout\" }\n",
+        )
+        .unwrap();
+        assert!(matches!(b.action, Action::CycleLayout));
+    }
+
+    #[test]
+    fn default_bindings_include_cycle_layout() {
+        let cfg = Config::with_default_bindings();
+        assert!(cfg.bindings.iter().any(|b| {
+            matches!(b.action, Action::CycleLayout)
+                && b.key == "space"
+                && b.mods.iter().any(|m| m == "Super")
+        }));
     }
 
     #[test]

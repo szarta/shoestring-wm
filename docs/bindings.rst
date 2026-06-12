@@ -54,6 +54,7 @@ Binding                            Action
 ``Super+P``                        Spawn ``shoestring-menu`` (commands)
 ``Super+B``                        Spawn ``shoestring-menu --mode bookmarks``
 ``Super+Shift+L``                  Lock session (spawn ``shoestring-lock``)
+``Super+Space``                    Cycle keyboard layout (``cycle-layout``)
 ``Super+Shift+Q``                  Quit shoestring-wm (confirm dialog)
 ================================  ============================================
 

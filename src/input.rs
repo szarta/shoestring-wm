@@ -210,7 +210,24 @@ impl ShoestringWm {
                 }
             }
             Action::Lock => self.spawn_lock(),
+            Action::CycleLayout => self.cycle_keyboard_layout(),
         }
+    }
+
+    /// Advance the keyboard to the next XKB layout (Super+Space by default),
+    /// wrapping at the end. A no-op when only one layout is configured. This
+    /// only changes the active layout index — no keymap recompile — and
+    /// smithay broadcasts the new state to the focused client automatically.
+    fn cycle_keyboard_layout(&mut self) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let name = keyboard.with_xkb_state(self, |mut ctx| {
+            ctx.cycle_next_layout();
+            let xkb = ctx.xkb().lock().unwrap();
+            xkb.layout_name(xkb.active_layout()).to_string()
+        });
+        tracing::info!(layout = %name, "keyboard layout switched");
     }
 
     /// Spawn the configured `lock_command`. The child binds
