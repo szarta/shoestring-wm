@@ -149,7 +149,11 @@ Each request is a JSON object with a ``type`` discriminator:
      - Flip the runtime automation gate. Reply is ``automation`` with
        the new state; ``automation_changed`` is broadcast to
        subscribers when the value actually changes. Not persisted to
-       disk.
+       disk. Automation is a superset of screen capture: this flips the
+       screen-capture gate the same way (so ``screenshot`` works under
+       automation alone, and turning automation off returns the session
+       to no-capture), emitting ``screen_capture_changed`` when capture
+       follows.
    * - ``{"type": "automation_status"}``
      - Read the current automation gate state without changing it.
        Reply is ``automation``.
@@ -216,6 +220,12 @@ it): ``inject_key``, ``inject_text``, ``inject_click``, ``move_mouse``,
 ``dispatch_action``, ``screenshot``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
+
+Because ``screenshot`` also needs the ``zwlr_screencopy_manager_v1``
+global (raised only by the screen-capture gate), enabling automation
+*also* enables screen capture — automation is a superset, so
+``automation on`` alone is enough to capture and ``automation off``
+returns the session to no-capture.
 
 Responses
 ---------

@@ -890,6 +890,29 @@ impl ShoestringWm {
         }
     }
 
+    /// Apply the automation gate, coupling the screen-capture gate to follow
+    /// it. Automation is a *superset* of screen capture: a session an agent can
+    /// drive, it can also observe — the automation-gated `screenshot` request
+    /// is implemented via the `zwlr_screencopy_manager_v1` global, which only
+    /// the capture gate raises. Enabling automation therefore also opens the
+    /// capture gate (so `automation on -> screenshot -> automation off` works
+    /// without a second toggle), and disabling it closes the capture gate again
+    /// so the session returns to a no-capture state. Coupling runs through
+    /// [`Self::set_screen_capture`], so the bar's capture indicator stays lit —
+    /// observation is never silent.
+    ///
+    /// Returns whether the screen-capture gate changed as a side effect, so the
+    /// caller can emit the matching `ScreenCaptureChanged` event. The caller
+    /// owns automation logging / `AutomationChanged` (mirrors set_screen_capture).
+    pub fn set_automation(&mut self, enabled: bool) -> bool {
+        self.automation_enabled = enabled;
+        let capture_changed = self.screen_capture_enabled != enabled;
+        if capture_changed {
+            self.set_screen_capture(enabled);
+        }
+        capture_changed
+    }
+
     /// Apply the screen-capture gate. Idempotent: brings the
     /// `zwlr_screencopy_manager_v1` global into existence when `enabled` and
     /// withdraws it when not, and updates [`Self::screen_capture_enabled`].

@@ -366,11 +366,18 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             }
             Request::SetAutomation { enabled } => {
                 let changed = state.automation_enabled != enabled;
-                state.automation_enabled = enabled;
+                // Automation is a superset of screen capture: this also opens
+                // (or closes) the capture gate so `screenshot` works under
+                // automation alone. Returns whether capture followed.
+                let capture_changed = state.set_automation(enabled);
                 let _ = write_response(client, &Response::Automation { enabled });
                 if changed {
                     tracing::info!(enabled, "automation gate changed via ipc");
                     state.emit_ipc(Event::AutomationChanged { enabled });
+                }
+                if capture_changed {
+                    tracing::info!(enabled, "screen-capture gate followed automation gate");
+                    state.emit_ipc(Event::ScreenCaptureChanged { enabled });
                 }
                 return true;
             }

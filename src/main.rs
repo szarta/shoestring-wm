@@ -164,7 +164,11 @@ fn main() -> Result<()> {
     register_reaper_drain(&state.loop_handle, reap_read_fd)?;
 
     if cli.enable_automation && !state.automation_enabled {
-        state.automation_enabled = true;
+        // Couples the screen-capture gate on too (automation is a superset),
+        // so a session started with --enable-automation can screenshot without
+        // a separate `screen-capture on`. No subscribers exist yet, so the
+        // coupled ScreenCaptureChanged event is intentionally not emitted here.
+        state.set_automation(true);
         tracing::info!("automation gate forced on by --enable-automation");
     }
 

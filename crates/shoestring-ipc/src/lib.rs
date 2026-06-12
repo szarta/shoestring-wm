@@ -122,6 +122,14 @@ pub enum Request {
     /// with the new state; an [`Event::AutomationChanged`] is broadcast
     /// to subscribers when the value actually flips. Not persisted to
     /// disk — the config file is the source of truth at next start.
+    ///
+    /// Automation is a superset of screen capture: flipping this gate also
+    /// flips the screen-capture gate the same way (an agent that can drive
+    /// the session can also observe it — the `Screenshot` request needs the
+    /// capture global). So enabling automation alone is enough to
+    /// screenshot, and disabling it returns the session to no-capture. When
+    /// the capture gate follows, an [`Event::ScreenCaptureChanged`] is
+    /// broadcast too.
     SetAutomation { enabled: bool },
     /// Read the current automation gate state without changing it. Reply
     /// is [`Response::Automation`].
