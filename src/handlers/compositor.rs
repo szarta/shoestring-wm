@@ -3,7 +3,7 @@ use smithay::{
     desktop::Window,
     reexports::wayland_server::{
         protocol::{wl_buffer, wl_surface::WlSurface},
-        Client,
+        Client, Resource,
     },
     wayland::{
         buffer::BufferHandler,
@@ -40,6 +40,24 @@ impl CompositorHandler for ShoestringWm {
             return &state.compositor_state;
         }
         panic!("client connected with unknown ClientData type");
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // Per-client resource attribution: bump the owning client's live
+        // `wl_surface` count so a leak report can name the offender. The
+        // owner name is memoised in ClientState, so the `/proc` lookup runs
+        // at most once per client. See [`crate::metrics`].
+        if let Some(client) = surface.client() {
+            let owner = self.client_metrics_name(&client);
+            self.metrics.track_surface(surface.id(), owner);
+        }
+    }
+
+    fn destroyed(&mut self, surface: &WlSurface) {
+        // Symmetric with `new_surface`: decrement the owning client's count.
+        // Keyed by object id (not the client) so it balances even when the
+        // dying surface's `client()` no longer resolves.
+        self.metrics.untrack_surface(&surface.id());
     }
 
     fn commit(&mut self, surface: &WlSurface) {

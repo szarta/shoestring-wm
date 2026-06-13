@@ -51,8 +51,8 @@ Each request is a JSON object with a ``type`` discriminator:
      - Switch into streaming mode. Server replies once with ``Ok`` then
        pushes events.
    * - ``{"type": "metrics"}``
-     - Snapshot the diagnostics registry — process resource gauges plus
-       WM counts. Reply is ``metrics``. Read-only and not gated by
+     - Snapshot the diagnostics registry — process resource gauges, WM
+       counts, and per-client surface gauges. Reply is ``metrics``. Read-only and not gated by
        automation. Sampled fresh on demand, so it answers even when
        ``[diagnostics].enabled`` is off.
    * - ``{"type": "metrics_stream", "interval_ms": 1000}``
@@ -325,11 +325,30 @@ The server replies with a single JSON object tagged by ``type``:
          - Connected IPC clients.
        * - ``ipc.subscribers``
          - Long-lived stream subscribers (event + metrics).
+       * - ``client.<name>.surfaces``
+         - Live ``wl_surface`` count for one Wayland client. ``<name>`` is
+           the client's process ``comm`` joined with its pid
+           (``shoestring-bar-1234``); the pid keeps it unique when two
+           instances share a name. One row appears per client that holds at
+           least one surface and vanishes when its last surface is
+           destroyed. On platforms without ``/proc`` the name degrades to
+           ``pid-<n>``.
 
     The WM warns in its log when ``process.open_fds`` crosses
     ``[diagnostics].fd_warn_fraction`` of ``process.fd_limit`` or climbs
     monotonically — an early signal of a file-descriptor leak before it
-    can exhaust the limit and crash the session.
+    can exhaust the limit and crash the session. The per-client
+    ``client.<name>.surfaces`` gauges turn that process-wide signal into
+    attribution: a client whose surface count climbs without bound is the
+    likely offender.
+
+    .. note::
+
+       v1 attributes ``wl_surface`` only. Smithay exposes surface
+       create/destroy hooks but no creation hook for ``wl_buffer`` /
+       ``wl_shm_pool``, so those resource kinds can't yet be counted
+       per-client without reimplementing its shm dispatch. Surfaces are the
+       resource the compositor owns end-to-end.
 
 ``WindowSummary``::
 

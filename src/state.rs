@@ -1187,6 +1187,10 @@ fn build_workspace_manager(
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Cached metrics name (`comm-pid`) for this client, resolved once on
+    /// first surface creation. Lives here so the `/proc` lookup happens at
+    /// most once per client, not per surface. See [`crate::metrics`].
+    pub metrics_name: std::sync::OnceLock<String>,
 }
 
 impl ClientData for ClientState {
