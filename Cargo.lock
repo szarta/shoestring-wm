@@ -2029,6 +2029,8 @@ dependencies = [
  "fuzzy-matcher",
  "libc",
  "memmap2",
+ "serde_json",
+ "shoestring-ipc",
  "tempfile",
  "tracing",
  "tracing-subscriber",

@@ -4,17 +4,17 @@ shoestring-menu
 Synopsis
 --------
 
-| **shoestring-menu** [**--mode** commands|bookmarks] [**--source** *PATH*]
+| **shoestring-menu** [**--mode** commands|bookmarks|windows] [**--source** *PATH*]
 | **shoestring-menu** **-h** | **--help**
 
 Description
 -----------
 
 A dmenu-style launcher for **shoestring-wm**\(1). Displays a Wayland
-layer-shell panel of candidates filtered as you type, runs the
+layer-shell panel of candidates filtered as you type, acts on the
 selection, and exits.
 
-Two modes share the same UI:
+Three modes share the same UI:
 
 **commands**
     Reads one command per line from the source file. Blank lines and
@@ -27,14 +27,22 @@ Two modes share the same UI:
     comment tags) is displayed and searchable. The URL is opened via
     ``xdg-open`` on selection.
 
+**windows**
+    A live window switcher. Candidates come from the running WM over its
+    IPC socket (not a file): one row per mapped window across every
+    workspace, labelled ``[workspace] app-id — title`` (focused window
+    marked ``*``). Selecting a row switches to that window's workspace and
+    focuses it — unminimizing if needed — via the ``FocusWindow`` IPC
+    request. ``--source`` is ignored.
+
 Options
 -------
 
-**--mode** commands|bookmarks
+**--mode** commands|bookmarks|windows
     Select the mode. Default ``commands``.
 
 **--source** *PATH*
-    Override the default candidate source file.
+    Override the default candidate source file (commands/bookmarks only).
 
 **-h**, **--help**
     Print short usage.
@@ -58,8 +66,14 @@ Environment
 ``WAYLAND_DISPLAY``
     Required.
 
+``SHOESTRING_WM_SOCKET``
+    Path to the WM IPC socket, used by ``--mode windows`` to list and
+    focus windows. Falls back to
+    ``$XDG_RUNTIME_DIR/shoestring-wm-$WAYLAND_DISPLAY.sock``. Unused by
+    the other modes.
+
 ``XDG_CONFIG_HOME``, ``HOME``
-    Resolve the default source files.
+    Resolve the default source files (commands/bookmarks modes).
 
 ``SHOESTRING_MENU_FONT``
     Override the font search path (a TTF file). Same idea as
@@ -75,7 +89,8 @@ Keybindings (inside the menu)
 -----------------------------
 
 ``Enter``
-    Run the highlighted candidate.
+    Act on the highlighted candidate (spawn it, open the URL, or focus
+    the window, depending on mode).
 
 ``Escape``
     Exit without running anything.

@@ -626,6 +626,16 @@ impl Config {
                     args: vec!["--mode".into(), "bookmarks".into()],
                 },
             },
+            // Window-jump menu: fuzzy-focus any mapped window across all
+            // workspaces. `j` for "jump".
+            Binding {
+                mods: super_only(),
+                key: "j".into(),
+                action: Action::Spawn {
+                    command: "shoestring-menu".into(),
+                    args: vec!["--mode".into(), "windows".into()],
+                },
+            },
             Binding {
                 mods: super_only(),
                 key: "e".into(),

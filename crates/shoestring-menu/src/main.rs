@@ -23,6 +23,7 @@ use std::{
 use anyhow::{Context, Result};
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
+use shoestring_ipc::WindowSummary;
 use tracing_subscriber::EnvFilter;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
@@ -51,6 +52,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
+
+mod ipc;
 
 /// Input strip height in logical pixels.
 const INPUT_HEIGHT: u32 = 24;
@@ -94,6 +97,9 @@ const FONT_CANDIDATES: &[&str] = &[
 enum Mode {
     Commands,
     Bookmarks,
+    /// Live window switcher: candidates come from the WM over IPC, not a
+    /// file, and Enter focuses the picked window instead of spawning.
+    Windows,
 }
 
 struct State {
@@ -144,6 +150,8 @@ struct State {
 /// - Commands mode: `display == invoke` (the file line, whitespace-split at exec).
 /// - Bookmarks mode: `display` is the original markdown line; `invoke` is the URL
 ///   extracted from `](...)`. xdg-open opens the URL on selection.
+/// - Windows mode: `display` is a `[ws] app — title` label; `invoke` is the
+///   window's foreign-toplevel id, passed to `Request::FocusWindow`.
 #[derive(Clone, Debug)]
 struct Candidate {
     display: String,
@@ -179,17 +187,24 @@ fn main() -> Result<()> {
     init_tracing();
 
     let cli = parse_args()?;
-    let source = cli.source.unwrap_or_else(|| default_source(cli.mode));
     let candidates = match cli.mode {
-        Mode::Commands => load_command_list(&source),
-        Mode::Bookmarks => load_bookmarks_md(&source),
+        Mode::Commands | Mode::Bookmarks => {
+            let source = cli.source.unwrap_or_else(|| default_source(cli.mode));
+            let c = match cli.mode {
+                Mode::Commands => load_command_list(&source),
+                Mode::Bookmarks => load_bookmarks_md(&source),
+                Mode::Windows => unreachable!(),
+            };
+            tracing::info!(mode = ?cli.mode, source = %source.display(), count = c.len(), "candidates loaded");
+            c
+        }
+        // `windows` mode sources from the WM, not a file; --source is ignored.
+        Mode::Windows => {
+            let c = load_windows()?;
+            tracing::info!(mode = ?cli.mode, count = c.len(), "candidates loaded");
+            c
+        }
     };
-    tracing::info!(
-        mode = ?cli.mode,
-        source = %source.display(),
-        count = candidates.len(),
-        "candidates loaded"
-    );
     let mode = cli.mode;
 
     let font = load_font().context("could not load any system font")?;
@@ -352,11 +367,17 @@ fn parse_args() -> Result<Cli> {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!(
-                    "shoestring-menu [--mode commands|bookmarks] [--source PATH]\n\
+                    "shoestring-menu [--mode commands|bookmarks|windows] [--source PATH]\n\
                      \n\
-                     Defaults (alongside the wm config):\n\
+                     Modes:\n\
+                       commands  (default) spawn a curated command\n\
+                       bookmarks open a markdown link via xdg-open\n\
+                       windows   focus a mapped window (sourced live from the wm)\n\
+                     \n\
+                     Defaults (alongside the wm config; --source overrides):\n\
                        commands  $XDG_CONFIG_HOME/shoestring-wm/executables\n\
-                       bookmarks $XDG_CONFIG_HOME/shoestring-wm/bookmarks"
+                       bookmarks $XDG_CONFIG_HOME/shoestring-wm/bookmarks\n\
+                       windows   no file; queried over the wm IPC socket"
                 );
                 std::process::exit(0);
             }
@@ -365,7 +386,10 @@ fn parse_args() -> Result<Cli> {
                 mode = match v.as_str() {
                     "commands" => Mode::Commands,
                     "bookmarks" => Mode::Bookmarks,
-                    other => anyhow::bail!("unknown mode {other:?} (expected commands|bookmarks)"),
+                    "windows" => Mode::Windows,
+                    other => anyhow::bail!(
+                        "unknown mode {other:?} (expected commands|bookmarks|windows)"
+                    ),
                 };
                 i += 2;
             }
@@ -391,6 +415,46 @@ fn default_source(mode: Mode) -> PathBuf {
     match mode {
         Mode::Commands => dir.join("executables"),
         Mode::Bookmarks => dir.join("bookmarks"),
+        // windows mode never reads a file — its candidates come from IPC.
+        Mode::Windows => unreachable!("windows mode has no default source file"),
+    }
+}
+
+/// Build candidates from the WM's live window list (over IPC). Sorted by
+/// workspace, then app_id/title, so the list reads top-to-bottom like the
+/// desktops are laid out and stays stable between invocations.
+fn load_windows() -> Result<Vec<Candidate>> {
+    let mut windows = ipc::fetch_windows().context("query window list from shoestring-wm")?;
+    windows.sort_by(|a, b| {
+        a.workspace
+            .cmp(&b.workspace)
+            .then_with(|| a.app_id.cmp(&b.app_id))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    Ok(windows.into_iter().map(window_candidate).collect())
+}
+
+/// Format one window summary into a candidate. The currently-focused window
+/// is marked with `*`; an empty app_id or title falls back to a placeholder
+/// so a row is never blank. The whole label is fuzzy-searchable, so typing an
+/// app name, a title fragment, or a custom IPC name (the WM folds
+/// `set_window_name` into these fields) all match. `invoke` is the
+/// foreign-toplevel id we hand back to `Request::FocusWindow`.
+fn window_candidate(w: WindowSummary) -> Candidate {
+    let marker = if w.focused { '*' } else { ' ' };
+    let app = if w.app_id.is_empty() {
+        "(no app-id)"
+    } else {
+        w.app_id.as_str()
+    };
+    let display = if w.title.is_empty() {
+        format!("{marker} [{}] {app}", w.workspace)
+    } else {
+        format!("{marker} [{}] {app} — {}", w.workspace, w.title)
+    };
+    Candidate {
+        display,
+        invoke: w.id,
     }
 }
 
@@ -915,21 +979,29 @@ fn handle_key(state: &mut State, sym: xkb::Keysym, utf8: &str, ctrl: bool, shift
     true
 }
 
-/// Spawn the currently-selected match, or the literal query if no match is
-/// highlighted. M2 only handles Mode::Commands; M3 wires Mode::Bookmarks.
+/// Act on the current selection. The highlighted candidate's `invoke` string
+/// is the payload; for commands/bookmarks a non-empty query is a fallback so
+/// you can dispatch something not in the list. Windows mode has no such
+/// fallback — only a real, highlighted window carries a focusable id.
 fn dispatch_selection(state: &State) {
-    let cmd: String = if let Some(idx) = state.matches.get(state.selected).copied() {
-        state.candidates[idx].invoke.clone()
-    } else if !state.query.is_empty() {
-        state.query.clone()
-    } else {
-        return;
+    let selected = state
+        .matches
+        .get(state.selected)
+        .copied()
+        .map(|idx| state.candidates[idx].invoke.clone());
+    // For free-text modes, fall back to the typed query when no row is lit.
+    let or_query = || {
+        selected
+            .clone()
+            .or_else(|| (!state.query.is_empty()).then(|| state.query.clone()))
     };
+
     match state.mode {
         Mode::Commands => {
             // Whitespace-split so curated entries like `code --some-flag`
             // exec with args. No shell quoting — users who need that can
             // wrap their entry in a script.
+            let Some(cmd) = or_query() else { return };
             let tokens: Vec<&str> = cmd.split_whitespace().collect();
             if tokens.is_empty() {
                 return;
@@ -939,10 +1011,19 @@ fn dispatch_selection(state: &State) {
             }
         }
         Mode::Bookmarks => {
-            // `cmd` is the URL we extracted at load time. xdg-open routes to
-            // the user's configured default browser.
-            if let Err(e) = spawn_detached(&["xdg-open", &cmd]) {
+            // The payload is the URL we extracted at load time. xdg-open
+            // routes to the user's configured default browser.
+            let Some(url) = or_query() else { return };
+            if let Err(e) = spawn_detached(&["xdg-open", &url]) {
                 tracing::error!(error = ?e, "xdg-open failed");
+            }
+        }
+        Mode::Windows => {
+            // The payload is the foreign-toplevel id. The WM switches to the
+            // window's workspace and focuses it (unminimizing if needed).
+            let Some(id) = selected else { return };
+            if let Err(e) = ipc::focus_window(&id) {
+                tracing::error!(error = ?e, "focus_window failed");
             }
         }
     }

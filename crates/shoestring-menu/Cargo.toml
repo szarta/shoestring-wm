@@ -43,3 +43,10 @@ xkbcommon = "0.9"
 # skim-style fuzzy scoring. Small (one transitive crate, `thread_local`)
 # and gives dmenu/fzf-style subsequence matches out of the box.
 fuzzy-matcher = "0.3"
+
+# shoestring-wm IPC wire types + socket discovery — used by the `windows`
+# mode, which sources its candidates from the live window list
+# (Request::Windows) and focuses the pick (Request::FocusWindow). Sibling
+# workspace member, in lockstep with the WM by construction.
+shoestring-ipc = { path = "../shoestring-ipc" }
+serde_json = "1"
