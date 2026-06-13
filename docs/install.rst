@@ -53,8 +53,11 @@ inside it. Then generate a starter config::
    shoestring-wm is **not** published to crates.io, so
    ``cargo install shoestring-wm`` will not work. Its smithay dependency
    tracks a git revision newer than any crates.io release, which crates.io
-   does not allow. On distros without a prebuilt package — notably FreeBSD,
-   which has no port yet — build from source as below.
+   does not allow. On distros without a prebuilt package, build from source
+   as below. FreeBSD additionally carries an in-repo ports skeleton
+   (``packaging/freebsd``) that builds a real ``pkg`` locally — though it is
+   not yet in the official ports tree, so ``pkg install shoestring-wm`` does
+   not resolve it. See `FreeBSD`_.
 
 Build
 -----
@@ -161,7 +164,29 @@ Alpine
 FreeBSD
 ~~~~~~~
 
-::
+**The FreeBSD port.** The repository carries a ``USES=cargo`` ports
+skeleton at ``packaging/freebsd`` — the FreeBSD analogue of the ``.deb`` /
+``.rpm``. It is **not yet in the official FreeBSD ports tree** (a planned
+post-1.0 step), so ``pkg install shoestring-wm`` will not find it. To build
+and install it yourself, drop the skeleton into a ports tree and use the
+normal ports workflow:
+
+.. code-block:: console
+
+    # with a FreeBSD ports tree checked out at /usr/ports
+    # cp -R packaging/freebsd /usr/ports/x11-wm/shoestring-wm
+    # cd /usr/ports/x11-wm/shoestring-wm
+    # make install        # or `make package` to produce a .pkg
+
+The port pulls in every dependency (including the screen locker's
+``unix-selfauth-helper``) and installs the binaries, man pages, the Wayland
+session file, and the locker's PAM policy under ``/usr/local`` — so
+shoestring-wm appears in your display manager's session menu with no manual
+wiring, and the locker steps further down are handled for you. See
+``packaging/freebsd/README.md`` for how the dependency list and checksums
+are regenerated.
+
+To **build from source** instead, install the toolchain and libraries::
 
     pkg install rust pkgconf \
         wayland libxkbcommon \
@@ -195,7 +220,8 @@ FreeBSD (via a vendored, OpenPAM-portable ``pam-client2`` under
 ``third_party/``). It authenticates through a dedicated ``shoestring-lock``
 PAM policy that, on FreeBSD, delegates to the setuid
 ``unix-selfauth-helper`` — so the locker binary itself stays unprivileged.
-A source install must therefore install both:
+A **from-source** install (the port does this for you) must therefore
+install both:
 
 .. code-block:: console
 
