@@ -43,6 +43,10 @@ jobs:
           run: |
             set -e
             git clone --depth 1 https://git.FreeBSD.org/ports.git /usr/ports
+            # Drop .git so portlint -A skips its "is this port committed to the
+            # ports tree?" VCS check — our files live in OUR repo and are just
+            # copied in here, so that check is a false negative.
+            rm -rf /usr/ports/.git
             mkdir -p /usr/ports/x11-wm/shoestring-wm
             cp packaging/freebsd/Makefile \
                packaging/freebsd/Makefile.crates \
