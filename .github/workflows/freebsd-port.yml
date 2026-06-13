@@ -1,0 +1,59 @@
+name: FreeBSD port
+
+# Lints the in-repo FreeBSD port (packaging/freebsd) with portlint, the
+# ports-tree correctness/style checker, in a FreeBSD VM.
+#
+# Scope: this keeps the port *submission-ready*. It does NOT build the
+# package users install — that .pkg is produced by the FreeBSD project's
+# own poudriere cluster once a port lands in the ports tree (see
+# packaging/freebsd/README.md). poudriere from scratch would compile
+# lang/rust + mesa from source (multi-hour), so we don't run it in CI.
+#
+# Runs only when the port skeleton or the dependency set changes — not on
+# every push. Pre-1.0 work lands directly on main, so the gate guards main.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packaging/freebsd/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/freebsd-port.yml"
+  workflow_dispatch:
+
+jobs:
+  portlint:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: portlint in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.0"
+          usesh: true
+          # Forward the commit SHA so makesum can fetch this exact tree.
+          envs: "GITHUB_SHA"
+          # portlint evaluates the Makefile through the ports framework, so
+          # it needs Mk/ — a shallow clone of the tree provides it.
+          prepare: |
+            pkg install -y portlint git
+          run: |
+            set -e
+            git clone --depth 1 https://git.FreeBSD.org/ports.git /usr/ports
+            mkdir -p /usr/ports/x11-wm/shoestring-wm
+            cp packaging/freebsd/Makefile \
+               packaging/freebsd/Makefile.crates \
+               packaging/freebsd/distinfo \
+               packaging/freebsd/pkg-descr \
+               packaging/freebsd/pkg-plist \
+               /usr/ports/x11-wm/shoestring-wm/
+            cd /usr/ports/x11-wm/shoestring-wm
+            # Regenerate distinfo for the exact commit under test (codeload
+            # serves any pushed commit), so portlint's distfile-checksum check
+            # passes without a release tag. makesum also fetches + checksums
+            # every crate, verifying the whole dependency set still resolves.
+            make GH_TAGNAME="${GITHUB_SHA}" makesum
+            env GH_TAGNAME="${GITHUB_SHA}" portlint -A
