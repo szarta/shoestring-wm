@@ -12,7 +12,7 @@ LICENSE_FILE=	${WRKSRC}/LICENSE
 
 # sphinx-build turns the reStructuredText under docs/ into the man pages
 # (they are generated, not shipped in the source tarball).
-BUILD_DEPENDS=	sphinx-build:textproc/py-sphinx
+BUILD_DEPENDS=	sphinx-build:textproc/py-sphinx@${PY_FLAVOR}
 
 # The compositor's native libraries. This list is identical to
 # x11-wm/cosmic-comp's (the other Smithay compositor in the tree); both
@@ -29,7 +29,7 @@ LIB_DEPENDS=	libudev.so:devel/libudev-devd \
 RUN_DEPENDS=	mesa-dri>0:graphics/mesa-dri \
 		unix-selfauth-helper>0:security/unix-selfauth-helper
 
-USES=		cargo gl localbase:ldflags pkgconfig
+USES=		cargo gl localbase:ldflags pkgconfig python:build
 USE_GITHUB=	yes
 GH_ACCOUNT=	szarta
 USE_GL=		egl gbm
