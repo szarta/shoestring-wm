@@ -213,6 +213,14 @@ pub struct ShoestringWm {
     /// Cleared once no constraint remains on the surface. See the
     /// `PointerConstraintsHandler` impl in [`crate::handlers`].
     pub pointer_constraint_cursor_hint: Option<(WlSurface, Point<f64, Logical>)>,
+    /// The surface (and its global origin offset) the pointer last *delivered*
+    /// focus to. Tracked so [`Self::refresh_pointer_focus`] can tell whether
+    /// the scene under a stationary pointer actually changed — a surface that
+    /// maps, unmaps, or slides under the cursor keeps the cursor still but
+    /// changes either the target surface or its offset, and the client must
+    /// then see enter/leave/motion. Updated wherever we hand the pointer a new
+    /// focus so the refresh pass doesn't re-send motion the client already saw.
+    pub last_pointer_focus: Option<(WlSurface, Point<f64, Logical>)>,
 
     pub ipc: Option<crate::ipc::Server>,
     /// Diagnostics registry: the latest sampled process/WM metrics plus
@@ -548,6 +556,7 @@ impl ShoestringWm {
             relative_pointer,
             tablet_manager,
             pointer_constraint_cursor_hint: None,
+            last_pointer_focus: None,
             ipc: None,
             metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
@@ -691,6 +700,70 @@ impl ShoestringWm {
         }
 
         None
+    }
+
+    /// Re-evaluate the surface under the pointer at its *current* location and,
+    /// if it changed, deliver pointer enter/leave/motion.
+    ///
+    /// Wayland requires pointer focus to track the scene, not just real motion:
+    /// when a surface maps, unmaps, or slides under a stationary cursor the
+    /// client must still see enter/leave/motion. The input handlers only
+    /// refocus on actual motion, so this runs once per event-loop iteration
+    /// (after client commits and any WM-driven map/move/unmap) to catch the
+    /// stationary cases — the WLCS `ClientSurfaceEventsTest` /
+    /// `SurfacePointerMotionTest` family.
+    ///
+    /// No-op while a pointer grab owns the focus (interactive move/resize,
+    /// super-drag — the grab drives its own focus) and while the pointer is
+    /// locked to a surface (a locked client must receive no absolute motion).
+    /// Cheap in the common case: it returns early unless the surface *or* its
+    /// global offset under the cursor differs from what was last delivered, so
+    /// running it every loop iteration costs one [`Self::surface_under`] lookup.
+    pub fn refresh_pointer_focus(&mut self) {
+        use smithay::input::pointer::MotionEvent;
+        use smithay::utils::SERIAL_COUNTER;
+        use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
+
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        if pointer.is_grabbed() {
+            return;
+        }
+
+        let location = pointer.current_location();
+        let under = self.surface_under(location);
+
+        // Same surface at the same offset — nothing the client hasn't seen.
+        if under == self.last_pointer_focus {
+            return;
+        }
+
+        // A locked pointer must not receive absolute motion. The cursor can't
+        // have moved under an active lock, so this only guards the degenerate
+        // "locked surface itself moved" case; the confined case is fine —
+        // motion already stayed inside the surface, so its region still holds.
+        if let Some((surface, _)) = under.as_ref() {
+            let locked = with_pointer_constraint(surface, &pointer, |c| {
+                c.is_some_and(|c| c.is_active() && matches!(&*c, PointerConstraint::Locked(_)))
+            });
+            if locked {
+                return;
+            }
+        }
+
+        self.last_pointer_focus = under.clone();
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location,
+                serial,
+                time: crate::inject::monotonic_msec(),
+            },
+        );
+        pointer.frame(self);
     }
 
     /// Global-space origin (top-left) of the mapped window backing `surface`,

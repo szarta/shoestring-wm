@@ -128,7 +128,7 @@ impl ShoestringWm {
         let under = self.surface_under((x, y).into());
         pointer.motion(
             self,
-            under,
+            under.clone(),
             &MotionEvent {
                 location: (x, y).into(),
                 serial,
@@ -137,6 +137,7 @@ impl ShoestringWm {
         );
         let pointer = self.seat.get_pointer().unwrap();
         pointer.frame(self);
+        self.last_pointer_focus = under;
     }
 
     /// Current pointer location in compositor-space logical coords. Returns
@@ -163,7 +164,7 @@ impl ShoestringWm {
             let under = self.surface_under((x, y).into());
             pointer.motion(
                 self,
-                under,
+                under.clone(),
                 &MotionEvent {
                     location: (x, y).into(),
                     serial,
@@ -171,6 +172,7 @@ impl ShoestringWm {
                 },
             );
             pointer.frame(self);
+            self.last_pointer_focus = under;
         }
 
         // Mirror the WM's normal click-to-focus behavior — without this,
@@ -337,7 +339,7 @@ fn is_supported_ascii(ch: char) -> bool {
 /// CLOCK_MONOTONIC-style millisecond timestamp for event time fields.
 /// Matches what libinput hands us for real input, so synthesized and real
 /// events sort consistently in the wayland queue.
-fn monotonic_msec() -> u32 {
+pub(crate) fn monotonic_msec() -> u32 {
     use std::time::Instant;
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let epoch = EPOCH.get_or_init(Instant::now);

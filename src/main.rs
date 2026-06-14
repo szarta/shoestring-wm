@@ -267,7 +267,14 @@ fn main() -> Result<()> {
         spawn_client(cmd);
     }
 
-    event_loop.run(None, &mut state, |_| {})?;
+    // After each batch of dispatched events (client commits, input, IPC
+    // actions, timers) re-evaluate what sits under a *stationary* pointer.
+    // Surfaces that mapped/unmapped/moved without a real pointer motion still
+    // owe the client enter/leave/motion; the input handlers only refocus on
+    // actual motion, so this is the catch-all. Cheap when nothing changed.
+    event_loop.run(None, &mut state, |state| {
+        state.refresh_pointer_focus();
+    })?;
     Ok(())
 }
 

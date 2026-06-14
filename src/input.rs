@@ -766,6 +766,10 @@ impl ShoestringWm {
                     },
                 );
                 pointer.frame(self);
+                // Record what the client just saw so the post-dispatch
+                // refresh pass (see `refresh_pointer_focus`) doesn't re-send
+                // this same focus as a phantom move.
+                self.last_pointer_focus = new_under.clone();
                 self.maybe_pointer_focus(new);
 
                 // Activate a constraint once the cursor enters its region (the
@@ -799,7 +803,7 @@ impl ShoestringWm {
                 let under = self.surface_under(pos);
                 pointer.motion(
                     self,
-                    under,
+                    under.clone(),
                     &MotionEvent {
                         location: pos,
                         serial,
@@ -807,6 +811,7 @@ impl ShoestringWm {
                     },
                 );
                 pointer.frame(self);
+                self.last_pointer_focus = under;
                 self.maybe_pointer_focus(pos);
             }
             InputEvent::PointerButton { event, .. } => {
