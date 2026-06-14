@@ -21,6 +21,7 @@ mod layout;
 mod metrics;
 mod output_management;
 mod picker;
+mod presentation;
 mod remote_command;
 mod remote_screenshot;
 mod scale;

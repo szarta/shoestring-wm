@@ -110,6 +110,12 @@ Implemented today:
   see a real tablet tool. The stylus drives the shared pointer cursor; a
   tip-down focuses the window under the pen like a click. Tablets are
   picked up on device hotplug from the libinput (TTY) backend.
+- Accurate frame-presentation timing (``wp_presentation``): clients that
+  request feedback get the precise on-screen timestamp for each buffer, so
+  video players sync audio/video and animations pace correctly. On the
+  TTY/DRM backend the timestamp comes straight from the hardware vblank
+  (flagged ``HwClock``/``HwCompletion``); the nested winit backend reports
+  it best-effort at submit time against the same monotonic clock.
 - xcursor sprite rendering at the pointer.
 - Configurable XKB keyboard layouts (``[general].xkb_layout`` and
   friends), with multiple layouts and a ``cycle-layout`` action

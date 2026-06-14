@@ -104,7 +104,7 @@ pub fn init_winit(
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
 
-                {
+                let render_states = {
                     let (renderer, mut framebuffer) = backend.bind().unwrap();
 
                     // Re-pick the cursor frame for the configured scale (cursors
@@ -204,11 +204,38 @@ pub fn init_winit(
                             .into_iter()
                             .map(crate::drawing::OutputRenderElements::Space),
                     );
-                    damage_tracker
+                    let result = damage_tracker
                         .render_output(renderer, &mut framebuffer, 0, &elements, clear)
                         .unwrap();
-                }
+                    result.states
+                };
                 backend.submit(Some(&[damage])).unwrap();
+
+                // wp_presentation, best effort: the nested winit backend has no
+                // hardware vblank, so mark the frame presented at submit time
+                // against the same monotonic clock the global advertises. No
+                // HwClock/HwCompletion flags and an unknown refresh — honest
+                // about the lack of a real page-flip timestamp. Without this,
+                // clients that request feedback would wait forever.
+                {
+                    use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+                    crate::presentation::update_primary_scanout_output(
+                        &state.space,
+                        &output,
+                        &render_states,
+                    );
+                    let mut feedback = crate::presentation::take_presentation_feedback(
+                        &state.space,
+                        &output,
+                        &render_states,
+                    );
+                    feedback.presented(
+                        state.clock.now(),
+                        smithay::wayland::presentation::Refresh::Unknown,
+                        0,
+                        Kind::Vsync,
+                    );
+                }
 
                 // Keep wp_fractional_scale clients on this output in sync with
                 // its current scale (no-op when unchanged).

@@ -59,6 +59,11 @@ pub type CursorSnapshot = (
 
 pub struct ShoestringWm {
     pub start_time: Instant,
+    /// Monotonic clock backing `wp_presentation` timestamps. Its id is what
+    /// the presentation global advertises so clients interpret the
+    /// `presented` times against the right clock. Also the fallback time
+    /// source when a backend can't supply a hardware vblank timestamp.
+    pub clock: smithay::utils::Clock<smithay::utils::Monotonic>,
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
     pub loop_signal: LoopSignal,
@@ -193,6 +198,15 @@ pub struct ShoestringWm {
     /// Held only to keep the global registered for the session's lifetime.
     #[allow(dead_code)]
     pub tablet_manager: smithay::wayland::tablet_manager::TabletManagerState,
+    /// `wp_presentation` global. Clients use it to request precise on-screen
+    /// timestamps for the buffers they commit (video A/V sync, animation
+    /// pacing). The udev/DRM backend fulfils them from hardware vblank
+    /// timestamps; the winit backend marks them at submit time (best effort).
+    /// Held purely to keep the global registered for the WM's lifetime — the
+    /// protocol is driven through the blanket `delegate_dispatch2!`, not this
+    /// field.
+    #[allow(dead_code)]
+    pub presentation_state: smithay::wayland::presentation::PresentationState,
     /// Latest cursor-position hint from a locked-pointer client: the surface
     /// it named plus a surface-local point. When the lock is released the
     /// visible cursor is dropped back here (it was hidden while locked).
@@ -348,6 +362,12 @@ impl ShoestringWm {
         }
         bindings.log_compiled();
 
+        // Monotonic clock + the wp_presentation global, advertising that
+        // clock's id so clients read `presented` timestamps correctly.
+        let clock: smithay::utils::Clock<smithay::utils::Monotonic> = smithay::utils::Clock::new();
+        let presentation_state =
+            smithay::wayland::presentation::PresentationState::new::<Self>(&dh, clock.id() as u32);
+
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
@@ -479,6 +499,8 @@ impl ShoestringWm {
 
         Self {
             start_time: Instant::now(),
+            clock,
+            presentation_state,
             socket_name,
             display_handle: dh,
             loop_signal,
