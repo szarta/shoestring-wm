@@ -192,6 +192,20 @@ enum Command {
         /// FT identifier of the window to focus.
         id: String,
     },
+    /// Raise a window to the top of the stacking order by its
+    /// `ext-foreign-toplevel-list-v1` identifier. A pure restack — keyboard
+    /// focus and the active workspace are unchanged (unlike `focus-window`).
+    RaiseWindow {
+        /// FT identifier of the window to raise.
+        id: String,
+    },
+    /// Lower a window to the bottom of the stacking order by its
+    /// `ext-foreign-toplevel-list-v1` identifier. The complement of
+    /// `raise-window`.
+    LowerWindow {
+        /// FT identifier of the window to lower.
+        id: String,
+    },
     /// Override a window's display name, keyed by its
     /// `ext-foreign-toplevel-list-v1` identifier. The override wins over the
     /// client's own title everywhere the WM reports a title (`windows`,
@@ -343,6 +357,8 @@ fn main() -> Result<()> {
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
         Command::FocusWindow { id } => Request::FocusWindow { id },
+        Command::RaiseWindow { id } => Request::RaiseWindow { id },
+        Command::LowerWindow { id } => Request::LowerWindow { id },
         Command::SetName { id, name } => Request::SetWindowName { id, name },
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,

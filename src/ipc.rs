@@ -527,6 +527,22 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::RaiseWindow { id: window_id } => {
+                let resp = match state.raise_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::LowerWindow { id: window_id } => {
+                let resp = match state.lower_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::SetWindowName {
                 id: window_id,
                 name,
@@ -786,6 +802,7 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
                 workspace,
                 focused: focused.as_ref() == Some(window),
                 geometry: window_geometry(state, window),
+                z: window_z(state, window),
             }
         })
         .collect()
@@ -808,6 +825,19 @@ pub(crate) fn window_geometry(
         w: size.w,
         h: size.h,
     })
+}
+
+/// Stacking position of `window` within the mapped stack: `space.elements()`
+/// yields bottom-to-top, so the enumeration index is the Z position (`0` is
+/// bottom-most). `None` for windows that aren't mapped — minimized windows are
+/// unmapped, and only the active workspace's windows are in the space. Shared
+/// by the `windows` and `get_tree` snapshots so both report the same order.
+pub(crate) fn window_z(state: &ShoestringWm, window: &smithay::desktop::Window) -> Option<u32> {
+    state
+        .space
+        .elements()
+        .position(|w| w == window)
+        .map(|i| i as u32)
 }
 
 /// Name of the output a window's center sits on, by point containment against
@@ -862,16 +892,6 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
         })
         .collect();
 
-    // Stacking order for mapped windows: `space.elements()` yields bottom to
-    // top, so the enumeration index is the Z position.
-    let z_of = |window: &smithay::desktop::Window| -> Option<u32> {
-        state
-            .space
-            .elements()
-            .position(|w| w == window)
-            .map(|i| i as u32)
-    };
-
     let focused = state.focused_window();
     let active = state.workspaces.active();
 
@@ -899,7 +919,7 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             app_id,
             geometry: window_geometry(state, window),
             output: window_output(state, window),
-            z: z_of(window),
+            z: window_z(state, window),
             focused: focused.as_ref() == Some(window),
             minimized: state.layout.is_minimized(window),
             layout: layout.to_string(),

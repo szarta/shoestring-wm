@@ -17,6 +17,8 @@ Binding                            Action
 ``Super+D``                        Minimize
 ``Super+Shift+D``                  Restore most-recently-minimized window
 ``Super+X``                        Close the focused window
+``Super+Up``                        Raise focused window to the top
+``Super+Shift+Up``                  Lower focused window to the bottom
 ``Super+Left-drag``                Move the window under the cursor
 ``Super+Right-drag``               Resize the window under the cursor
 ================================  ============================================

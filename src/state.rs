@@ -729,6 +729,42 @@ impl ShoestringWm {
         crate::foreign_toplevel_mgmt::broadcast_all(self);
     }
 
+    /// Raise `window` to the top of the stacking order, leaving keyboard
+    /// focus and the activated state untouched (unlike [`focus_window`],
+    /// which raises *and* focuses). A no-op when the window isn't mapped —
+    /// minimized windows are unmapped from the space, and off-workspace
+    /// windows live only in the workspace manager. Emits `window_restacked`.
+    pub fn raise_window(&mut self, window: &Window) {
+        if self.space.element_location(window).is_none() {
+            return;
+        }
+        // activate=false: a pure restack must not steal the activated bit
+        // from whatever currently holds focus.
+        self.space.raise_element(window, false);
+        self.notify_restacked(window);
+    }
+
+    /// Lower `window` to the bottom of the stacking order, leaving keyboard
+    /// focus untouched. The complement of [`raise_window`]; same unmapped
+    /// no-op semantics.
+    pub fn lower_window(&mut self, window: &Window) {
+        if self.space.element_location(window).is_none() {
+            return;
+        }
+        self.space.lower_element(window);
+        self.notify_restacked(window);
+    }
+
+    /// Emit a `window_restacked` event for `window` after its Z position
+    /// changed. The whole stack's Z indices shift on a raise/lower, so the
+    /// event only names the window that moved; subscribers re-query
+    /// `windows` / `get_tree` for the full order.
+    fn notify_restacked(&mut self, window: &Window) {
+        if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
+            self.emit_ipc(shoestring_ipc::Event::WindowRestacked { id });
+        }
+    }
+
     /// Clear keyboard focus and deactivate every mapped window. Used when
     /// switching to an empty workspace or minimizing the last window.
     pub fn clear_focus(&mut self) {

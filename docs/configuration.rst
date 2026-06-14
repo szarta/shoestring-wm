@@ -425,6 +425,17 @@ Each action type and its fields:
     through every window and wrap around. Does nothing when the
     workspace has fewer than two windows.
 
+``raise``
+    Raise the focused window to the top of the stacking order, leaving
+    keyboard focus where it is (a pure restack). Bound to Super+Up by
+    default. A no-op when no window is focused.
+
+``lower``
+    Lower the focused window to the bottom of the stacking order — the
+    complement of ``raise``. Bound to Super+Shift+Up by default. Handy for
+    pushing the current window behind the others without moving the
+    pointer.
+
 ``cycle-layout``
     Switch to the next keyboard layout listed in ``[general].xkb_layout``,
     wrapping at the end. Bound to Super+Space by default. A no-op when only

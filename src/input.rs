@@ -158,6 +158,8 @@ impl ShoestringWm {
             Action::Unminimize => self.unminimize_last(),
             Action::Close => self.close_focused(),
             Action::CycleWindows => self.cycle_windows(),
+            Action::Raise => self.restack_focused(true),
+            Action::Lower => self.restack_focused(false),
             Action::FocusWorkspace { index } => {
                 tracing::debug!(index, "FocusWorkspace");
                 if let Some(ws) = self.workspaces.from_one_based(index) {
@@ -419,6 +421,21 @@ impl ShoestringWm {
             .cloned();
         if let Some(next) = next {
             self.focus_window(&next);
+        }
+    }
+
+    /// Raise (`up = true`) or lower (`up = false`) the focused window in the
+    /// stacking order. Pure restack — keyboard focus stays put. A no-op when
+    /// no window holds focus.
+    fn restack_focused(&mut self, up: bool) {
+        let Some(window) = self.focused_window() else {
+            tracing::debug!(up, "restack: no focused window");
+            return;
+        };
+        if up {
+            self.raise_window(&window);
+        } else {
+            self.lower_window(&window);
         }
     }
 

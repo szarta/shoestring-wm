@@ -111,6 +111,18 @@ Each request is a JSON object with a ``type`` discriminator:
        needed and switches to its workspace if it lives elsewhere,
        then raises + activates it the same way a click does. Returns
        ``error`` if no window matches.
+   * - ``{"type": "raise_window", "id": "..."}``
+     - Raise the window with the given identifier to the top of the
+       stacking order. A **pure restack**: keyboard focus and the active
+       workspace are left untouched (contrast ``focus_window``, which
+       raises *and* focuses). A no-op when the window is minimized or on a
+       non-active workspace — it isn't in the mapped stack — but the
+       lookup still succeeds. Broadcasts a ``window_restacked`` event.
+       Returns ``error`` if no window matches. Not gated by automation.
+   * - ``{"type": "lower_window", "id": "..."}``
+     - Lower the window with the given identifier to the bottom of the
+       stacking order. The complement of ``raise_window``; same
+       focus/gating/no-op semantics.
    * - ``{"type": "set_window_name", "id": "...", "name": "..."}``
      - Override the display name of the window with the given identifier.
        The override wins over the client's ``xdg_toplevel`` title
@@ -366,7 +378,8 @@ The server replies with a single JSON object tagged by ``type``:
       "app_id":    "alacritty",
       "workspace": 3,
       "focused":   true,
-      "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080}
+      "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080},
+      "z":         2
     }
 
 ``id`` matches the ``identifier`` event from ``ext-foreign-toplevel-list-v1``,
@@ -374,9 +387,12 @@ so a bar can cross-reference between protocols. ``geometry`` is the window's
 on-screen rectangle in compositor-global logical coords (same system as
 ``move_mouse`` / ``pointer_position``); it is **omitted** when the window is
 minimized or on a non-active workspace (only the active workspace is mapped,
-so an unmapped window has no rectangle). Older WM builds that pre-dated the
-field omit it too — clients should treat "absent" and "off-screen"
-identically.
+so an unmapped window has no rectangle). ``z`` is the window's stacking
+position within the mapped stack — ``0`` is bottom-most, higher is closer to
+the top — and the same value the ``get_tree`` ``WindowNode`` carries; it is
+**omitted** for unmapped windows (same condition as ``geometry``). Older WM
+builds that pre-dated either field omit it too — clients should treat "absent"
+and "off-screen" identically.
 
 ``OutputSummary``::
 
@@ -467,6 +483,14 @@ Each event is tagged by ``type``.
     ``{"type": "window_moved_to_workspace", "id": "...", "workspace": <1..count>}``.
     Fired when a window is reassigned to a different workspace via the
     move-to-workspace bindings or a ``[[window_rules]]`` action.
+
+``window_restacked``
+    ``{"type": "window_restacked", "id": "..."}``. Fired when a window's
+    stacking order changes — it was raised to the top or lowered to the
+    bottom via the ``raise`` / ``lower`` actions or the ``raise_window`` /
+    ``lower_window`` requests. A raise or lower shifts the ``z`` index of
+    every other mapped window too, so the event only names the window that
+    moved; re-query ``windows`` or ``get_tree`` for the updated stack.
 
 ``output_added``
     Same shape as ``OutputSummary``.

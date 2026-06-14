@@ -487,6 +487,13 @@ pub enum Action {
     /// raising it (Alt+Tab). Round-robins through every window and wraps;
     /// a no-op when the workspace has fewer than two windows.
     CycleWindows,
+    /// Raise the focused window to the top of the stacking order without
+    /// changing which window holds keyboard focus. A no-op when no window is
+    /// focused or the focused window is unmapped (minimized).
+    Raise,
+    /// Lower the focused window to the bottom of the stacking order, again
+    /// without touching keyboard focus. The complement of [`Action::Raise`].
+    Lower,
     /// Switch every output to show the windows on workspace `index`
     /// (1-based; valid range 1..=16).
     FocusWorkspace { index: u8 },
@@ -543,8 +550,8 @@ pub fn default_config_toml() -> String {
 #   shoestring-wm --write-default-config
 #
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
-# minimize, unminimize, close, cycle-windows, focus-workspace,
-# focus-workspace-relative, move-window-to-workspace,
+# minimize, unminimize, close, cycle-windows, raise, lower,
+# focus-workspace, focus-workspace-relative, move-window-to-workspace,
 # move-window-to-workspace-relative, change-vt, inject-key, inject-text,
 # inject-click, lock.
 #
@@ -679,6 +686,19 @@ impl Config {
                 mods: super_only(),
                 key: "Down".into(),
                 action: Action::CycleWindows,
+            },
+            // Explicit stacking control for the focused window: Super+Up
+            // brings it to the front, Super+Shift+Up pushes it to the back.
+            // Neither moves keyboard focus — they only restack.
+            Binding {
+                mods: super_only(),
+                key: "Up".into(),
+                action: Action::Raise,
+            },
+            Binding {
+                mods: super_shift(),
+                key: "Up".into(),
+                action: Action::Lower,
             },
             // Lock screen. Spawns `general.lock_command` (default
             // `shoestring-lock`) which binds ext-session-lock-v1.
@@ -1072,6 +1092,21 @@ middle_emulation = true
                 && b.key == "space"
                 && b.mods.iter().any(|m| m == "Super")
         }));
+    }
+
+    #[test]
+    fn default_bindings_include_raise_and_lower() {
+        let cfg = Config::with_default_bindings();
+        let has = |action_matches: fn(&Action) -> bool, mods: &[&str]| {
+            cfg.bindings.iter().any(|b| {
+                action_matches(&b.action)
+                    && b.key == "Up"
+                    && mods.iter().all(|m| b.mods.iter().any(|bm| bm == m))
+                    && b.mods.len() == mods.len()
+            })
+        };
+        assert!(has(|a| matches!(a, Action::Raise), &["Super"]));
+        assert!(has(|a| matches!(a, Action::Lower), &["Super", "Shift"]));
     }
 
     #[test]

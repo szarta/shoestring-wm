@@ -145,6 +145,7 @@ impl ShoestringWm {
             workspace,
             focused: self.focused_window().as_ref() == Some(window),
             geometry: crate::ipc::window_geometry(self, window),
+            z: crate::ipc::window_z(self, window),
         })
     }
 
@@ -174,6 +175,35 @@ impl ShoestringWm {
             .ok_or_else(|| format!("no window with id {id:?}"))?;
         self.activate_window(&window);
         Ok(())
+    }
+
+    /// Raise the toplevel whose FT identifier matches `id` to the top of the
+    /// stacking order, without changing keyboard focus or switching workspace
+    /// (a pure restack). No visible effect when the window is minimized or on
+    /// a non-active workspace — those aren't in the mapped stack — but the
+    /// lookup still succeeds, so it's not an error.
+    pub fn raise_window_by_id(&mut self, id: &str) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.raise_window(&window);
+        Ok(())
+    }
+
+    /// Lower the toplevel whose FT identifier matches `id` to the bottom of
+    /// the stacking order. The complement of [`Self::raise_window_by_id`].
+    pub fn lower_window_by_id(&mut self, id: &str) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.lower_window(&window);
+        Ok(())
+    }
+
+    /// Look up a tracked window by its `ext-foreign-toplevel-list-v1`
+    /// identifier. Shared by the by-id IPC entry points.
+    fn window_by_ft_id(&self, id: &str) -> Result<Window, String> {
+        self.foreign_toplevels
+            .iter()
+            .find(|(_, h)| h.identifier() == id)
+            .map(|(w, _)| w.clone())
+            .ok_or_else(|| format!("no window with id {id:?}"))
     }
 
     /// Set (or, with an empty `name`, clear) the display-name override for the

@@ -220,6 +220,19 @@ pub enum Request {
     /// is [`Response::Ok`] on success, [`Response::Error`] if no
     /// window matches.
     FocusWindow { id: String },
+    /// Raise the toplevel matching `id` to the top of the stacking order
+    /// without changing keyboard focus or switching workspaces (a pure
+    /// restack — contrast [`Request::FocusWindow`], which raises *and*
+    /// focuses). No-op if the window is minimized or on a non-active
+    /// workspace (it isn't in the mapped stack). Emits
+    /// [`Event::WindowRestacked`]. Reply is [`Response::Ok`] on success,
+    /// [`Response::Error`] if no window matches. Not gated by automation
+    /// (a benign window-management tweak, like [`Request::FocusWindow`]).
+    RaiseWindow { id: String },
+    /// Lower the toplevel matching `id` to the bottom of the stacking order.
+    /// The complement of [`Request::RaiseWindow`]; same focus/gating/no-op
+    /// semantics.
+    LowerWindow { id: String },
     /// Override the display name of the toplevel matching `id` (an
     /// `ext-foreign-toplevel-list-v1` identifier, as carried by
     /// [`WindowSummary::id`]). The override takes precedence over the
@@ -478,6 +491,13 @@ pub struct WindowSummary {
     /// payloads without it deserialize via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<WindowGeometry>,
+    /// Stacking order within the currently mapped stack: `0` is bottom-most,
+    /// higher is closer to the top. `None` for windows that aren't mapped
+    /// (minimized, or on a non-active workspace — only the active workspace
+    /// is mapped, so only its windows have a Z position). Matches the `z`
+    /// field on [`WindowNode`] in the [`Request::GetTree`] snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<u32>,
 }
 
 /// A window's on-screen rectangle in compositor-global logical coords:
@@ -598,6 +618,15 @@ pub enum Event {
     WindowMovedToWorkspace {
         id: String,
         workspace: u8,
+    },
+    /// Window's stacking order changed — it was raised to the top or lowered
+    /// to the bottom (via the `raise`/`lower` actions or the
+    /// [`Request::RaiseWindow`] / [`Request::LowerWindow`] requests). A raise
+    /// or lower shifts the Z index of every other mapped window too, so this
+    /// only names the window that moved; re-query [`Request::Windows`] or
+    /// [`Request::GetTree`] for the updated `z` of the whole stack.
+    WindowRestacked {
+        id: String,
     },
     OutputAdded(OutputSummary),
     OutputRemoved {
@@ -1063,9 +1092,11 @@ mod tests {
                 w: 640,
                 h: 480,
             }),
+            z: Some(2),
         };
         let s = serde_json::to_string(&with_geo).unwrap();
         assert!(s.contains(r#""geometry":{"x":0,"y":0,"w":640,"h":480}"#));
+        assert!(s.contains(r#""z":2"#));
     }
 
     #[test]
@@ -1170,6 +1201,24 @@ mod tests {
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Request::FocusWindow { id } if id == "abc"));
 
+        let raise = Request::RaiseWindow { id: "abc".into() };
+        let s = serde_json::to_string(&raise).unwrap();
+        assert_eq!(s, r#"{"type":"raise_window","id":"abc"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::RaiseWindow { id } if id == "abc"));
+
+        let lower = Request::LowerWindow { id: "abc".into() };
+        let s = serde_json::to_string(&lower).unwrap();
+        assert_eq!(s, r#"{"type":"lower_window","id":"abc"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::LowerWindow { id } if id == "abc"));
+
+        let restacked = Event::WindowRestacked { id: "abc".into() };
+        let s = serde_json::to_string(&restacked).unwrap();
+        assert_eq!(s, r#"{"type":"window_restacked","id":"abc"}"#);
+        let back: Event = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Event::WindowRestacked { id } if id == "abc"));
+
         let set_name = Request::SetWindowName {
             id: "abc".into(),
             name: "Build log".into(),
@@ -1203,6 +1252,7 @@ mod tests {
                     w: 800,
                     h: 600,
                 }),
+                z: Some(0),
             }),
         };
         let s = serde_json::to_string(&picked).unwrap();
