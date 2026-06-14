@@ -543,6 +543,17 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::SetWindowSticky {
+                id: window_id,
+                sticky,
+            } => {
+                let resp = match state.set_window_sticky_by_id(&window_id, sticky) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::SetWindowName {
                 id: window_id,
                 name,
@@ -803,6 +814,7 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
                 focused: focused.as_ref() == Some(window),
                 geometry: window_geometry(state, window),
                 z: window_z(state, window),
+                sticky: state.is_sticky(window),
             }
         })
         .collect()
@@ -922,6 +934,7 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             z: window_z(state, window),
             focused: focused.as_ref() == Some(window),
             minimized: state.layout.is_minimized(window),
+            sticky: state.is_sticky(window),
             layout: layout.to_string(),
         });
     }

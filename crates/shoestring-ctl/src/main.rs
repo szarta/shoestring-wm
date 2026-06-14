@@ -206,6 +206,15 @@ enum Command {
         /// FT identifier of the window to lower.
         id: String,
     },
+    /// Set or clear the sticky flag (show on all workspaces) on a window by
+    /// its `ext-foreign-toplevel-list-v1` identifier.
+    SetSticky {
+        /// FT identifier of the window.
+        id: String,
+        /// `true` to pin to all workspaces, `false` to release.
+        #[arg(action = clap::ArgAction::Set)]
+        sticky: bool,
+    },
     /// Override a window's display name, keyed by its
     /// `ext-foreign-toplevel-list-v1` identifier. The override wins over the
     /// client's own title everywhere the WM reports a title (`windows`,
@@ -359,6 +368,7 @@ fn main() -> Result<()> {
         Command::FocusWindow { id } => Request::FocusWindow { id },
         Command::RaiseWindow { id } => Request::RaiseWindow { id },
         Command::LowerWindow { id } => Request::LowerWindow { id },
+        Command::SetSticky { id, sticky } => Request::SetWindowSticky { id, sticky },
         Command::SetName { id, name } => Request::SetWindowName { id, name },
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,

@@ -123,6 +123,12 @@ Each request is a JSON object with a ``type`` discriminator:
      - Lower the window with the given identifier to the bottom of the
        stacking order. The complement of ``raise_window``; same
        focus/gating/no-op semantics.
+   * - ``{"type": "set_window_sticky", "id": "...", "sticky": <bool>}``
+     - Set or clear the **sticky** flag (show on all workspaces) on the
+       window with the given identifier. A sticky window stays mapped across
+       workspace switches and is reported on whatever workspace is active.
+       Broadcasts a ``window_sticky_changed`` event. Returns ``error`` if no
+       window matches. Not gated by automation.
    * - ``{"type": "set_window_name", "id": "...", "name": "..."}``
      - Override the display name of the window with the given identifier.
        The override wins over the client's ``xdg_toplevel`` title
@@ -379,7 +385,8 @@ The server replies with a single JSON object tagged by ``type``:
       "workspace": 3,
       "focused":   true,
       "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080},
-      "z":         2
+      "z":         2,
+      "sticky":    true
     }
 
 ``id`` matches the ``identifier`` event from ``ext-foreign-toplevel-list-v1``,
@@ -390,9 +397,11 @@ minimized or on a non-active workspace (only the active workspace is mapped,
 so an unmapped window has no rectangle). ``z`` is the window's stacking
 position within the mapped stack — ``0`` is bottom-most, higher is closer to
 the top — and the same value the ``get_tree`` ``WindowNode`` carries; it is
-**omitted** for unmapped windows (same condition as ``geometry``). Older WM
-builds that pre-dated either field omit it too — clients should treat "absent"
-and "off-screen" identically.
+**omitted** for unmapped windows (same condition as ``geometry``). ``sticky``
+is ``true`` when the window is pinned to all workspaces; it is **omitted**
+(defaults to ``false``) for ordinary windows. Older WM builds that pre-dated
+these fields omit them too — clients should treat "absent" and "off-screen"
+(and "not sticky") identically.
 
 ``OutputSummary``::
 
@@ -491,6 +500,12 @@ Each event is tagged by ``type``.
     ``lower_window`` requests. A raise or lower shifts the ``z`` index of
     every other mapped window too, so the event only names the window that
     moved; re-query ``windows`` or ``get_tree`` for the updated stack.
+
+``window_sticky_changed``
+    ``{"type": "window_sticky_changed", "id": "...", "sticky": <bool>}``.
+    Fired when a window is pinned to (or released from) "show on all
+    workspaces" — via the ``toggle-sticky`` action, a ``[[window_rules]]``
+    ``sticky`` action, or the ``set_window_sticky`` request.
 
 ``output_added``
     Same shape as ``OutputSummary``.

@@ -436,6 +436,15 @@ Each action type and its fields:
     pushing the current window behind the others without moving the
     pointer.
 
+``toggle-sticky``
+    Toggle "show on all workspaces" for the focused window. A sticky
+    window stays mapped (and keeps its position) across workspace
+    switches instead of being hidden with the rest of its workspace —
+    useful for a reference doc or a picture-in-picture video. Bound to
+    Super+S by default. Moving a sticky window to a specific workspace is
+    ignored (it's already on all of them); un-stick it first. The same
+    flag is settable per-app via the ``sticky`` window rule.
+
 ``cycle-layout``
     Switch to the next keyboard layout listed in ``[general].xkb_layout``,
     wrapping at the end. Bound to Super+Space by default. A no-op when only
@@ -534,6 +543,11 @@ rules against already-mapped windows.
       auto-centered spawn position.
     - ``size`` (``[w, h]``, logical px) — preferred size; sent as part
       of the next configure (client may negotiate a different value).
+    - ``sticky`` (bool) — when ``true``, pin the window to all
+      workspaces (see the ``toggle-sticky`` action). Applied before
+      ``workspace``, which a sticky window then ignores — so set one or
+      the other, not both. ``mpv`` and other PiP players are the
+      typical use.
 
 Pointer bindings
 ----------------

@@ -146,6 +146,7 @@ impl ShoestringWm {
             focused: self.focused_window().as_ref() == Some(window),
             geometry: crate::ipc::window_geometry(self, window),
             z: crate::ipc::window_z(self, window),
+            sticky: self.is_sticky(window),
         })
     }
 
@@ -193,6 +194,14 @@ impl ShoestringWm {
     pub fn lower_window_by_id(&mut self, id: &str) -> Result<(), String> {
         let window = self.window_by_ft_id(id)?;
         self.lower_window(&window);
+        Ok(())
+    }
+
+    /// Set or clear the sticky flag (show on all workspaces) on the toplevel
+    /// whose FT identifier matches `id`. Broadcasts `window_sticky_changed`.
+    pub fn set_window_sticky_by_id(&mut self, id: &str, sticky: bool) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.set_sticky(&window, sticky);
         Ok(())
     }
 

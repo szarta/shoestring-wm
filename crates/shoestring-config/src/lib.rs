@@ -295,6 +295,11 @@ pub struct WindowActions {
     /// size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[i32; 2]>,
+    /// Make the window sticky (shown on every workspace). `Some(true)` pins
+    /// it across workspace switches; `Some(false)` and the default (`None`)
+    /// leave it as an ordinary per-workspace window. See [`Action::ToggleSticky`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -494,6 +499,12 @@ pub enum Action {
     /// Lower the focused window to the bottom of the stacking order, again
     /// without touching keyboard focus. The complement of [`Action::Raise`].
     Lower,
+    /// Toggle the "sticky" flag on the focused window. A sticky window is
+    /// shown on every workspace — it stays mapped (and keeps its position)
+    /// across workspace switches instead of being hidden with the rest of
+    /// its workspace. Useful for a reference doc or picture-in-picture video.
+    /// A no-op when no window is focused.
+    ToggleSticky,
     /// Switch every output to show the windows on workspace `index`
     /// (1-based; valid range 1..=16).
     FocusWorkspace { index: u8 },
@@ -550,7 +561,7 @@ pub fn default_config_toml() -> String {
 #   shoestring-wm --write-default-config
 #
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
-# minimize, unminimize, close, cycle-windows, raise, lower,
+# minimize, unminimize, close, cycle-windows, raise, lower, toggle-sticky,
 # focus-workspace, focus-workspace-relative, move-window-to-workspace,
 # move-window-to-workspace-relative, change-vt, inject-key, inject-text,
 # inject-click, lock.
@@ -699,6 +710,13 @@ impl Config {
                 mods: super_shift(),
                 key: "Up".into(),
                 action: Action::Lower,
+            },
+            // Toggle "show on all workspaces" for the focused window.
+            // `s` for sticky.
+            Binding {
+                mods: super_only(),
+                key: "s".into(),
+                action: Action::ToggleSticky,
             },
             // Lock screen. Spawns `general.lock_command` (default
             // `shoestring-lock`) which binds ext-session-lock-v1.
@@ -1107,6 +1125,26 @@ middle_emulation = true
         };
         assert!(has(|a| matches!(a, Action::Raise), &["Super"]));
         assert!(has(|a| matches!(a, Action::Lower), &["Super", "Shift"]));
+    }
+
+    #[test]
+    fn default_bindings_include_toggle_sticky() {
+        let cfg = Config::with_default_bindings();
+        assert!(cfg.bindings.iter().any(|b| {
+            matches!(b.action, Action::ToggleSticky) && b.key == "s" && b.mods == ["Super"]
+        }));
+    }
+
+    #[test]
+    fn window_rule_sticky_action_parses() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id = \"mpv\" }
+actions = { sticky = true }
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.window_rules.len(), 1);
+        assert_eq!(cfg.window_rules[0].actions.sticky, Some(true));
     }
 
     #[test]

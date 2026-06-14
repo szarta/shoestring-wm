@@ -276,6 +276,14 @@ pub struct ShoestringWm {
     /// map. Entries are removed in `toplevel_destroyed`.
     pub rules_applied: HashSet<Window>,
 
+    /// Sticky windows — shown on every workspace. A sticky window is
+    /// exempt from the unmap/remap that a workspace switch does to every
+    /// other window (see [`Self::focus_workspace_id`]); it stays mapped
+    /// and is reassigned to whatever workspace becomes active so the
+    /// "windows on the active workspace == mapped elements" invariant
+    /// holds. Entries are removed in `toplevel_destroyed`.
+    pub sticky: HashSet<Window>,
+
     /// Windows awaiting an initial centering pass. At `new_toplevel` the
     /// client hasn't picked a size yet (geometry is 0×0), so we can't
     /// center properly; the first commit with a non-zero size triggers
@@ -519,6 +527,7 @@ impl ShoestringWm {
             key_repeat: None,
             desktop_scroll_accum: 0.0,
             rules_applied: HashSet::new(),
+            sticky: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
@@ -765,6 +774,45 @@ impl ShoestringWm {
         }
     }
 
+    /// Whether `window` is sticky (shown on every workspace).
+    pub fn is_sticky(&self, window: &Window) -> bool {
+        self.sticky.contains(window)
+    }
+
+    /// Toggle the sticky flag on the focused window. No-op when nothing is
+    /// focused. Bound to Super+S by default ([`Action::ToggleSticky`]).
+    pub fn toggle_sticky_focused(&mut self) {
+        let Some(window) = self.focused_window() else {
+            tracing::debug!("toggle_sticky: no focused window");
+            return;
+        };
+        let now = !self.is_sticky(&window);
+        self.set_sticky(&window, now);
+    }
+
+    /// Set (or clear) the sticky flag on `window`. A sticky window stays
+    /// mapped across workspace switches and is reported as belonging to the
+    /// active workspace. Clearing it leaves the window on the currently
+    /// active workspace (where it is visible right now). Idempotent; emits
+    /// `window_sticky_changed` only on an actual change.
+    pub fn set_sticky(&mut self, window: &smithay::desktop::Window, sticky: bool) {
+        let changed = if sticky {
+            self.sticky.insert(window.clone())
+        } else {
+            self.sticky.remove(window)
+        };
+        if !changed {
+            return;
+        }
+        // A window made sticky belongs to the workspace it's visible on
+        // right now (the active one); clearing leaves it there too.
+        self.workspaces.reassign(window, self.workspaces.active());
+        tracing::debug!(sticky, "window sticky toggled");
+        if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
+            self.emit_ipc(shoestring_ipc::Event::WindowStickyChanged { id, sticky });
+        }
+    }
+
     /// Clear keyboard focus and deactivate every mapped window. Used when
     /// switching to an empty workspace or minimizing the last window.
     pub fn clear_focus(&mut self) {
@@ -861,7 +909,9 @@ impl ShoestringWm {
             self.workspaces.record_focus(current, &focused);
         }
 
-        // Snapshot positions then unmap everything currently on screen.
+        // Snapshot positions then unmap everything currently on screen —
+        // except sticky windows, which stay mapped (and keep their spot)
+        // so they appear on every workspace.
         let to_unmap: Vec<Window> = self.space.elements().cloned().collect();
         for w in &to_unmap {
             if let Some(loc) = self.space.element_location(w) {
@@ -869,15 +919,31 @@ impl ShoestringWm {
             }
         }
         for w in &to_unmap {
+            if self.sticky.contains(w) {
+                continue;
+            }
             self.space.unmap_elem(w);
         }
 
         self.workspaces.set_active(target);
 
+        // Sticky windows follow the active workspace so the "windows on the
+        // active workspace == mapped elements" invariant holds for the IPC
+        // queries and focus history.
+        for w in &to_unmap {
+            if self.sticky.contains(w) {
+                self.workspaces.reassign(w, target);
+            }
+        }
+
         // Re-map every window assigned to the target workspace, skipping
-        // those that are still minimized.
+        // those that are still minimized or already mapped (a sticky window
+        // that was never unmapped — re-mapping would disturb its stacking).
         for w in self.workspaces.windows_on(target) {
             if self.layout.is_minimized(&w) {
+                continue;
+            }
+            if self.space.elements().any(|el| el == &w) {
                 continue;
             }
             let loc = self.workspaces.saved_location(&w).unwrap_or((0, 0).into());
@@ -1131,6 +1197,14 @@ impl ShoestringWm {
                 ws = active.one_based(),
                 "move_window: target == active, skip"
             );
+            return;
+        }
+        // A sticky window is shown on every workspace, so moving it to one
+        // particular workspace is meaningless — ignore the request and keep
+        // it where it is. The user can un-stick it first if they want it to
+        // live on a single workspace again.
+        if self.is_sticky(window) {
+            tracing::debug!("move_window: window is sticky, ignoring move");
             return;
         }
         tracing::debug!(

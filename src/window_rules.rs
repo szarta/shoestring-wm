@@ -79,6 +79,14 @@ impl ShoestringWm {
             "window rule matched",
         );
 
+        // Apply stickiness before the workspace move: a sticky window
+        // ignores move-to-workspace (see `move_window_to_workspace`), so a
+        // rule that sets both `sticky = true` and `workspace` keeps the
+        // window on all workspaces rather than pinning it to one.
+        if let Some(sticky) = rule.actions.sticky {
+            self.set_sticky(window, sticky);
+        }
+
         if let Some(idx) = rule.actions.workspace {
             match self.workspaces.from_one_based(idx) {
                 Some(target) => self.move_window_to_workspace(window, target),

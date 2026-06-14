@@ -160,6 +160,7 @@ impl ShoestringWm {
             Action::CycleWindows => self.cycle_windows(),
             Action::Raise => self.restack_focused(true),
             Action::Lower => self.restack_focused(false),
+            Action::ToggleSticky => self.toggle_sticky_focused(),
             Action::FocusWorkspace { index } => {
                 tracing::debug!(index, "FocusWorkspace");
                 if let Some(ws) = self.workspaces.from_one_based(index) {

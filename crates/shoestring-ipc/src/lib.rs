@@ -233,6 +233,12 @@ pub enum Request {
     /// The complement of [`Request::RaiseWindow`]; same focus/gating/no-op
     /// semantics.
     LowerWindow { id: String },
+    /// Set or clear the sticky flag (show on all workspaces) on the toplevel
+    /// matching `id`. Broadcasts a [`Event::WindowStickyChanged`]. Reply is
+    /// [`Response::Ok`] on success, [`Response::Error`] if no window matches.
+    /// Not gated by automation (a benign window-management tweak, like
+    /// [`Request::FocusWindow`]).
+    SetWindowSticky { id: String, sticky: bool },
     /// Override the display name of the toplevel matching `id` (an
     /// `ext-foreign-toplevel-list-v1` identifier, as carried by
     /// [`WindowSummary::id`]). The override takes precedence over the
@@ -498,6 +504,19 @@ pub struct WindowSummary {
     /// field on [`WindowNode`] in the [`Request::GetTree`] snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z: Option<u32>,
+    /// `true` when the window is sticky — shown on every workspace. Sticky
+    /// windows stay mapped across workspace switches and report the
+    /// currently-active workspace. Omitted (defaults to `false`) on older WM
+    /// builds and for non-sticky windows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sticky: bool,
+}
+
+/// `skip_serializing_if` helper for `bool` fields that default to `false`,
+/// so the common case stays off the wire (matching the `Option::is_none`
+/// pattern the optional fields use).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A window's on-screen rectangle in compositor-global logical coords:
@@ -537,6 +556,10 @@ pub struct WindowNode {
     /// `true` for the currently keyboard-focused window.
     pub focused: bool,
     pub minimized: bool,
+    /// `true` when the window is sticky (shown on every workspace). Omitted
+    /// (defaults to `false`) for ordinary windows. See [`WindowSummary::sticky`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sticky: bool,
     /// Tile/maximize state: `floating`, `tiled_left`, `tiled_right`, or
     /// `maximized`.
     pub layout: String,
@@ -627,6 +650,14 @@ pub enum Event {
     /// [`Request::GetTree`] for the updated `z` of the whole stack.
     WindowRestacked {
         id: String,
+    },
+    /// Window's sticky flag changed — it was pinned to (or released from)
+    /// "show on all workspaces" via the `toggle-sticky` action, a
+    /// `[[window_rules]]` `sticky` action, or the [`Request::SetWindowSticky`]
+    /// request. See [`WindowSummary::sticky`].
+    WindowStickyChanged {
+        id: String,
+        sticky: bool,
     },
     OutputAdded(OutputSummary),
     OutputRemoved {
@@ -1093,10 +1124,18 @@ mod tests {
                 h: 480,
             }),
             z: Some(2),
+            sticky: true,
         };
         let s = serde_json::to_string(&with_geo).unwrap();
         assert!(s.contains(r#""geometry":{"x":0,"y":0,"w":640,"h":480}"#));
         assert!(s.contains(r#""z":2"#));
+        assert!(s.contains(r#""sticky":true"#));
+        // A non-sticky summary omits the field entirely (default false).
+        let plain = WindowSummary {
+            sticky: false,
+            ..with_geo.clone()
+        };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("sticky"));
     }
 
     #[test]
@@ -1128,6 +1167,7 @@ mod tests {
                     z: Some(0),
                     focused: true,
                     minimized: false,
+                    sticky: true,
                     layout: "tiled_left".into(),
                 }],
             }],
@@ -1140,6 +1180,7 @@ mod tests {
                 z: None,
                 focused: false,
                 minimized: true,
+                sticky: false,
                 layout: "floating".into(),
             }],
         };
@@ -1155,8 +1196,10 @@ mod tests {
                 assert_eq!(outputs[0].name, "eDP-1");
                 assert_eq!(workspaces[0].windows[0].z, Some(0));
                 assert_eq!(workspaces[0].windows[0].layout, "tiled_left");
+                assert!(workspaces[0].windows[0].sticky);
                 assert_eq!(minimized.len(), 1);
                 assert!(minimized[0].minimized);
+                assert!(!minimized[0].sticky);
                 assert_eq!(minimized[0].z, None);
             }
             _ => panic!("expected Tree"),
@@ -1172,12 +1215,14 @@ mod tests {
             z: None,
             focused: false,
             minimized: true,
+            sticky: false,
             layout: "floating".into(),
         };
         let s = serde_json::to_string(&node).unwrap();
         assert!(!s.contains("geometry"));
         assert!(!s.contains("\"z\""));
         assert!(!s.contains("output"));
+        assert!(!s.contains("sticky"));
         assert!(s.contains(r#""minimized":true"#));
     }
 
@@ -1219,6 +1264,32 @@ mod tests {
         let back: Event = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Event::WindowRestacked { id } if id == "abc"));
 
+        let set_sticky = Request::SetWindowSticky {
+            id: "abc".into(),
+            sticky: true,
+        };
+        let s = serde_json::to_string(&set_sticky).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"set_window_sticky","id":"abc","sticky":true}"#
+        );
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::SetWindowSticky { id, sticky } if id == "abc" && sticky));
+
+        let sticky_evt = Event::WindowStickyChanged {
+            id: "abc".into(),
+            sticky: false,
+        };
+        let s = serde_json::to_string(&sticky_evt).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"window_sticky_changed","id":"abc","sticky":false}"#
+        );
+        let back: Event = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(back, Event::WindowStickyChanged { id, sticky } if id == "abc" && !sticky)
+        );
+
         let set_name = Request::SetWindowName {
             id: "abc".into(),
             name: "Build log".into(),
@@ -1253,6 +1324,7 @@ mod tests {
                     h: 600,
                 }),
                 z: Some(0),
+                sticky: false,
             }),
         };
         let s = serde_json::to_string(&picked).unwrap();
