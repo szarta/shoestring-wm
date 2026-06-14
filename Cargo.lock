@@ -1954,6 +1954,7 @@ dependencies = [
 name = "shoestring-config"
 version = "0.3.0"
 dependencies = [
+ "regex",
  "serde",
  "thiserror 2.0.18",
  "toml 0.8.23",

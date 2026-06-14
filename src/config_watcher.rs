@@ -82,6 +82,9 @@ impl ShoestringWm {
                 for w in warnings {
                     tracing::warn!(target: "shoestring_wm::config", "{w}");
                 }
+                for e in cfg.window_rule_regex_errors() {
+                    tracing::warn!(target: "shoestring_wm::config", "{e}");
+                }
                 // Detect an XKB change before the swap: rebuilding the keymap
                 // resets the active layout to the first entry, so we only do it
                 // when the xkb_* fields actually changed (not on every reload).

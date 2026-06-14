@@ -343,6 +343,9 @@ impl ShoestringWm {
         for w in bind_warnings {
             tracing::warn!(target: "shoestring_wm::config", "{w}");
         }
+        for e in config.window_rule_regex_errors() {
+            tracing::warn!(target: "shoestring_wm::config", "{e}");
+        }
         bindings.log_compiled();
 
         let compositor_state = CompositorState::new::<Self>(&dh);

@@ -270,11 +270,22 @@ pub struct WindowMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
     /// Case-sensitive substring match against the toplevel title.
-    /// (Substring rather than regex to stay zero-dep; regex can be
-    /// added later behind a `regex` feature if a real user hits a case
-    /// substring can't express.)
+    /// Prefer this for the common case; reach for [`Self::title_regex`]
+    /// only when a substring can't express the match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_contains: Option<String>,
+    /// Regex match against the `app_id` (Rust `regex` syntax, unanchored —
+    /// `firefox` matches anywhere; use `^firefox$` for an exact match). AND-ed
+    /// with the other fields, so it composes with an exact [`Self::app_id`] or
+    /// a [`Self::title_contains`]. An invalid pattern never matches (and is
+    /// reported at config load — see [`Config::window_rule_regex_errors`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id_regex: Option<String>,
+    /// Regex match against the toplevel title (same syntax/semantics as
+    /// [`Self::app_id_regex`]). The regex counterpart to
+    /// [`Self::title_contains`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_regex: Option<String>,
 }
 
 /// Actions applied to a matched window. Each is independently optional.
@@ -305,6 +316,34 @@ pub struct WindowActions {
     /// it in normal stacking. See [`Action::ToggleAlwaysOnTop`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on_top: Option<bool>,
+    /// Place the window on the named output (connector name, e.g. `"DP-1"`),
+    /// centering it within that output's usable area. Applied before
+    /// `position`, so an explicit `position` still wins. A name that matches
+    /// no connected output is ignored with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Apply an initial tiling layout instead of leaving the window floating.
+    /// Computed against whichever output the window ends up on (so combine
+    /// with `output` to tile on a specific monitor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<RuleLayout>,
+}
+
+/// The layout a `[[window_rules]]` `layout` action puts a window into. Mirrors
+/// the WM's internal layout states (and the `layout` field the IPC `windows` /
+/// `get_tree` snapshots report), minus the app-driven `fullscreen` state which
+/// a rule can't sensibly force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleLayout {
+    /// Leave the window floating (the default; explicit for clarity).
+    Floating,
+    /// Tile to the left half of the output's usable area.
+    TiledLeft,
+    /// Tile to the right half.
+    TiledRight,
+    /// Maximize to the output's usable area (minus bars/docks).
+    Maximized,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -845,7 +884,48 @@ impl WindowMatch {
                 return false;
             }
         }
+        // Regex fields are AND-ed in too. An invalid pattern matches nothing
+        // (fail closed); the bad pattern is surfaced separately at config
+        // load via [`Config::window_rule_regex_errors`]. Patterns are tiny
+        // and rules fire once per window, so compiling here is cheap enough.
+        if let Some(pat) = &self.app_id_regex {
+            if !regex::Regex::new(pat).is_ok_and(|re| re.is_match(app_id)) {
+                return false;
+            }
+        }
+        if let Some(pat) = &self.title_regex {
+            if !regex::Regex::new(pat).is_ok_and(|re| re.is_match(title)) {
+                return false;
+            }
+        }
         true
+    }
+}
+
+impl Config {
+    /// Human-readable errors for every `[[window_rules]]` matcher whose
+    /// `app_id_regex` / `title_regex` fails to compile. Empty when all
+    /// patterns are valid (or none are set). The WM calls this at config
+    /// load + reload and logs each entry as a warning — a bad pattern is
+    /// non-fatal (the matcher simply never fires) but worth surfacing so a
+    /// typo isn't silently ignored.
+    pub fn window_rule_regex_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (i, rule) in self.window_rules.iter().enumerate() {
+            for (field, pat) in [
+                ("app_id_regex", &rule.matcher.app_id_regex),
+                ("title_regex", &rule.matcher.title_regex),
+            ] {
+                if let Some(pat) = pat {
+                    if let Err(e) = regex::Regex::new(pat) {
+                        errors.push(format!(
+                            "window_rules[{i}].match.{field}: invalid regex {pat:?}: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+        errors
     }
 }
 
@@ -928,7 +1008,7 @@ mod tests {
     fn window_match_semantics() {
         let only_app = WindowMatch {
             app_id: Some("firefox".into()),
-            title_contains: None,
+            ..Default::default()
         };
         assert!(only_app.matches("firefox", "anything"));
         assert!(!only_app.matches("chromium", "Firefox-like"));
@@ -936,6 +1016,7 @@ mod tests {
         let app_and_title = WindowMatch {
             app_id: Some("term".into()),
             title_contains: Some("vim".into()),
+            ..Default::default()
         };
         assert!(app_and_title.matches("term", "nvim buffer"));
         assert!(!app_and_title.matches("term", "fish shell"));
@@ -944,6 +1025,64 @@ mod tests {
         // Empty matcher = wildcard.
         let empty = WindowMatch::default();
         assert!(empty.matches("anything", "anything"));
+    }
+
+    #[test]
+    fn window_match_regex_fields() {
+        // Unanchored app_id regex, AND-ed with a title regex.
+        let m = WindowMatch {
+            app_id_regex: Some("^(firefox|chromium)$".into()),
+            title_regex: Some(r"\bGitHub\b".into()),
+            ..Default::default()
+        };
+        assert!(m.matches("firefox", "PR #12 · GitHub"));
+        assert!(!m.matches("firefox", "no match here")); // title fails
+        assert!(!m.matches("firefoxdev", "x GitHub y")); // anchored app_id fails
+
+        // Unanchored: a bare pattern matches as a substring.
+        let sub = WindowMatch {
+            app_id_regex: Some("fire".into()),
+            ..Default::default()
+        };
+        assert!(sub.matches("firefoxdeveloperedition", "t"));
+
+        // An invalid pattern matches nothing (fails closed).
+        let bad = WindowMatch {
+            app_id_regex: Some("(unclosed".into()),
+            ..Default::default()
+        };
+        assert!(!bad.matches("anything", "t"));
+    }
+
+    #[test]
+    fn window_rule_new_actions_parse() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id_regex = \"^mpv$\" }
+actions = { output = \"DP-1\", layout = \"tiled-right\" }
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let r = &cfg.window_rules[0];
+        assert_eq!(r.matcher.app_id_regex.as_deref(), Some("^mpv$"));
+        assert_eq!(r.actions.output.as_deref(), Some("DP-1"));
+        assert_eq!(r.actions.layout, Some(RuleLayout::TiledRight));
+    }
+
+    #[test]
+    fn window_rule_regex_errors_reports_bad_patterns() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id_regex = \"(unclosed\" }
+actions = { sticky = true }
+
+[[window_rules]]
+match = { title_regex = \"valid\" }
+actions = {}
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let errors = cfg.window_rule_regex_errors();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("window_rules[0].match.app_id_regex"));
     }
 
     #[test]

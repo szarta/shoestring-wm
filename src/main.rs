@@ -321,11 +321,15 @@ fn check_config(path: Option<&std::path::Path>) -> Result<()> {
     for w in &warnings {
         eprintln!("warning: {w}");
     }
+    let regex_errors = config.window_rule_regex_errors();
+    for e in &regex_errors {
+        eprintln!("warning: {e}");
+    }
     println!(
         "{}: OK — {} binding(s), {} warning(s)",
         target.display(),
         config.bindings.len(),
-        warnings.len()
+        warnings.len() + regex_errors.len()
     );
     Ok(())
 }

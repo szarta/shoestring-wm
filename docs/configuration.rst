@@ -532,6 +532,10 @@ rules against already-mapped windows.
     match = { app_id = "Alacritty", title_contains = "scratch" }
     actions = { position = [100, 100], size = [800, 600] }
 
+    [[window_rules]]
+    match = { app_id_regex = "^(firefox|chromium)$" }
+    actions = { output = "DP-1", layout = "maximized" }
+
 ``match``
     Sparse predicate. All set fields are AND-ed. An empty matcher
     matches every window — almost never what you want.
@@ -539,9 +543,15 @@ rules against already-mapped windows.
     - ``app_id`` (string) — exact match on the toplevel's xdg-shell
       ``app_id`` (the closest Wayland analogue to X11 ``WM_CLASS``).
     - ``title_contains`` (string) — case-sensitive substring match on
-      the toplevel title. The substring matcher is deliberate: regex
-      lives on the IPC side (``find_windows``) where strings are
-      arbitrary; rules favour the simpler form.
+      the toplevel title.
+    - ``app_id_regex`` (string) — regex match on ``app_id``. Rust ``regex``
+      syntax (Perl-like, no backrefs), **unanchored** — ``firefox`` matches
+      anywhere; use ``^firefox$`` for an exact match. Same engine as the
+      IPC ``find_windows`` filters.
+    - ``title_regex`` (string) — regex match on the title (same syntax).
+
+    An invalid pattern matches nothing and is reported at startup / reload
+    (and by ``--check-config``); the rest of the config still loads.
 
 ``actions``
     Sparse action set. Each field is independently optional.
@@ -561,6 +571,15 @@ rules against already-mapped windows.
       ordinary windows (see the ``toggle-always-on-top`` action). Pair
       with ``sticky`` for a picture-in-picture window that floats on top
       of every workspace.
+    - ``output`` (string) — place the window on the named output (e.g.
+      ``"DP-1"``), centered in its usable area. Applied before
+      ``position``, so an explicit ``position`` still wins. A name that
+      matches no connected output is ignored with a warning.
+    - ``layout`` (string) — give the window an initial tiling layout
+      instead of leaving it floating: ``floating`` (the default),
+      ``tiled-left``, ``tiled-right``, or ``maximized``. Computed against
+      whichever output the window ends up on, so combine with ``output``
+      to tile on a specific monitor.
 
 Pointer bindings
 ----------------
