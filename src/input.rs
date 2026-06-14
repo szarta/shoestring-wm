@@ -346,6 +346,8 @@ impl ShoestringWm {
         }
         self.layout.push_minimized(window.clone(), rect);
         crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+        // A minimized window is unmapped, so it no longer inhibits idle.
+        self.refresh_idle_inhibit();
     }
 
     /// Restore a specific minimized `window` (taskbar click on its entry),
@@ -360,6 +362,8 @@ impl ShoestringWm {
         self.workspaces.assign(window.clone(), active, rect.loc);
         self.focus_window(window);
         crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+        // Restored into view — it may inhibit idle again.
+        self.refresh_idle_inhibit();
     }
 
     fn unminimize_last(&mut self) {
@@ -373,6 +377,8 @@ impl ShoestringWm {
         self.workspaces.assign(window.clone(), active, rect.loc);
         // focus_window records MRU on the active workspace.
         self.focus_window(&window);
+        // Restored into view — it may inhibit idle again.
+        self.refresh_idle_inhibit();
     }
 
     fn close_focused(&mut self) {

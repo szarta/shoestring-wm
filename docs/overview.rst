@@ -99,6 +99,11 @@ Implemented today:
   clients can lock the cursor in place (receiving only relative deltas)
   or confine it to a region of their surface. A lock activates while the
   pointer is over the requesting surface and releases when it leaves.
+- Idle management (opt-in via ``[general].idle_notifications_enabled``):
+  ``ext_idle_notify_v1`` for idle daemons/auto-lockers, paired with
+  ``zwp_idle_inhibit_manager_v1`` so video players and browsers can
+  suppress idle while a *visible* surface requests it — an inhibitor on a
+  minimized or off-workspace window is ignored.
 - xcursor sprite rendering at the pointer.
 - Configurable XKB keyboard layouts (``[general].xkb_layout`` and
   friends), with multiple layouts and a ``cycle-layout`` action

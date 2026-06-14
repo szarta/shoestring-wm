@@ -325,6 +325,14 @@ The server replies with a single JSON object tagged by ``type``:
          - Connected IPC clients.
        * - ``ipc.subscribers``
          - Long-lived stream subscribers (event + metrics).
+       * - ``wm.idle_inhibitors``
+         - Tracked ``zwp_idle_inhibitor_v1`` surfaces. Present only when
+           idle notifications are enabled (the inhibit manager is
+           advertised alongside the notifier).
+       * - ``wm.idle_inhibited``
+         - ``1`` while at least one inhibitor surface is *visible* (mapped
+           on the active workspace), so idle/lock is currently suppressed;
+           ``0`` otherwise. Answers "why won't the screen lock?".
        * - ``client.<name>.surfaces``
          - Live ``wl_surface`` count for one Wayland client. ``<name>`` is
            the client's process ``comm`` joined with its pid

@@ -101,6 +101,9 @@ impl XdgShellHandler for ShoestringWm {
         if let Some(id) = id {
             self.emit_ipc(shoestring_ipc::Event::WindowClosed { id });
         }
+        // A closing player drops out of the space; recompute idle inhibition.
+        // Its inhibitor surface dies too, so the dead-surface prune clears it.
+        self.refresh_idle_inhibit();
     }
 
     fn reposition_request(

@@ -89,6 +89,14 @@ impl CompositorHandler for ShoestringWm {
             }
         }
 
+        // Catch a surface that maps (its first buffer commit) while an idle
+        // inhibitor is already live — e.g. a player that creates the
+        // inhibitor before its window is mapped. Free in the common case:
+        // the guard short-circuits whenever nothing is inhibiting.
+        if !self.idle_inhibitors.is_empty() {
+            self.refresh_idle_inhibit();
+        }
+
         layer_shell::handle_commit(self, surface);
         xdg_shell::handle_commit(&mut self.popups, &self.space, surface);
         grabs::resize_handle_commit(&mut self.space, surface);

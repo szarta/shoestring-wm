@@ -270,6 +270,18 @@ impl ShoestringWm {
         self.metrics
             .set_gauge("ipc.subscribers", subscribers as i64);
 
+        // Idle-inhibit visibility (only when the idle subsystem is on, since
+        // the inhibit manager is advertised only alongside the notifier).
+        // `wm.idle_inhibitors` counts tracked inhibitor surfaces; `idle_inhibited`
+        // is 1 only while at least one is *visible* — answering "why won't the
+        // screen lock during video?" at a glance.
+        if self.idle_notifier.is_some() {
+            let inhibitors = self.idle_inhibitors.len() as i64;
+            let inhibited = self.idle_inhibit_active() as i64;
+            self.metrics.set_gauge("wm.idle_inhibitors", inhibitors);
+            self.metrics.set_gauge("wm.idle_inhibited", inhibited);
+        }
+
         // Per-client resource attribution: surface gauges, freshly derived
         // from the live census maintained on surface create/destroy.
         self.metrics.refresh_client_gauges();

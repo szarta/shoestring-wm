@@ -53,6 +53,26 @@ impl smithay::wayland::idle_notify::IdleNotifierHandler for ShoestringWm {
     }
 }
 
+impl smithay::wayland::idle_inhibit::IdleInhibitHandler for ShoestringWm {
+    fn inhibit(&mut self, surface: WlSurface) {
+        // A client asked to inhibit idle for this surface. Track it and
+        // recompute — it only actually inhibits while the surface is visible.
+        self.idle_inhibitors.push(surface);
+        self.refresh_idle_inhibit();
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        // Remove one inhibitor for this surface (Vec, so duplicates are
+        // reference-counted by position). Smithay calls this only on an
+        // explicit destroy; client-death is handled by the dead-surface
+        // prune in refresh_idle_inhibit.
+        if let Some(pos) = self.idle_inhibitors.iter().position(|s| *s == surface) {
+            self.idle_inhibitors.remove(pos);
+        }
+        self.refresh_idle_inhibit();
+    }
+}
+
 impl SeatHandler for ShoestringWm {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;

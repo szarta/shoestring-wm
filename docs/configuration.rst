@@ -125,7 +125,11 @@ The ``[general]`` section
        on a desktop that never sleeps, idle behaviour is mostly an
        annoyance, and not advertising the global means a stray idle
        client simply finds nothing to talk to. Set ``true`` on a laptop
-       where you do want idle dimming/locking.
+       where you do want idle dimming/locking. Enabling this also
+       advertises ``zwp_idle_inhibit_manager_v1`` so apps (video players,
+       browsers) can suppress idle while a visible surface requests it —
+       inhibition only has meaning when something advertises idle, so the
+       two are paired.
    * - ``xkb_layout``
      - string
      - ``""``

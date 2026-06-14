@@ -20,9 +20,9 @@ use smithay::{
             Display, DisplayHandle,
         },
     },
-    utils::{Logical, Point},
+    utils::{IsAlive, Logical, Point},
     wayland::{
-        compositor::{CompositorClientState, CompositorState},
+        compositor::{get_parent, CompositorClientState, CompositorState},
         dmabuf::DmabufState,
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
         fractional_scale::FractionalScaleManagerState,
@@ -148,6 +148,18 @@ pub struct ShoestringWm {
     /// event via [`Self::notify_idle_activity`]. See
     /// [`crate::handlers`]'s `IdleNotifierHandler` impl.
     pub idle_notifier: Option<smithay::wayland::idle_notify::IdleNotifierState<Self>>,
+    /// `Some` alongside [`Self::idle_notifier`] (same opt-in): holds the
+    /// `zwp_idle_inhibit_manager_v1` global so video players and the like
+    /// can suppress idle while visible. Inhibition is meaningless without a
+    /// notifier to inhibit, so the two are advertised together. Held only to
+    /// keep the global registered for the session's lifetime.
+    #[allow(dead_code)]
+    pub idle_inhibit_manager: Option<smithay::wayland::idle_inhibit::IdleInhibitManagerState>,
+    /// Surfaces holding a live `zwp_idle_inhibitor_v1`. A `Vec` (not a set)
+    /// so two inhibitors on one surface are reference-counted by position.
+    /// Idle is actually inhibited only while at least one of these is
+    /// *visible* (mapped in the space); see [`Self::refresh_idle_inhibit`].
+    pub idle_inhibitors: Vec<WlSurface>,
     /// `Some` while a session lock is active. See
     /// [`crate::handlers::session_lock`] for the protocol wiring.
     pub lock_session: Option<crate::handlers::session_lock::LockState>,
@@ -413,6 +425,12 @@ impl ShoestringWm {
         let idle_notifier = config.general.idle_notifications_enabled.then(|| {
             smithay::wayland::idle_notify::IdleNotifierState::new(&dh, event_loop.handle())
         });
+        // Pair zwp_idle_inhibit_manager_v1 with the notifier: inhibiting idle
+        // only has meaning when something advertises idle in the first place.
+        let idle_inhibit_manager = config
+            .general
+            .idle_notifications_enabled
+            .then(|| smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(&dh));
 
         let space = Space::default();
         let popups = PopupManager::default();
@@ -463,6 +481,8 @@ impl ShoestringWm {
             #[cfg(feature = "tty")]
             gamma_control,
             idle_notifier,
+            idle_inhibit_manager,
+            idle_inhibitors: Vec::new(),
             lock_session: None,
             seat,
             pointer_constraints,
@@ -733,6 +753,51 @@ impl ShoestringWm {
             .or_else(|| self.workspaces.find_by_toplevel(surface))
     }
 
+    /// Recompute whether idle is inhibited and tell the idle notifier.
+    ///
+    /// Cheap and idempotent: a no-op when idle notifications are off, and an
+    /// `is_empty()` check away from free in the common case (nothing
+    /// inhibiting). Call it wherever an inhibitor is added/removed or a
+    /// window's visibility changes (map, unmap, workspace switch, minimize).
+    pub fn refresh_idle_inhibit(&mut self) {
+        if self.idle_notifier.is_none() {
+            return;
+        }
+        // Drop inhibitors whose surface died without an explicit destroy
+        // request (a crashed client never sends one). The visibility test
+        // below would already ignore them, but pruning keeps the Vec bounded.
+        self.idle_inhibitors.retain(IsAlive::alive);
+        let inhibited = self.idle_inhibit_active();
+        if let Some(notifier) = self.idle_notifier.as_mut() {
+            notifier.set_is_inhibited(inhibited);
+        }
+    }
+
+    /// True iff at least one inhibiting surface is currently *visible* —
+    /// mapped in the space, which (since off-workspace and minimized windows
+    /// are unmapped) means on the active workspace and not minimized. Smithay
+    /// explicitly leaves "ignore invisible/dead surfaces" to the compositor.
+    pub(crate) fn idle_inhibit_active(&self) -> bool {
+        if self.idle_inhibitors.is_empty() {
+            return false;
+        }
+        self.idle_inhibitors
+            .iter()
+            .any(|surface| self.surface_is_mapped(surface))
+    }
+
+    /// Whether `surface` (walked up to its root) belongs to a window
+    /// currently mapped in the space.
+    fn surface_is_mapped(&self, surface: &WlSurface) -> bool {
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        self.space
+            .elements()
+            .any(|w| crate::window_ext::matches_surface(w, &root))
+    }
+
     /// Switch to workspace `target`. Unmaps windows on the current workspace,
     /// remaps windows assigned to the target at their saved locations, and
     /// restores focus from the target's MRU stack.
@@ -796,6 +861,9 @@ impl ShoestringWm {
         self.emit_ipc(shoestring_ipc::Event::WorkspaceChanged {
             active: target.one_based(),
         });
+        // The set of mapped windows just changed wholesale; a video player
+        // may have come into or gone out of view.
+        self.refresh_idle_inhibit();
     }
 
     /// Refresh `pointer_element`'s memory buffer for the next render. Picks
