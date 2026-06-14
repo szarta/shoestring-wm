@@ -20,6 +20,7 @@ Binding                            Action
 ``Super+Up``                        Raise focused window to the top
 ``Super+Shift+Up``                  Lower focused window to the bottom
 ``Super+S``                         Toggle sticky (show on all workspaces)
+``Super+A``                         Toggle always-on-top
 ``Super+Left-drag``                Move the window under the cursor
 ``Super+Right-drag``               Resize the window under the cursor
 ================================  ============================================

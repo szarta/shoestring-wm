@@ -445,6 +445,15 @@ Each action type and its fields:
     ignored (it's already on all of them); un-stick it first. The same
     flag is settable per-app via the ``sticky`` window rule.
 
+``toggle-always-on-top``
+    Toggle "always on top" for the focused window. An always-on-top
+    window stays above all ordinary windows regardless of focus —
+    clicking another window raises it only as far as just below the
+    always-on-top layer (bars and pop-up menus still sit above it). Bound
+    to Super+A by default. Combine with ``toggle-sticky`` for a
+    picture-in-picture window. The same flag is settable per-app via the
+    ``always_on_top`` window rule.
+
 ``cycle-layout``
     Switch to the next keyboard layout listed in ``[general].xkb_layout``,
     wrapping at the end. Bound to Super+Space by default. A no-op when only
@@ -548,6 +557,10 @@ rules against already-mapped windows.
       ``workspace``, which a sticky window then ignores — so set one or
       the other, not both. ``mpv`` and other PiP players are the
       typical use.
+    - ``always_on_top`` (bool) — when ``true``, keep the window above
+      ordinary windows (see the ``toggle-always-on-top`` action). Pair
+      with ``sticky`` for a picture-in-picture window that floats on top
+      of every workspace.
 
 Pointer bindings
 ----------------

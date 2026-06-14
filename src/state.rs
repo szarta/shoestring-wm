@@ -43,6 +43,13 @@ use smithay::{
 #[cfg(feature = "tty")]
 use smithay::wayland::dmabuf::DmabufGlobal;
 
+/// Smithay z-index for always-on-top windows. Sits between
+/// [`RenderZindex::Shell`] (30, ordinary windows) and
+/// [`RenderZindex::Top`] (40, layer-shell top surfaces — bars, overlay
+/// menus), so an always-on-top window floats above other windows while bars
+/// and pop-up menus stay reachable above it. See [`ShoestringWm::set_always_on_top`].
+const ALWAYS_ON_TOP_ZINDEX: u8 = 35;
+
 /// `(pointer_element_snapshot, pointer_location, (hotspot_x, hotspot_y))`.
 pub type CursorSnapshot = (
     crate::drawing::PointerElement,
@@ -283,6 +290,14 @@ pub struct ShoestringWm {
     /// "windows on the active workspace == mapped elements" invariant
     /// holds. Entries are removed in `toplevel_destroyed`.
     pub sticky: HashSet<Window>,
+
+    /// Always-on-top windows — kept above all ordinary windows in the
+    /// stacking order. Implemented by bumping the window's smithay z-index
+    /// above [`RenderZindex::Shell`] (see [`Self::set_always_on_top`]); the
+    /// `Space` keeps elements sorted by z-index, so this set is just for
+    /// reporting + toggle bookkeeping. Entries are removed in
+    /// `toplevel_destroyed`.
+    pub always_on_top: HashSet<Window>,
 
     /// Windows awaiting an initial centering pass. At `new_toplevel` the
     /// client hasn't picked a size yet (geometry is 0×0), so we can't
@@ -528,6 +543,7 @@ impl ShoestringWm {
             desktop_scroll_accum: 0.0,
             rules_applied: HashSet::new(),
             sticky: HashSet::new(),
+            always_on_top: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
@@ -810,6 +826,61 @@ impl ShoestringWm {
         tracing::debug!(sticky, "window sticky toggled");
         if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
             self.emit_ipc(shoestring_ipc::Event::WindowStickyChanged { id, sticky });
+        }
+    }
+
+    /// Whether `window` is always-on-top.
+    pub fn is_always_on_top(&self, window: &Window) -> bool {
+        self.always_on_top.contains(window)
+    }
+
+    /// Toggle the always-on-top flag on the focused window. No-op when
+    /// nothing is focused. Bound to Super+A by default
+    /// ([`Action::ToggleAlwaysOnTop`]).
+    pub fn toggle_always_on_top_focused(&mut self) {
+        let Some(window) = self.focused_window() else {
+            tracing::debug!("toggle_always_on_top: no focused window");
+            return;
+        };
+        let now = !self.is_always_on_top(&window);
+        self.set_always_on_top(&window, now);
+    }
+
+    /// Set (or clear) the always-on-top flag on `window`. Works by bumping
+    /// the window's smithay z-index above [`RenderZindex::Shell`] (ordinary
+    /// windows) but below [`RenderZindex::Top`] (layer-shell bars/overlays),
+    /// so it floats above other windows while bars and menus stay reachable.
+    /// The `Space` only re-sorts on insert/raise, so we re-raise a mapped
+    /// window to apply the new ordering immediately. Idempotent; emits
+    /// `window_always_on_top_changed` only on an actual change.
+    pub fn set_always_on_top(&mut self, window: &smithay::desktop::Window, on: bool) {
+        let changed = if on {
+            self.always_on_top.insert(window.clone())
+        } else {
+            self.always_on_top.remove(window)
+        };
+        if !changed {
+            return;
+        }
+        let z = if on {
+            ALWAYS_ON_TOP_ZINDEX
+        } else {
+            smithay::desktop::space::RenderZindex::Shell as u8
+        };
+        window.override_z_index(z);
+        // The Space keeps its element list sorted by z-index but only
+        // re-sorts when an element is (re-)inserted. Re-raise the window (no
+        // activation change) so the new z-index takes effect now; skip it
+        // when the window isn't mapped — the z-index persists for next map.
+        if self.space.element_location(window).is_some() {
+            self.space.raise_element(window, false);
+        }
+        tracing::debug!(on, "window always-on-top toggled");
+        if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
+            self.emit_ipc(shoestring_ipc::Event::WindowAlwaysOnTopChanged {
+                id,
+                always_on_top: on,
+            });
         }
     }
 

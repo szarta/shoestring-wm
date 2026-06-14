@@ -129,6 +129,12 @@ Each request is a JSON object with a ``type`` discriminator:
        workspace switches and is reported on whatever workspace is active.
        Broadcasts a ``window_sticky_changed`` event. Returns ``error`` if no
        window matches. Not gated by automation.
+   * - ``{"type": "set_window_always_on_top", "id": "...", "always_on_top": <bool>}``
+     - Set or clear the **always-on-top** flag on the window with the given
+       identifier. An always-on-top window stays above all ordinary windows
+       in the stacking order (but below layer-shell bars/menus). Broadcasts a
+       ``window_always_on_top_changed`` event. Returns ``error`` if no window
+       matches. Not gated by automation.
    * - ``{"type": "set_window_name", "id": "...", "name": "..."}``
      - Override the display name of the window with the given identifier.
        The override wins over the client's ``xdg_toplevel`` title
@@ -384,9 +390,10 @@ The server replies with a single JSON object tagged by ``type``:
       "app_id":    "alacritty",
       "workspace": 3,
       "focused":   true,
-      "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080},
-      "z":         2,
-      "sticky":    true
+      "geometry":     {"x": 0, "y": 0, "w": 960, "h": 1080},
+      "z":            2,
+      "sticky":       true,
+      "always_on_top": true
     }
 
 ``id`` matches the ``identifier`` event from ``ext-foreign-toplevel-list-v1``,
@@ -398,10 +405,11 @@ so an unmapped window has no rectangle). ``z`` is the window's stacking
 position within the mapped stack — ``0`` is bottom-most, higher is closer to
 the top — and the same value the ``get_tree`` ``WindowNode`` carries; it is
 **omitted** for unmapped windows (same condition as ``geometry``). ``sticky``
-is ``true`` when the window is pinned to all workspaces; it is **omitted**
-(defaults to ``false``) for ordinary windows. Older WM builds that pre-dated
+is ``true`` when the window is pinned to all workspaces; ``always_on_top`` is
+``true`` when it is kept above ordinary windows. Both are **omitted**
+(defaulting to ``false``) for ordinary windows. Older WM builds that pre-dated
 these fields omit them too — clients should treat "absent" and "off-screen"
-(and "not sticky") identically.
+(and "not sticky" / "not always-on-top") identically.
 
 ``OutputSummary``::
 
@@ -506,6 +514,12 @@ Each event is tagged by ``type``.
     Fired when a window is pinned to (or released from) "show on all
     workspaces" — via the ``toggle-sticky`` action, a ``[[window_rules]]``
     ``sticky`` action, or the ``set_window_sticky`` request.
+
+``window_always_on_top_changed``
+    ``{"type": "window_always_on_top_changed", "id": "...", "always_on_top": <bool>}``.
+    Fired when a window is pinned to (or released from) the always-on-top
+    layer — via the ``toggle-always-on-top`` action, a ``[[window_rules]]``
+    ``always_on_top`` action, or the ``set_window_always_on_top`` request.
 
 ``output_added``
     Same shape as ``OutputSummary``.

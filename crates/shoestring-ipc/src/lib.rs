@@ -239,6 +239,12 @@ pub enum Request {
     /// Not gated by automation (a benign window-management tweak, like
     /// [`Request::FocusWindow`]).
     SetWindowSticky { id: String, sticky: bool },
+    /// Set or clear the always-on-top flag on the toplevel matching `id`.
+    /// Broadcasts a [`Event::WindowAlwaysOnTopChanged`]. Reply is
+    /// [`Response::Ok`] on success, [`Response::Error`] if no window matches.
+    /// Not gated by automation (a benign window-management tweak, like
+    /// [`Request::FocusWindow`]).
+    SetWindowAlwaysOnTop { id: String, always_on_top: bool },
     /// Override the display name of the toplevel matching `id` (an
     /// `ext-foreign-toplevel-list-v1` identifier, as carried by
     /// [`WindowSummary::id`]). The override takes precedence over the
@@ -510,6 +516,11 @@ pub struct WindowSummary {
     /// builds and for non-sticky windows.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sticky: bool,
+    /// `true` when the window is always-on-top — kept above ordinary windows
+    /// in the stacking order. Omitted (defaults to `false`) on older WM
+    /// builds and for ordinary windows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub always_on_top: bool,
 }
 
 /// `skip_serializing_if` helper for `bool` fields that default to `false`,
@@ -560,6 +571,10 @@ pub struct WindowNode {
     /// (defaults to `false`) for ordinary windows. See [`WindowSummary::sticky`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub sticky: bool,
+    /// `true` when the window is always-on-top. Omitted (defaults to `false`)
+    /// for ordinary windows. See [`WindowSummary::always_on_top`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub always_on_top: bool,
     /// Tile/maximize state: `floating`, `tiled_left`, `tiled_right`, or
     /// `maximized`.
     pub layout: String,
@@ -658,6 +673,15 @@ pub enum Event {
     WindowStickyChanged {
         id: String,
         sticky: bool,
+    },
+    /// Window's always-on-top flag changed — it was pinned to (or released
+    /// from) the always-on-top layer via the `toggle-always-on-top` action, a
+    /// `[[window_rules]]` `always_on_top` action, or the
+    /// [`Request::SetWindowAlwaysOnTop`] request. See
+    /// [`WindowSummary::always_on_top`].
+    WindowAlwaysOnTopChanged {
+        id: String,
+        always_on_top: bool,
     },
     OutputAdded(OutputSummary),
     OutputRemoved {
@@ -1125,17 +1149,22 @@ mod tests {
             }),
             z: Some(2),
             sticky: true,
+            always_on_top: true,
         };
         let s = serde_json::to_string(&with_geo).unwrap();
         assert!(s.contains(r#""geometry":{"x":0,"y":0,"w":640,"h":480}"#));
         assert!(s.contains(r#""z":2"#));
         assert!(s.contains(r#""sticky":true"#));
-        // A non-sticky summary omits the field entirely (default false).
+        assert!(s.contains(r#""always_on_top":true"#));
+        // A plain summary omits both flag fields entirely (default false).
         let plain = WindowSummary {
             sticky: false,
+            always_on_top: false,
             ..with_geo.clone()
         };
-        assert!(!serde_json::to_string(&plain).unwrap().contains("sticky"));
+        let plain_s = serde_json::to_string(&plain).unwrap();
+        assert!(!plain_s.contains("sticky"));
+        assert!(!plain_s.contains("always_on_top"));
     }
 
     #[test]
@@ -1168,6 +1197,7 @@ mod tests {
                     focused: true,
                     minimized: false,
                     sticky: true,
+                    always_on_top: true,
                     layout: "tiled_left".into(),
                 }],
             }],
@@ -1181,6 +1211,7 @@ mod tests {
                 focused: false,
                 minimized: true,
                 sticky: false,
+                always_on_top: false,
                 layout: "floating".into(),
             }],
         };
@@ -1197,9 +1228,11 @@ mod tests {
                 assert_eq!(workspaces[0].windows[0].z, Some(0));
                 assert_eq!(workspaces[0].windows[0].layout, "tiled_left");
                 assert!(workspaces[0].windows[0].sticky);
+                assert!(workspaces[0].windows[0].always_on_top);
                 assert_eq!(minimized.len(), 1);
                 assert!(minimized[0].minimized);
                 assert!(!minimized[0].sticky);
+                assert!(!minimized[0].always_on_top);
                 assert_eq!(minimized[0].z, None);
             }
             _ => panic!("expected Tree"),
@@ -1216,6 +1249,7 @@ mod tests {
             focused: false,
             minimized: true,
             sticky: false,
+            always_on_top: false,
             layout: "floating".into(),
         };
         let s = serde_json::to_string(&node).unwrap();
@@ -1223,6 +1257,7 @@ mod tests {
         assert!(!s.contains("\"z\""));
         assert!(!s.contains("output"));
         assert!(!s.contains("sticky"));
+        assert!(!s.contains("always_on_top"));
         assert!(s.contains(r#""minimized":true"#));
     }
 
@@ -1290,6 +1325,34 @@ mod tests {
             matches!(back, Event::WindowStickyChanged { id, sticky } if id == "abc" && !sticky)
         );
 
+        let set_aot = Request::SetWindowAlwaysOnTop {
+            id: "abc".into(),
+            always_on_top: true,
+        };
+        let s = serde_json::to_string(&set_aot).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"set_window_always_on_top","id":"abc","always_on_top":true}"#
+        );
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(back, Request::SetWindowAlwaysOnTop { id, always_on_top } if id == "abc" && always_on_top)
+        );
+
+        let aot_evt = Event::WindowAlwaysOnTopChanged {
+            id: "abc".into(),
+            always_on_top: true,
+        };
+        let s = serde_json::to_string(&aot_evt).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"window_always_on_top_changed","id":"abc","always_on_top":true}"#
+        );
+        let back: Event = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(back, Event::WindowAlwaysOnTopChanged { id, always_on_top } if id == "abc" && always_on_top)
+        );
+
         let set_name = Request::SetWindowName {
             id: "abc".into(),
             name: "Build log".into(),
@@ -1325,6 +1388,7 @@ mod tests {
                 }),
                 z: Some(0),
                 sticky: false,
+                always_on_top: false,
             }),
         };
         let s = serde_json::to_string(&picked).unwrap();

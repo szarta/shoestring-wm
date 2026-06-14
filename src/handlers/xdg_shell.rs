@@ -86,6 +86,7 @@ impl XdgShellHandler for ShoestringWm {
         self.workspaces.forget(&window);
         self.rules_applied.remove(&window);
         self.sticky.remove(&window);
+        self.always_on_top.remove(&window);
         self.pending_initial_center.remove(&window);
         self.window_name_overrides.remove(&window);
         // Drop on our Arc clone is NOT enough: smithay's `new_toplevel`

@@ -300,6 +300,11 @@ pub struct WindowActions {
     /// leave it as an ordinary per-workspace window. See [`Action::ToggleSticky`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticky: Option<bool>,
+    /// Keep the window above all ordinary windows. `Some(true)` pins it to
+    /// the always-on-top layer; `Some(false)` and the default (`None`) leave
+    /// it in normal stacking. See [`Action::ToggleAlwaysOnTop`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_top: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -505,6 +510,13 @@ pub enum Action {
     /// its workspace. Useful for a reference doc or picture-in-picture video.
     /// A no-op when no window is focused.
     ToggleSticky,
+    /// Toggle the "always on top" flag on the focused window. An
+    /// always-on-top window stays above all ordinary windows in the
+    /// stacking order regardless of focus — clicking another window raises
+    /// it only as far as just below the always-on-top layer. Combine with
+    /// [`Action::ToggleSticky`] for a picture-in-picture window. A no-op
+    /// when no window is focused.
+    ToggleAlwaysOnTop,
     /// Switch every output to show the windows on workspace `index`
     /// (1-based; valid range 1..=16).
     FocusWorkspace { index: u8 },
@@ -562,9 +574,9 @@ pub fn default_config_toml() -> String {
 #
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
 # minimize, unminimize, close, cycle-windows, raise, lower, toggle-sticky,
-# focus-workspace, focus-workspace-relative, move-window-to-workspace,
-# move-window-to-workspace-relative, change-vt, inject-key, inject-text,
-# inject-click, lock.
+# toggle-always-on-top, focus-workspace, focus-workspace-relative,
+# move-window-to-workspace, move-window-to-workspace-relative, change-vt,
+# inject-key, inject-text, inject-click, lock.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
@@ -717,6 +729,12 @@ impl Config {
                 mods: super_only(),
                 key: "s".into(),
                 action: Action::ToggleSticky,
+            },
+            // Toggle "always on top" for the focused window. `a` for above.
+            Binding {
+                mods: super_only(),
+                key: "a".into(),
+                action: Action::ToggleAlwaysOnTop,
             },
             // Lock screen. Spawns `general.lock_command` (default
             // `shoestring-lock`) which binds ext-session-lock-v1.
@@ -1145,6 +1163,26 @@ actions = { sticky = true }
         let cfg: Config = toml::from_str(toml_src).unwrap();
         assert_eq!(cfg.window_rules.len(), 1);
         assert_eq!(cfg.window_rules[0].actions.sticky, Some(true));
+    }
+
+    #[test]
+    fn default_bindings_include_toggle_always_on_top() {
+        let cfg = Config::with_default_bindings();
+        assert!(cfg.bindings.iter().any(|b| {
+            matches!(b.action, Action::ToggleAlwaysOnTop) && b.key == "a" && b.mods == ["Super"]
+        }));
+    }
+
+    #[test]
+    fn window_rule_always_on_top_action_parses() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id = \"mpv\" }
+actions = { sticky = true, always_on_top = true }
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.window_rules.len(), 1);
+        assert_eq!(cfg.window_rules[0].actions.always_on_top, Some(true));
     }
 
     #[test]

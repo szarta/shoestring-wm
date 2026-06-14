@@ -215,6 +215,15 @@ enum Command {
         #[arg(action = clap::ArgAction::Set)]
         sticky: bool,
     },
+    /// Set or clear the always-on-top flag on a window by its
+    /// `ext-foreign-toplevel-list-v1` identifier.
+    SetAlwaysOnTop {
+        /// FT identifier of the window.
+        id: String,
+        /// `true` to keep above other windows, `false` to release.
+        #[arg(action = clap::ArgAction::Set)]
+        always_on_top: bool,
+    },
     /// Override a window's display name, keyed by its
     /// `ext-foreign-toplevel-list-v1` identifier. The override wins over the
     /// client's own title everywhere the WM reports a title (`windows`,
@@ -369,6 +378,9 @@ fn main() -> Result<()> {
         Command::RaiseWindow { id } => Request::RaiseWindow { id },
         Command::LowerWindow { id } => Request::LowerWindow { id },
         Command::SetSticky { id, sticky } => Request::SetWindowSticky { id, sticky },
+        Command::SetAlwaysOnTop { id, always_on_top } => {
+            Request::SetWindowAlwaysOnTop { id, always_on_top }
+        }
         Command::SetName { id, name } => Request::SetWindowName { id, name },
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,

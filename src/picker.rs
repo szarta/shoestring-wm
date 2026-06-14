@@ -147,6 +147,7 @@ impl ShoestringWm {
             geometry: crate::ipc::window_geometry(self, window),
             z: crate::ipc::window_z(self, window),
             sticky: self.is_sticky(window),
+            always_on_top: self.is_always_on_top(window),
         })
     }
 
@@ -202,6 +203,14 @@ impl ShoestringWm {
     pub fn set_window_sticky_by_id(&mut self, id: &str, sticky: bool) -> Result<(), String> {
         let window = self.window_by_ft_id(id)?;
         self.set_sticky(&window, sticky);
+        Ok(())
+    }
+
+    /// Set or clear the always-on-top flag on the toplevel whose FT
+    /// identifier matches `id`. Broadcasts `window_always_on_top_changed`.
+    pub fn set_window_always_on_top_by_id(&mut self, id: &str, on: bool) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.set_always_on_top(&window, on);
         Ok(())
     }
 

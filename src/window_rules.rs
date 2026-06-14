@@ -87,6 +87,10 @@ impl ShoestringWm {
             self.set_sticky(window, sticky);
         }
 
+        if let Some(on) = rule.actions.always_on_top {
+            self.set_always_on_top(window, on);
+        }
+
         if let Some(idx) = rule.actions.workspace {
             match self.workspaces.from_one_based(idx) {
                 Some(target) => self.move_window_to_workspace(window, target),

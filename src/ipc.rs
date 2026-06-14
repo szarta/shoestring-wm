@@ -554,6 +554,17 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::SetWindowAlwaysOnTop {
+                id: window_id,
+                always_on_top,
+            } => {
+                let resp = match state.set_window_always_on_top_by_id(&window_id, always_on_top) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::SetWindowName {
                 id: window_id,
                 name,
@@ -815,6 +826,7 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
                 geometry: window_geometry(state, window),
                 z: window_z(state, window),
                 sticky: state.is_sticky(window),
+                always_on_top: state.is_always_on_top(window),
             }
         })
         .collect()
@@ -935,6 +947,7 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             focused: focused.as_ref() == Some(window),
             minimized: state.layout.is_minimized(window),
             sticky: state.is_sticky(window),
+            always_on_top: state.is_always_on_top(window),
             layout: layout.to_string(),
         });
     }
