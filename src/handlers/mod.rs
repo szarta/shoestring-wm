@@ -99,6 +99,20 @@ impl SeatHandler for ShoestringWm {
     }
 }
 
+impl smithay::wayland::tablet_manager::TabletSeatHandler for ShoestringWm {
+    fn tablet_tool_image(
+        &mut self,
+        _tool: &smithay::backend::input::TabletToolDescriptor,
+        image: smithay::input::pointer::CursorImageStatus,
+    ) {
+        // A stylus can carry its own cursor sprite. Route it through the same
+        // pointer-cursor element the mouse uses — a tablet tool drives the one
+        // shared pointer, so one cursor is correct.
+        self.cursor_status = image.clone();
+        self.pointer_element.set_status(image);
+    }
+}
+
 impl PointerConstraintsHandler for ShoestringWm {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
         // A constraint takes effect only while the cursor is over the surface

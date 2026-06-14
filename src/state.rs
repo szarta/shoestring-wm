@@ -179,6 +179,13 @@ pub struct ShoestringWm {
     /// held only to keep the global registered.
     #[allow(dead_code)]
     pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    /// `zwp_tablet_manager_v2`: drawing-tablet / stylus support (Wacom et al.).
+    /// Always advertised; the actual tablet/tool routing lives in
+    /// [`crate::input`]'s `TabletToolAxis`/`Proximity`/`Tip`/`Button` handling,
+    /// which registers tablets on the seat's tablet-seat on device hotplug.
+    /// Held only to keep the global registered for the session's lifetime.
+    #[allow(dead_code)]
+    pub tablet_manager: smithay::wayland::tablet_manager::TabletManagerState,
     /// Latest cursor-position hint from a locked-pointer client: the surface
     /// it named plus a surface-local point. When the lock is released the
     /// visible cursor is dropped back here (it was hidden while locked).
@@ -416,6 +423,10 @@ impl ShoestringWm {
             smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
         let relative_pointer =
             smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
+        // Drawing tablets. Always-on global (no companion protocol to gate on,
+        // unlike idle-inhibit); real tool events arrive only from the libinput
+        // backend, but advertising costs nothing on winit.
+        let tablet_manager = smithay::wayland::tablet_manager::TabletManagerState::new::<Self>(&dh);
 
         let automation_enabled = config.general.automation_enabled;
 
@@ -487,6 +498,7 @@ impl ShoestringWm {
             seat,
             pointer_constraints,
             relative_pointer,
+            tablet_manager,
             pointer_constraint_cursor_hint: None,
             ipc: None,
             metrics: crate::metrics::Metrics::new(),
