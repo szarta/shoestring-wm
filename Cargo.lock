@@ -1938,6 +1938,7 @@ dependencies = [
  "fontdue",
  "libc",
  "memmap2",
+ "rustbus",
  "serde",
  "serde_json",
  "shoestring-ipc",

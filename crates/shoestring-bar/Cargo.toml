@@ -34,6 +34,11 @@ anyhow = "1"
 # so this adds zero new crates.
 libc = "0.2"
 
+# System-tray (StatusNotifierItem) host over the session D-Bus. Small, sync,
+# no reactor — same house D-Bus lib as shoestring-notify, already in our tree
+# (zero new crates). Driven from the bar's existing libc::poll loop.
+rustbus = "0.19"
+
 # shoestring-wm IPC wire types — for workspace + focus events.
 # Sibling workspace member; in lockstep with the WM by construction.
 shoestring-ipc = { path = "../shoestring-ipc" }

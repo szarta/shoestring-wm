@@ -12,6 +12,7 @@
 mod battery;
 mod config;
 mod ipc_client;
+mod tray;
 
 use std::{
     collections::HashMap,
@@ -584,6 +585,10 @@ fn event_loop(
     state: &mut State,
     mut event_stream: Option<&mut ipc_client::EventStream>,
 ) -> Result<()> {
+    // System-tray (StatusNotifier) host. `None` if there's no session bus or
+    // another tray already owns the watcher — the bar just runs trayless then.
+    let mut tray = tray::Tray::new();
+
     while state.running {
         // 1. Repaint if the clock string has changed since the last paint.
         //    Comparing the rendered string (rather than a minute counter)
@@ -644,12 +649,14 @@ fn event_loop(
         let wayland_fd = guard.as_ref().map(|g| g.connection_fd().as_raw_fd());
         let ipc_fd = event_stream.as_ref().map(|s| s.as_raw_fd());
 
-        // Build a 1- or 2-entry pollfd array depending on which of
-        // wayland / ipc are present.
-        let mut pfds: [libc::pollfd; 2] = unsafe { std::mem::zeroed() };
+        // Build a pollfd array over whichever of wayland / ipc / dbus-tray
+        // are present this iteration.
+        let tray_fd = tray.as_ref().map(|t| t.fd());
+        let mut pfds: [libc::pollfd; 3] = unsafe { std::mem::zeroed() };
         let mut nfds: libc::nfds_t = 0;
         let mut wayland_idx: Option<usize> = None;
         let mut ipc_idx: Option<usize> = None;
+        let mut tray_idx: Option<usize> = None;
         if let Some(fd) = wayland_fd {
             pfds[nfds as usize] = libc::pollfd {
                 fd,
@@ -666,6 +673,15 @@ fn event_loop(
                 revents: 0,
             };
             ipc_idx = Some(nfds as usize);
+            nfds += 1;
+        }
+        if let Some(fd) = tray_fd {
+            pfds[nfds as usize] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            tray_idx = Some(nfds as usize);
             nfds += 1;
         }
 
@@ -710,6 +726,14 @@ fn event_loop(
                         event_stream = None;
                     }
                 }
+            }
+        }
+
+        // Drain the D-Bus tray socket on readability (or unconditionally if we
+        // couldn't poll its fd this round). refill_all is nonblocking.
+        if let (Some(idx), Some(t)) = (tray_idx, tray.as_mut()) {
+            if pfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                t.dispatch();
             }
         }
 
