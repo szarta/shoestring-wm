@@ -638,7 +638,7 @@ fn event_loop(
         if state.dirty {
             if let Some((w, h)) = state.size {
                 state.dirty = false;
-                if let Err(e) = redraw(state, qh, w, h) {
+                if let Err(e) = redraw(state, qh, w, h, tray.as_mut()) {
                     tracing::error!(error = ?e, "redraw failed");
                 }
             }
@@ -733,8 +733,8 @@ fn event_loop(
         // Drain the D-Bus tray socket on readability (or unconditionally if we
         // couldn't poll its fd this round). refill_all is nonblocking.
         if let (Some(idx), Some(t)) = (tray_idx, tray.as_mut()) {
-            if pfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-                t.dispatch();
+            if pfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 && t.dispatch() {
+                state.dirty = true;
             }
         }
 
@@ -849,7 +849,13 @@ struct BarBuffer {
 
 /// Compose the bar into its reused wl_buffer and attach it.
 /// Re-runs on every configure event and on state changes.
-fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
+fn redraw(
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    w: u32,
+    h: u32,
+    tray: Option<&mut tray::Tray>,
+) -> Result<()> {
     // `(w, h)` is the logical surface size from the layer-shell configure. The
     // buffer is rendered at physical resolution `(pw, ph)` and mapped back to
     // logical via the viewport, so every layout dimension below is scaled into
@@ -1012,6 +1018,36 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         _ => None,
     };
 
+    // Tray: StatusNotifier icons, drawn left of the battery/chips cluster and
+    // sized to the bar height. Decode is lazy + cached inside the tray.
+    let tray_left = match tray {
+        Some(t) => {
+            let pad = s(3);
+            let icon_px = (ph as i32 - pad * 2).clamp(8, 64) as u16;
+            t.ensure_icons(icon_px);
+            let gap = s(6);
+            let right_anchor = battery_left
+                .or(cap_chip_left)
+                .or(auto_chip_left)
+                .unwrap_or(clock_x);
+            let tray_icons: Vec<&icons::Icon> = t.icons().collect();
+            if tray_icons.is_empty() {
+                None
+            } else {
+                // Right-to-left so the cluster hugs the battery/clock.
+                let mut x = right_anchor - gap;
+                for icon in tray_icons.iter().rev() {
+                    x -= icon.width as i32;
+                    let y = (ph as i32 - icon.height as i32) / 2;
+                    blit_icon(&mut mmap, pw, ph, x, y, icon);
+                    x -= gap;
+                }
+                Some(x)
+            }
+        }
+        None => None,
+    };
+
     // Far left: workspace cluster. Active box in accent color, the rest
     // dimmed. Suppressed entirely when `cfg.show_workspaces` is false,
     // in which case the window list slides to the left edge.
@@ -1066,7 +1102,12 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // ordered by FT identifier (stable across renders). When no window
     // exists on the active workspace the slot stays empty — `--version`
     // is the supported channel for reading the build version.
-    let list_end_x = battery_left.or(auto_chip_left).unwrap_or(clock_x) - s(PADDING_X);
+    let list_end_x = tray_left
+        .or(battery_left)
+        .or(cap_chip_left)
+        .or(auto_chip_left)
+        .unwrap_or(clock_x)
+        - s(PADDING_X);
     let list_budget = (list_end_x - list_start_x).max(0);
     // draw_window_list also fills `entry_rects`, which the pointer
     // button handler reads on the next click to hit-test entries.
@@ -1339,6 +1380,55 @@ fn draw_text(
             color,
         );
         pen_x += metrics.advance_width;
+    }
+}
+
+/// Blit a premultiplied-BGRA icon onto the buffer, source-over an opaque
+/// background (`out = src + dst*(1 - a)`). Clipped to the buffer.
+fn blit_icon(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    dst_x: i32,
+    dst_y: i32,
+    icon: &icons::Icon,
+) {
+    let (iw, ih) = (icon.width as i32, icon.height as i32);
+    let stride = dst_w as usize * 4;
+    for sy in 0..ih {
+        let dy = dst_y + sy;
+        if dy < 0 || dy >= dst_h as i32 {
+            continue;
+        }
+        for sx in 0..iw {
+            let dx = dst_x + sx;
+            if dx < 0 || dx >= dst_w as i32 {
+                continue;
+            }
+            let si = ((sy * iw + sx) * 4) as usize;
+            let (sb, sg, sr, sa) = (
+                icon.bgra[si],
+                icon.bgra[si + 1],
+                icon.bgra[si + 2],
+                icon.bgra[si + 3],
+            );
+            if sa == 0 {
+                continue;
+            }
+            let off = dy as usize * stride + dx as usize * 4;
+            if sa == 255 {
+                mmap[off] = sb;
+                mmap[off + 1] = sg;
+                mmap[off + 2] = sr;
+                mmap[off + 3] = 255;
+            } else {
+                let inv = 255 - sa as u32;
+                mmap[off] = (sb as u32 + (mmap[off] as u32 * inv + 127) / 255) as u8;
+                mmap[off + 1] = (sg as u32 + (mmap[off + 1] as u32 * inv + 127) / 255) as u8;
+                mmap[off + 2] = (sr as u32 + (mmap[off + 2] as u32 * inv + 127) / 255) as u8;
+                mmap[off + 3] = 255;
+            }
+        }
     }
 }
 

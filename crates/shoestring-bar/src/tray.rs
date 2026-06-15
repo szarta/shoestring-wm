@@ -46,22 +46,30 @@ const WATCHER_XML: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Ob
  </interface>
 </node>"#;
 
-#[derive(Debug, Clone)]
 struct Item {
     /// Bus name that owns the item (e.g. `:1.42`).
     service: String,
     /// Object path of the item, usually `/StatusNotifierItem`.
     path: String,
+    /// Latest `IconName`; resolved against the icon themes for rendering.
+    icon_name: String,
+    /// Item-private icon dirs from `IconThemePath`, searched first.
+    theme_dirs: Vec<std::path::PathBuf>,
+    /// Decoded icon, lazily filled by [`Tray::ensure_icons`] at the bar's
+    /// current pixel size; `icon_px` records that size so a bar resize
+    /// re-decodes.
+    icon: Option<crate::icons::Icon>,
+    icon_px: u16,
 }
 
 pub struct Tray {
     rpc: RpcConn,
     items: Vec<Item>,
     theme: crate::icons::IconTheme,
+    /// Set when the item set / an icon changed; [`Tray::dispatch`] returns and
+    /// clears it so the bar knows to repaint.
+    dirty: bool,
 }
-
-/// Target icon size in px (spike: fixed; real render will key off bar height).
-const ICON_PX: u16 = 24;
 
 impl Tray {
     /// Connect to the session bus and become the StatusNotifierWatcher + host.
@@ -94,11 +102,15 @@ impl Tray {
         let host = format!("org.kde.StatusNotifierHost-{}", std::process::id());
         let _ = request_name(&mut rpc, &host);
 
-        // Subscribe to item-side signals so NewIcon/NewStatus/NewToolTip reach
-        // us — the second risky path this spike exercises.
-        let rule = format!("type='signal',interface='{ITEM_IFACE}'");
-        if send(&mut rpc, &mut standard_messages::add_match(&rule)).is_err() {
-            tracing::warn!("tray: AddMatch failed");
+        // Subscribe to item-side signals (NewIcon/NewStatus/NewToolTip) and to
+        // NameOwnerChanged so we can drop an item when its app exits.
+        for rule in [
+            format!("type='signal',interface='{ITEM_IFACE}'"),
+            "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged'".to_string(),
+        ] {
+            if send(&mut rpc, &mut standard_messages::add_match(&rule)).is_err() {
+                tracing::warn!("tray: AddMatch failed");
+            }
         }
 
         // Announce ourselves as a host so host-gated items (KStatusNotifierItem)
@@ -113,6 +125,7 @@ impl Tray {
             rpc,
             items: Vec::new(),
             theme: crate::icons::IconTheme::detect(),
+            dirty: false,
         })
     }
 
@@ -120,9 +133,11 @@ impl Tray {
         self.rpc.conn().as_raw_fd()
     }
 
-    /// Drain the D-Bus socket: answer watcher calls, log item registrations and
-    /// signals. Call when the tray fd polls readable.
-    pub fn dispatch(&mut self) {
+    /// Drain the D-Bus socket: answer watcher calls, track item registrations,
+    /// removals, and icon changes. Returns `true` if the rendered set changed
+    /// (so the bar repaints). Call when the tray fd polls readable.
+    #[must_use]
+    pub fn dispatch(&mut self) -> bool {
         // refill_all drains the socket and hands back auto-synthesised
         // UnknownMethod replies for filtered calls — we must actually send them.
         match self.rpc.refill_all() {
@@ -133,7 +148,7 @@ impl Tray {
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "tray: refill_all failed");
-                return;
+                return false;
             }
         }
 
@@ -149,15 +164,36 @@ impl Tray {
         }
 
         while let Some(sig) = self.rpc.try_get_signal() {
-            // We get all signals the bus delivers (NameAcquired, etc.); only the
-            // item interface is interesting here (NewIcon/NewStatus/NewToolTip).
-            if sig.dynheader.interface.as_deref() != Some(ITEM_IFACE) {
+            let iface = sig.dynheader.interface.as_deref().unwrap_or_default();
+            let member = sig.dynheader.member.as_deref().unwrap_or_default();
+            // An item's owner left the bus → drop it.
+            if iface == "org.freedesktop.DBus" && member == "NameOwnerChanged" {
+                let mut p = sig.body.parser();
+                let name: String = p.get().unwrap_or_default();
+                let _old: String = p.get().unwrap_or_default();
+                let new_owner: String = p.get().unwrap_or_default();
+                if new_owner.is_empty() {
+                    let before = self.items.len();
+                    self.items.retain(|it| it.service != name);
+                    if self.items.len() != before {
+                        tracing::info!(%name, "tray: item gone");
+                        self.dirty = true;
+                    }
+                }
                 continue;
             }
-            let member = sig.dynheader.member.as_deref().unwrap_or("?");
-            let sender = sig.dynheader.sender.as_deref().unwrap_or("?");
-            tracing::info!(%member, %sender, "tray: item signal");
+            // The item changed its icon → re-resolve.
+            if iface == ITEM_IFACE {
+                let sender = sig.dynheader.sender.clone().unwrap_or_default();
+                match member {
+                    "NewIcon" | "NewToolTip" => self.refresh_icon(&sender),
+                    "NewStatus" => self.dirty = true,
+                    _ => {}
+                }
+            }
         }
+
+        std::mem::take(&mut self.dirty)
     }
 
     fn handle_call(&mut self, call: &MarshalledMessage) {
@@ -208,12 +244,6 @@ impl Tray {
             (arg.clone(), ITEM_PATH_DEFAULT.to_string())
         };
 
-        tracing::info!(%service, %path, "tray: item registered");
-        self.items.push(Item {
-            service: service.clone(),
-            path: path.clone(),
-        });
-
         // Reply, then broadcast the registration.
         let _ = self.send(call.dynheader.make_response());
         let mut sig = MessageBuilder::new()
@@ -222,39 +252,74 @@ impl Tray {
         let _ = sig.body.push_param(format!("{service}{path}"));
         let _ = self.send(sig);
 
-        // Pull the item's identity + icon hints over an outgoing call...
+        // Pull the item's identity + icon hints over an outgoing call. The icon
+        // is decoded lazily in `ensure_icons` at the bar's current pixel size.
         let id = self
             .item_get_string(&service, &path, "Id")
-            .unwrap_or_default();
-        let status = self
-            .item_get_string(&service, &path, "Status")
             .unwrap_or_default();
         let icon_name = self
             .item_get_string(&service, &path, "IconName")
             .unwrap_or_default();
-        let theme_path = self.item_get_string(&service, &path, "IconThemePath");
-        tracing::info!(%service, %id, %status, %icon_name, ?theme_path, "tray: item details");
+        let theme_dirs: Vec<std::path::PathBuf> = self
+            .item_get_string(&service, &path, "IconThemePath")
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        tracing::info!(%service, %id, %icon_name, "tray: item registered");
 
-        // ...then exercise the icon module: resolve + decode to pixels.
-        if !icon_name.is_empty() {
-            let extra: Vec<std::path::PathBuf> = theme_path
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-                .collect();
-            match self.theme.lookup(&icon_name, ICON_PX, &extra) {
-                Some(file) => match crate::icons::decode(&file, ICON_PX) {
-                    Some(icon) => tracing::info!(
-                        %icon_name, path = %file.display(), w = icon.width, h = icon.height,
-                        bytes = icon.bgra.len(), "tray: icon decoded"
-                    ),
-                    None => {
-                        tracing::warn!(%icon_name, path = %file.display(), "tray: icon decode failed")
-                    }
-                },
-                None => tracing::warn!(%icon_name, "tray: icon not found in any theme"),
+        // Replace any prior registration from the same service/path.
+        self.items
+            .retain(|i| !(i.service == service && i.path == path));
+        self.items.push(Item {
+            service,
+            path,
+            icon_name,
+            theme_dirs,
+            icon: None,
+            icon_px: 0,
+        });
+        self.dirty = true;
+    }
+
+    /// Decode any item icons that are missing or sized for a different bar
+    /// height, at `px`. Cheap after the first pass (cached per item+size).
+    pub fn ensure_icons(&mut self, px: u16) {
+        let theme = &self.theme;
+        for item in &mut self.items {
+            if item.icon_px == px && (item.icon.is_some() || item.icon_name.is_empty()) {
+                continue;
             }
+            item.icon = if item.icon_name.is_empty() {
+                None
+            } else {
+                theme
+                    .lookup(&item.icon_name, px, &item.theme_dirs)
+                    .and_then(|p| crate::icons::decode(&p, px))
+            };
+            item.icon_px = px;
         }
+    }
+
+    /// Decoded item icons in registration order, for the bar to blit.
+    pub fn icons(&self) -> impl Iterator<Item = &crate::icons::Icon> {
+        self.items.iter().filter_map(|i| i.icon.as_ref())
+    }
+
+    /// Re-fetch the icon name for the item owned by `service` and drop its
+    /// cached pixels so the next `ensure_icons` re-resolves (e.g. on `NewIcon`).
+    fn refresh_icon(&mut self, service: &str) {
+        let Some(i) = self.items.iter().position(|it| it.service == service) else {
+            return;
+        };
+        let (svc, path) = (self.items[i].service.clone(), self.items[i].path.clone());
+        let name = self
+            .item_get_string(&svc, &path, "IconName")
+            .unwrap_or_default();
+        self.items[i].icon_name = name;
+        self.items[i].icon = None;
+        self.items[i].icon_px = 0;
+        self.dirty = true;
     }
 
     /// `org.kde.StatusNotifierWatcher` read-only properties.
