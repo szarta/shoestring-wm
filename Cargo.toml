@@ -22,7 +22,7 @@ members = [
 exclude = ["crates/wlcs-shoestring"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/barrendo/shoestring-wm"
@@ -157,6 +157,10 @@ assets = [
     ["docs/_build/man/shoestring-screenshot.1", "usr/share/man/man1/", "644"],
     ["README.md",                            "usr/share/doc/shoestring-wm/README.md", "644"],
     ["LICENSE",                              "usr/share/doc/shoestring-wm/", "644"],
+    # Dedicated PAM policy for the screen locker. Installed under /etc so
+    # cargo-deb treats it as a conffile (preserved across upgrades). Without
+    # it shoestring-lock fails closed (PAM `other` = deny).
+    ["resources/pam/shoestring-lock.linux",  "etc/pam.d/shoestring-lock", "644"],
 ]
 
 # --- Fedora/RHEL packaging (cargo-generate-rpm) --------------------------
@@ -200,6 +204,9 @@ assets = [
     { source = "docs/_build/man/shoestring-screenshot.1", dest = "/usr/share/man/man1/shoestring-screenshot.1", mode = "0644", doc = true },
     { source = "README.md",                            dest = "/usr/share/doc/shoestring-wm/README.md", mode = "0644", doc = true },
     { source = "LICENSE",                              dest = "/usr/share/licenses/shoestring-wm/LICENSE", mode = "0644", doc = true },
+    # Dedicated PAM policy for the screen locker; config so rpm preserves
+    # local edits across upgrades. Without it shoestring-lock fails closed.
+    { source = "resources/pam/shoestring-lock.linux",  dest = "/etc/pam.d/shoestring-lock", mode = "0644", config = true },
 ]
 
 [package.metadata.generate-rpm.requires]
@@ -213,3 +220,22 @@ wayland-protocols-wlr = { version = "0.3", features = ["client", "wayland-client
 # Used by tests/pointer_constraints.rs: speak zwp_pointer_constraints_v1 +
 # zwp_relative_pointer_v1 as a client. Both live behind the `unstable` feature.
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "wayland-client"] }
+
+# shoestring-lock authenticates via pam-client2, which only compiles
+# against Linux-PAM: it hardcodes `const char *` for `pam_message.msg`
+# (OpenPAM uses `char *` -> 8x E0308) and references the Linux-PAM-only
+# `PAM_CONV_AGAIN` / `PAM_INCOMPLETE` codes (absent on OpenPAM -> E0425).
+# That left shoestring-lock the one workspace crate that wouldn't build on
+# FreeBSD/NetBSD/macOS. We vendor a minimal fork that cfg-gates both behind
+# an `openpam` flag (set by its build.rs, mirroring pam-sys2's target
+# selection); behaviour on Linux is byte-for-byte upstream. See
+# third_party/pam-client2/PATCH.md.
+# Upstream report/MR: https://gitlab.com/LeChatP/rust-pam-client/
+#
+# KEEP THIS SECTION LAST. The FreeBSD ports cargo framework
+# (Mk/Scripts/cargo-crates-git-configure.awk) comments out every `git =`
+# line that appears *after* a `[patch.crates-io]` header. With this block
+# above the smithay git dependencies it silently orphaned them and broke
+# `make stage` (packaging/freebsd). Below them, it's harmless.
+[patch.crates-io]
+pam-client2 = { path = "third_party/pam-client2" }

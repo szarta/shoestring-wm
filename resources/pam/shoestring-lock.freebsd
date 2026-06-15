@@ -1,0 +1,14 @@
+# PAM policy for shoestring-lock (the screen locker) — FreeBSD / OpenPAM.
+#
+# A dedicated stack, NOT the system `login` service: on FreeBSD `login`
+# begins with `auth sufficient pam_self.so`, which succeeds for the calling
+# user with NO password — a screen locker on that service unlocks on any
+# input.
+#
+# Instead, authenticate unprivileged via the setuid `unix-selfauth-helper`
+# (security/unix-selfauth-helper), the same mechanism swaylock(1) uses on
+# FreeBSD. The helper checks the calling user's own password against the
+# local passwd db, so the locker binary itself stays non-setuid. Requires
+# the unix-selfauth-helper package to be installed.
+auth     include  unix-selfauth
+account  include  system

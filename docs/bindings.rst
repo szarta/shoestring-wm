@@ -17,6 +17,10 @@ Binding                            Action
 ``Super+D``                        Minimize
 ``Super+Shift+D``                  Restore most-recently-minimized window
 ``Super+X``                        Close the focused window
+``Super+Up``                        Raise focused window to the top
+``Super+Shift+Up``                  Lower focused window to the bottom
+``Super+S``                         Toggle sticky (show on all workspaces)
+``Super+A``                         Toggle always-on-top
 ``Super+Left-drag``                Move the window under the cursor
 ``Super+Right-drag``               Resize the window under the cursor
 ================================  ============================================
@@ -53,6 +57,7 @@ Binding                            Action
 ``Super+Return``                   Spawn ``alacritty``
 ``Super+P``                        Spawn ``shoestring-menu`` (commands)
 ``Super+B``                        Spawn ``shoestring-menu --mode bookmarks``
+``Super+J``                        Spawn ``shoestring-menu --mode windows`` (jump to window)
 ``Super+Shift+L``                  Lock session (spawn ``shoestring-lock``)
 ``Super+Space``                    Cycle keyboard layout (``cycle-layout``)
 ``Super+Shift+Q``                  Quit shoestring-wm (confirm dialog)
@@ -82,9 +87,9 @@ Binding                            Spawns
 ``XF86MonBrightnessDown``          ``shoestring-brightness-down``
 ================================  ============================================
 
-If ``shoestring-menu`` is not on ``$PATH``, the ``Super+P`` / ``Super+B``
-spawn silently fails (a warning is logged). The bind is still defined so
-installing the menu later "just works".
+If ``shoestring-menu`` is not on ``$PATH``, the ``Super+P`` / ``Super+B`` /
+``Super+J`` spawn silently fails (a warning is logged). The bind is still
+defined so installing the menu later "just works".
 
 Virtual terminals
 -----------------

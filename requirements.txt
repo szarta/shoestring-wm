@@ -1,0 +1,11 @@
+# Python dev tooling for shoestring-wm. The Rust toolchain is the real
+# build system; these are the supporting bits. Install into a virtualenv:
+#
+#   python3 -m venv venv && . venv/bin/activate
+#   pip install -r requirements.txt
+#
+# (The live setup uses the shared venv at ~/data/stars/venv.)
+
+invoke>=3.0.3       # task runner — see tasks.py (inv --list)
+pre-commit>=4.5.1   # git hooks: cargo fmt + clippy + test on commit
+sphinx>=9.1.0       # docs/manpages builder — inv create-docs / create-manpages

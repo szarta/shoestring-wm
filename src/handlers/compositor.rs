@@ -3,7 +3,7 @@ use smithay::{
     desktop::Window,
     reexports::wayland_server::{
         protocol::{wl_buffer, wl_surface::WlSurface},
-        Client,
+        Client, Resource,
     },
     wayland::{
         buffer::BufferHandler,
@@ -42,6 +42,24 @@ impl CompositorHandler for ShoestringWm {
         panic!("client connected with unknown ClientData type");
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // Per-client resource attribution: bump the owning client's live
+        // `wl_surface` count so a leak report can name the offender. The
+        // owner name is memoised in ClientState, so the `/proc` lookup runs
+        // at most once per client. See [`crate::metrics`].
+        if let Some(client) = surface.client() {
+            let owner = self.client_metrics_name(&client);
+            self.metrics.track_surface(surface.id(), owner);
+        }
+    }
+
+    fn destroyed(&mut self, surface: &WlSurface) {
+        // Symmetric with `new_surface`: decrement the owning client's count.
+        // Keyed by object id (not the client) so it balances even when the
+        // dying surface's `client()` no longer resolves.
+        self.metrics.untrack_surface(&surface.id());
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
         if !is_sync_subsurface(surface) {
@@ -69,6 +87,14 @@ impl CompositorHandler for ShoestringWm {
                 // the pending flag.
                 self.try_recenter_pending(&window);
             }
+        }
+
+        // Catch a surface that maps (its first buffer commit) while an idle
+        // inhibitor is already live — e.g. a player that creates the
+        // inhibitor before its window is mapped. Free in the common case:
+        // the guard short-circuits whenever nothing is inhibiting.
+        if !self.idle_inhibitors.is_empty() {
+            self.refresh_idle_inhibit();
         }
 
         layer_shell::handle_commit(self, surface);
@@ -123,9 +149,14 @@ fn sync_foreign_toplevel(state: &mut ShoestringWm, window: &Window) {
     }
     if changed {
         handle.send_done();
+        // wlr-foreign-toplevel taskbars (above) see the raw client title; the
+        // WM's own IPC consumers (bar, window-jump menu) see the *effective*
+        // title, so an IPC-set name override isn't clobbered when the client
+        // later changes its own title.
+        let (effective_title, _) = crate::ipc::effective_title_app_id(state, window);
         state.emit_ipc(shoestring_ipc::Event::WindowTitleChanged {
             id: handle.identifier(),
-            title: title.unwrap_or_default(),
+            title: effective_title,
             app_id: app_id.unwrap_or_default(),
         });
     }

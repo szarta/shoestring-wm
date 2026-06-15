@@ -125,7 +125,11 @@ The ``[general]`` section
        on a desktop that never sleeps, idle behaviour is mostly an
        annoyance, and not advertising the global means a stray idle
        client simply finds nothing to talk to. Set ``true`` on a laptop
-       where you do want idle dimming/locking.
+       where you do want idle dimming/locking. Enabling this also
+       advertises ``zwp_idle_inhibit_manager_v1`` so apps (video players,
+       browsers) can suppress idle while a visible surface requests it —
+       inhibition only has meaning when something advertises idle, so the
+       two are paired.
    * - ``xkb_layout``
      - string
      - ``""``
@@ -421,6 +425,35 @@ Each action type and its fields:
     through every window and wrap around. Does nothing when the
     workspace has fewer than two windows.
 
+``raise``
+    Raise the focused window to the top of the stacking order, leaving
+    keyboard focus where it is (a pure restack). Bound to Super+Up by
+    default. A no-op when no window is focused.
+
+``lower``
+    Lower the focused window to the bottom of the stacking order — the
+    complement of ``raise``. Bound to Super+Shift+Up by default. Handy for
+    pushing the current window behind the others without moving the
+    pointer.
+
+``toggle-sticky``
+    Toggle "show on all workspaces" for the focused window. A sticky
+    window stays mapped (and keeps its position) across workspace
+    switches instead of being hidden with the rest of its workspace —
+    useful for a reference doc or a picture-in-picture video. Bound to
+    Super+S by default. Moving a sticky window to a specific workspace is
+    ignored (it's already on all of them); un-stick it first. The same
+    flag is settable per-app via the ``sticky`` window rule.
+
+``toggle-always-on-top``
+    Toggle "always on top" for the focused window. An always-on-top
+    window stays above all ordinary windows regardless of focus —
+    clicking another window raises it only as far as just below the
+    always-on-top layer (bars and pop-up menus still sit above it). Bound
+    to Super+A by default. Combine with ``toggle-sticky`` for a
+    picture-in-picture window. The same flag is settable per-app via the
+    ``always_on_top`` window rule.
+
 ``cycle-layout``
     Switch to the next keyboard layout listed in ``[general].xkb_layout``,
     wrapping at the end. Bound to Super+Space by default. A no-op when only
@@ -499,6 +532,10 @@ rules against already-mapped windows.
     match = { app_id = "Alacritty", title_contains = "scratch" }
     actions = { position = [100, 100], size = [800, 600] }
 
+    [[window_rules]]
+    match = { app_id_regex = "^(firefox|chromium)$" }
+    actions = { output = "DP-1", layout = "maximized" }
+
 ``match``
     Sparse predicate. All set fields are AND-ed. An empty matcher
     matches every window — almost never what you want.
@@ -506,9 +543,15 @@ rules against already-mapped windows.
     - ``app_id`` (string) — exact match on the toplevel's xdg-shell
       ``app_id`` (the closest Wayland analogue to X11 ``WM_CLASS``).
     - ``title_contains`` (string) — case-sensitive substring match on
-      the toplevel title. The substring matcher is deliberate: regex
-      lives on the IPC side (``find_windows``) where strings are
-      arbitrary; rules favour the simpler form.
+      the toplevel title.
+    - ``app_id_regex`` (string) — regex match on ``app_id``. Rust ``regex``
+      syntax (Perl-like, no backrefs), **unanchored** — ``firefox`` matches
+      anywhere; use ``^firefox$`` for an exact match. Same engine as the
+      IPC ``find_windows`` filters.
+    - ``title_regex`` (string) — regex match on the title (same syntax).
+
+    An invalid pattern matches nothing and is reported at startup / reload
+    (and by ``--check-config``); the rest of the config still loads.
 
 ``actions``
     Sparse action set. Each field is independently optional.
@@ -519,6 +562,24 @@ rules against already-mapped windows.
       auto-centered spawn position.
     - ``size`` (``[w, h]``, logical px) — preferred size; sent as part
       of the next configure (client may negotiate a different value).
+    - ``sticky`` (bool) — when ``true``, pin the window to all
+      workspaces (see the ``toggle-sticky`` action). Applied before
+      ``workspace``, which a sticky window then ignores — so set one or
+      the other, not both. ``mpv`` and other PiP players are the
+      typical use.
+    - ``always_on_top`` (bool) — when ``true``, keep the window above
+      ordinary windows (see the ``toggle-always-on-top`` action). Pair
+      with ``sticky`` for a picture-in-picture window that floats on top
+      of every workspace.
+    - ``output`` (string) — place the window on the named output (e.g.
+      ``"DP-1"``), centered in its usable area. Applied before
+      ``position``, so an explicit ``position`` still wins. A name that
+      matches no connected output is ignored with a warning.
+    - ``layout`` (string) — give the window an initial tiling layout
+      instead of leaving it floating: ``floating`` (the default),
+      ``tiled-left``, ``tiled-right``, or ``maximized``. Computed against
+      whichever output the window ends up on, so combine with ``output``
+      to tile on a specific monitor.
 
 Pointer bindings
 ----------------

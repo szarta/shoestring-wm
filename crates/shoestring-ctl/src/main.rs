@@ -192,6 +192,50 @@ enum Command {
         /// FT identifier of the window to focus.
         id: String,
     },
+    /// Raise a window to the top of the stacking order by its
+    /// `ext-foreign-toplevel-list-v1` identifier. A pure restack — keyboard
+    /// focus and the active workspace are unchanged (unlike `focus-window`).
+    RaiseWindow {
+        /// FT identifier of the window to raise.
+        id: String,
+    },
+    /// Lower a window to the bottom of the stacking order by its
+    /// `ext-foreign-toplevel-list-v1` identifier. The complement of
+    /// `raise-window`.
+    LowerWindow {
+        /// FT identifier of the window to lower.
+        id: String,
+    },
+    /// Set or clear the sticky flag (show on all workspaces) on a window by
+    /// its `ext-foreign-toplevel-list-v1` identifier.
+    SetSticky {
+        /// FT identifier of the window.
+        id: String,
+        /// `true` to pin to all workspaces, `false` to release.
+        #[arg(action = clap::ArgAction::Set)]
+        sticky: bool,
+    },
+    /// Set or clear the always-on-top flag on a window by its
+    /// `ext-foreign-toplevel-list-v1` identifier.
+    SetAlwaysOnTop {
+        /// FT identifier of the window.
+        id: String,
+        /// `true` to keep above other windows, `false` to release.
+        #[arg(action = clap::ArgAction::Set)]
+        always_on_top: bool,
+    },
+    /// Override a window's display name, keyed by its
+    /// `ext-foreign-toplevel-list-v1` identifier. The override wins over the
+    /// client's own title everywhere the WM reports a title (`windows`,
+    /// `get_tree`, `find-windows`, the `window_title_changed` event), so bars
+    /// and window-jump menus show and match on it. Pass an empty NAME to clear
+    /// the override and revert to the client's title.
+    SetName {
+        /// FT identifier of the window to rename.
+        id: String,
+        /// New display name; empty string clears the override.
+        name: String,
+    },
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -331,6 +375,13 @@ fn main() -> Result<()> {
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
         Command::FocusWindow { id } => Request::FocusWindow { id },
+        Command::RaiseWindow { id } => Request::RaiseWindow { id },
+        Command::LowerWindow { id } => Request::LowerWindow { id },
+        Command::SetSticky { id, sticky } => Request::SetWindowSticky { id, sticky },
+        Command::SetAlwaysOnTop { id, always_on_top } => {
+            Request::SetWindowAlwaysOnTop { id, always_on_top }
+        }
+        Command::SetName { id, name } => Request::SetWindowName { id, name },
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,
         },

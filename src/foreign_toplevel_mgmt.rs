@@ -70,9 +70,13 @@ pub struct ForeignToplevelHandleData {
 // ── State-array encoding (pure; unit-tested) ───────────────────────────────────
 
 /// Encode the active toplevel states as the `state` event's array payload:
-/// native-endian `u32` codes, one per set flag, per wlroots convention. We never
-/// emit `fullscreen` (the WM has no fullscreen concept).
-pub fn state_array_bytes(maximized: bool, minimized: bool, activated: bool) -> Vec<u8> {
+/// native-endian `u32` codes, one per set flag, per wlroots convention.
+pub fn state_array_bytes(
+    maximized: bool,
+    minimized: bool,
+    activated: bool,
+    fullscreen: bool,
+) -> Vec<u8> {
     use zwlr_foreign_toplevel_handle_v1::State;
     let mut v = Vec::new();
     if maximized {
@@ -83,6 +87,9 @@ pub fn state_array_bytes(maximized: bool, minimized: bool, activated: bool) -> V
     }
     if activated {
         v.extend_from_slice(&(State::Activated as u32).to_ne_bytes());
+    }
+    if fullscreen {
+        v.extend_from_slice(&(State::Fullscreen as u32).to_ne_bytes());
     }
     v
 }
@@ -99,14 +106,16 @@ struct WlrInfo {
 fn window_info(state: &ShoestringWm, window: &Window) -> WlrInfo {
     let (title, app_id) = crate::window_ext::window_title_app_id(window);
     let outputs = state.space.outputs_for_element(window);
-    let maximized = state.layout.layout_state(window) == LayoutState::Maximized;
+    let layout = state.layout.layout_state(window);
+    let maximized = layout == LayoutState::Maximized;
+    let fullscreen = layout == LayoutState::Fullscreen;
     let minimized = state.layout.is_minimized(window);
     let activated = state.focused_window().as_ref() == Some(window);
     WlrInfo {
         title,
         app_id,
         outputs,
-        state_bytes: state_array_bytes(maximized, minimized, activated),
+        state_bytes: state_array_bytes(maximized, minimized, activated, fullscreen),
     }
 }
 
@@ -295,14 +304,15 @@ mod tests {
 
     #[test]
     fn no_flags_is_empty() {
-        assert!(state_array_bytes(false, false, false).is_empty());
+        assert!(state_array_bytes(false, false, false, false).is_empty());
     }
 
     #[test]
     fn each_flag_emits_its_code() {
-        assert_eq!(state_array_bytes(true, false, false), le(0));
-        assert_eq!(state_array_bytes(false, true, false), le(1));
-        assert_eq!(state_array_bytes(false, false, true), le(2));
+        assert_eq!(state_array_bytes(true, false, false, false), le(0));
+        assert_eq!(state_array_bytes(false, true, false, false), le(1));
+        assert_eq!(state_array_bytes(false, false, true, false), le(2));
+        assert_eq!(state_array_bytes(false, false, false, true), le(3));
     }
 
     #[test]
@@ -311,25 +321,29 @@ mod tests {
         expected.extend_from_slice(&le(0)); // maximized
         expected.extend_from_slice(&le(1)); // minimized
         expected.extend_from_slice(&le(2)); // activated
-        assert_eq!(state_array_bytes(true, true, true), expected);
+        expected.extend_from_slice(&le(3)); // fullscreen
+        assert_eq!(state_array_bytes(true, true, true, true), expected);
     }
 
     #[test]
     fn length_is_four_bytes_per_set_flag() {
-        assert_eq!(state_array_bytes(true, false, true).len(), 8);
-        assert_eq!(state_array_bytes(true, true, true).len(), 12);
+        assert_eq!(state_array_bytes(true, false, true, false).len(), 8);
+        assert_eq!(state_array_bytes(true, true, true, false).len(), 12);
+        assert_eq!(state_array_bytes(true, true, true, true).len(), 16);
     }
 
     #[test]
-    fn fullscreen_code_never_appears() {
-        // No combination of our three flags should ever encode 3 (fullscreen).
+    fn fullscreen_emits_only_when_set() {
+        // The fullscreen code (3) appears iff the fullscreen flag is set.
         for &m in &[false, true] {
             for &mi in &[false, true] {
                 for &a in &[false, true] {
-                    let bytes = state_array_bytes(m, mi, a);
-                    for chunk in bytes.chunks_exact(4) {
-                        let code = u32::from_ne_bytes(chunk.try_into().unwrap());
-                        assert_ne!(code, 3, "fullscreen state must never be emitted");
+                    for &fs in &[false, true] {
+                        let bytes = state_array_bytes(m, mi, a, fs);
+                        let has_3 = bytes
+                            .chunks_exact(4)
+                            .any(|chunk| u32::from_ne_bytes(chunk.try_into().unwrap()) == 3);
+                        assert_eq!(has_3, fs, "fullscreen code must track its flag");
                     }
                 }
             }

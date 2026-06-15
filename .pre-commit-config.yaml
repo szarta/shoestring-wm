@@ -31,3 +31,13 @@ repos:
         pass_filenames: false
         types: [rust]
         verbose: true
+
+  # Python tooling (tasks.py and friends). Pinned rev = reproducible;
+  # pre-commit builds ruff its own isolated env, so this works without the
+  # docs/dev virtualenv active. Bump with `pre-commit autoupdate`.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff-check    # lint (auto-fix what it safely can)
+        args: [--fix]
+      - id: ruff-format   # format, the Python counterpart to cargo fmt

@@ -314,6 +314,9 @@ fn apply_configuration(
         return;
     }
 
+    // Only the tty backend's branches below flip this; under winit it stays
+    // false (all the mutation sites are `#[cfg(feature = "tty")]`).
+    #[cfg_attr(not(feature = "tty"), allow(unused_mut))]
     let mut any_failed = false;
 
     for (output, intent) in &heads {

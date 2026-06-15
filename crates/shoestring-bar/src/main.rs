@@ -770,6 +770,9 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
             state.dirty = true;
         }
         IpcEvent::WindowTitleChanged { .. }
+        | IpcEvent::WindowRestacked { .. }
+        | IpcEvent::WindowStickyChanged { .. }
+        | IpcEvent::WindowAlwaysOnTopChanged { .. }
         | IpcEvent::OutputAdded(_)
         | IpcEvent::OutputRemoved { .. }
         | IpcEvent::ConfigReloaded

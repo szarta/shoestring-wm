@@ -1,4 +1,19 @@
-#!/usr/bin/env bash
-# Bump screen brightness up 5%.
-set -euo pipefail
-brightnessctl set 5%+
+#!/bin/sh
+# Bump screen brightness up 5%. Cross-platform: brightnessctl on Linux
+# (/sys/class/backlight), backlight(8) on FreeBSD. POSIX sh so it runs on
+# a stock FreeBSD with no bash installed.
+set -eu
+
+case "$(uname -s)" in
+    Linux)
+        brightnessctl set 5%+
+        ;;
+    FreeBSD)
+        # `incr` caps at 100 on its own.
+        backlight incr 5
+        ;;
+    *)
+        echo "shoestring-brightness-up: unsupported OS $(uname -s)" >&2
+        exit 1
+        ;;
+esac

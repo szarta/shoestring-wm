@@ -270,11 +270,22 @@ pub struct WindowMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
     /// Case-sensitive substring match against the toplevel title.
-    /// (Substring rather than regex to stay zero-dep; regex can be
-    /// added later behind a `regex` feature if a real user hits a case
-    /// substring can't express.)
+    /// Prefer this for the common case; reach for [`Self::title_regex`]
+    /// only when a substring can't express the match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_contains: Option<String>,
+    /// Regex match against the `app_id` (Rust `regex` syntax, unanchored —
+    /// `firefox` matches anywhere; use `^firefox$` for an exact match). AND-ed
+    /// with the other fields, so it composes with an exact [`Self::app_id`] or
+    /// a [`Self::title_contains`]. An invalid pattern never matches (and is
+    /// reported at config load — see [`Config::window_rule_regex_errors`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id_regex: Option<String>,
+    /// Regex match against the toplevel title (same syntax/semantics as
+    /// [`Self::app_id_regex`]). The regex counterpart to
+    /// [`Self::title_contains`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_regex: Option<String>,
 }
 
 /// Actions applied to a matched window. Each is independently optional.
@@ -295,6 +306,44 @@ pub struct WindowActions {
     /// size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[i32; 2]>,
+    /// Make the window sticky (shown on every workspace). `Some(true)` pins
+    /// it across workspace switches; `Some(false)` and the default (`None`)
+    /// leave it as an ordinary per-workspace window. See [`Action::ToggleSticky`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky: Option<bool>,
+    /// Keep the window above all ordinary windows. `Some(true)` pins it to
+    /// the always-on-top layer; `Some(false)` and the default (`None`) leave
+    /// it in normal stacking. See [`Action::ToggleAlwaysOnTop`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_top: Option<bool>,
+    /// Place the window on the named output (connector name, e.g. `"DP-1"`),
+    /// centering it within that output's usable area. Applied before
+    /// `position`, so an explicit `position` still wins. A name that matches
+    /// no connected output is ignored with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Apply an initial tiling layout instead of leaving the window floating.
+    /// Computed against whichever output the window ends up on (so combine
+    /// with `output` to tile on a specific monitor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<RuleLayout>,
+}
+
+/// The layout a `[[window_rules]]` `layout` action puts a window into. Mirrors
+/// the WM's internal layout states (and the `layout` field the IPC `windows` /
+/// `get_tree` snapshots report), minus the app-driven `fullscreen` state which
+/// a rule can't sensibly force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleLayout {
+    /// Leave the window floating (the default; explicit for clarity).
+    Floating,
+    /// Tile to the left half of the output's usable area.
+    TiledLeft,
+    /// Tile to the right half.
+    TiledRight,
+    /// Maximize to the output's usable area (minus bars/docks).
+    Maximized,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -487,6 +536,26 @@ pub enum Action {
     /// raising it (Alt+Tab). Round-robins through every window and wraps;
     /// a no-op when the workspace has fewer than two windows.
     CycleWindows,
+    /// Raise the focused window to the top of the stacking order without
+    /// changing which window holds keyboard focus. A no-op when no window is
+    /// focused or the focused window is unmapped (minimized).
+    Raise,
+    /// Lower the focused window to the bottom of the stacking order, again
+    /// without touching keyboard focus. The complement of [`Action::Raise`].
+    Lower,
+    /// Toggle the "sticky" flag on the focused window. A sticky window is
+    /// shown on every workspace — it stays mapped (and keeps its position)
+    /// across workspace switches instead of being hidden with the rest of
+    /// its workspace. Useful for a reference doc or picture-in-picture video.
+    /// A no-op when no window is focused.
+    ToggleSticky,
+    /// Toggle the "always on top" flag on the focused window. An
+    /// always-on-top window stays above all ordinary windows in the
+    /// stacking order regardless of focus — clicking another window raises
+    /// it only as far as just below the always-on-top layer. Combine with
+    /// [`Action::ToggleSticky`] for a picture-in-picture window. A no-op
+    /// when no window is focused.
+    ToggleAlwaysOnTop,
     /// Switch every output to show the windows on workspace `index`
     /// (1-based; valid range 1..=16).
     FocusWorkspace { index: u8 },
@@ -543,10 +612,10 @@ pub fn default_config_toml() -> String {
 #   shoestring-wm --write-default-config
 #
 # Action types: spawn, quit, reload-config, tile-left, tile-right, maximize,
-# minimize, unminimize, close, cycle-windows, focus-workspace,
-# focus-workspace-relative, move-window-to-workspace,
-# move-window-to-workspace-relative, change-vt, inject-key, inject-text,
-# inject-click, lock.
+# minimize, unminimize, close, cycle-windows, raise, lower, toggle-sticky,
+# toggle-always-on-top, focus-workspace, focus-workspace-relative,
+# move-window-to-workspace, move-window-to-workspace-relative, change-vt,
+# inject-key, inject-text, inject-click, lock.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
@@ -626,6 +695,16 @@ impl Config {
                     args: vec!["--mode".into(), "bookmarks".into()],
                 },
             },
+            // Window-jump menu: fuzzy-focus any mapped window across all
+            // workspaces. `j` for "jump".
+            Binding {
+                mods: super_only(),
+                key: "j".into(),
+                action: Action::Spawn {
+                    command: "shoestring-menu".into(),
+                    args: vec!["--mode".into(), "windows".into()],
+                },
+            },
             Binding {
                 mods: super_only(),
                 key: "e".into(),
@@ -669,6 +748,32 @@ impl Config {
                 mods: super_only(),
                 key: "Down".into(),
                 action: Action::CycleWindows,
+            },
+            // Explicit stacking control for the focused window: Super+Up
+            // brings it to the front, Super+Shift+Up pushes it to the back.
+            // Neither moves keyboard focus — they only restack.
+            Binding {
+                mods: super_only(),
+                key: "Up".into(),
+                action: Action::Raise,
+            },
+            Binding {
+                mods: super_shift(),
+                key: "Up".into(),
+                action: Action::Lower,
+            },
+            // Toggle "show on all workspaces" for the focused window.
+            // `s` for sticky.
+            Binding {
+                mods: super_only(),
+                key: "s".into(),
+                action: Action::ToggleSticky,
+            },
+            // Toggle "always on top" for the focused window. `a` for above.
+            Binding {
+                mods: super_only(),
+                key: "a".into(),
+                action: Action::ToggleAlwaysOnTop,
             },
             // Lock screen. Spawns `general.lock_command` (default
             // `shoestring-lock`) which binds ext-session-lock-v1.
@@ -779,7 +884,48 @@ impl WindowMatch {
                 return false;
             }
         }
+        // Regex fields are AND-ed in too. An invalid pattern matches nothing
+        // (fail closed); the bad pattern is surfaced separately at config
+        // load via [`Config::window_rule_regex_errors`]. Patterns are tiny
+        // and rules fire once per window, so compiling here is cheap enough.
+        if let Some(pat) = &self.app_id_regex {
+            if !regex::Regex::new(pat).is_ok_and(|re| re.is_match(app_id)) {
+                return false;
+            }
+        }
+        if let Some(pat) = &self.title_regex {
+            if !regex::Regex::new(pat).is_ok_and(|re| re.is_match(title)) {
+                return false;
+            }
+        }
         true
+    }
+}
+
+impl Config {
+    /// Human-readable errors for every `[[window_rules]]` matcher whose
+    /// `app_id_regex` / `title_regex` fails to compile. Empty when all
+    /// patterns are valid (or none are set). The WM calls this at config
+    /// load + reload and logs each entry as a warning — a bad pattern is
+    /// non-fatal (the matcher simply never fires) but worth surfacing so a
+    /// typo isn't silently ignored.
+    pub fn window_rule_regex_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (i, rule) in self.window_rules.iter().enumerate() {
+            for (field, pat) in [
+                ("app_id_regex", &rule.matcher.app_id_regex),
+                ("title_regex", &rule.matcher.title_regex),
+            ] {
+                if let Some(pat) = pat {
+                    if let Err(e) = regex::Regex::new(pat) {
+                        errors.push(format!(
+                            "window_rules[{i}].match.{field}: invalid regex {pat:?}: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+        errors
     }
 }
 
@@ -862,7 +1008,7 @@ mod tests {
     fn window_match_semantics() {
         let only_app = WindowMatch {
             app_id: Some("firefox".into()),
-            title_contains: None,
+            ..Default::default()
         };
         assert!(only_app.matches("firefox", "anything"));
         assert!(!only_app.matches("chromium", "Firefox-like"));
@@ -870,6 +1016,7 @@ mod tests {
         let app_and_title = WindowMatch {
             app_id: Some("term".into()),
             title_contains: Some("vim".into()),
+            ..Default::default()
         };
         assert!(app_and_title.matches("term", "nvim buffer"));
         assert!(!app_and_title.matches("term", "fish shell"));
@@ -878,6 +1025,64 @@ mod tests {
         // Empty matcher = wildcard.
         let empty = WindowMatch::default();
         assert!(empty.matches("anything", "anything"));
+    }
+
+    #[test]
+    fn window_match_regex_fields() {
+        // Unanchored app_id regex, AND-ed with a title regex.
+        let m = WindowMatch {
+            app_id_regex: Some("^(firefox|chromium)$".into()),
+            title_regex: Some(r"\bGitHub\b".into()),
+            ..Default::default()
+        };
+        assert!(m.matches("firefox", "PR #12 · GitHub"));
+        assert!(!m.matches("firefox", "no match here")); // title fails
+        assert!(!m.matches("firefoxdev", "x GitHub y")); // anchored app_id fails
+
+        // Unanchored: a bare pattern matches as a substring.
+        let sub = WindowMatch {
+            app_id_regex: Some("fire".into()),
+            ..Default::default()
+        };
+        assert!(sub.matches("firefoxdeveloperedition", "t"));
+
+        // An invalid pattern matches nothing (fails closed).
+        let bad = WindowMatch {
+            app_id_regex: Some("(unclosed".into()),
+            ..Default::default()
+        };
+        assert!(!bad.matches("anything", "t"));
+    }
+
+    #[test]
+    fn window_rule_new_actions_parse() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id_regex = \"^mpv$\" }
+actions = { output = \"DP-1\", layout = \"tiled-right\" }
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let r = &cfg.window_rules[0];
+        assert_eq!(r.matcher.app_id_regex.as_deref(), Some("^mpv$"));
+        assert_eq!(r.actions.output.as_deref(), Some("DP-1"));
+        assert_eq!(r.actions.layout, Some(RuleLayout::TiledRight));
+    }
+
+    #[test]
+    fn window_rule_regex_errors_reports_bad_patterns() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id_regex = \"(unclosed\" }
+actions = { sticky = true }
+
+[[window_rules]]
+match = { title_regex = \"valid\" }
+actions = {}
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let errors = cfg.window_rule_regex_errors();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("window_rules[0].match.app_id_regex"));
     }
 
     #[test]
@@ -1062,6 +1267,61 @@ middle_emulation = true
                 && b.key == "space"
                 && b.mods.iter().any(|m| m == "Super")
         }));
+    }
+
+    #[test]
+    fn default_bindings_include_raise_and_lower() {
+        let cfg = Config::with_default_bindings();
+        let has = |action_matches: fn(&Action) -> bool, mods: &[&str]| {
+            cfg.bindings.iter().any(|b| {
+                action_matches(&b.action)
+                    && b.key == "Up"
+                    && mods.iter().all(|m| b.mods.iter().any(|bm| bm == m))
+                    && b.mods.len() == mods.len()
+            })
+        };
+        assert!(has(|a| matches!(a, Action::Raise), &["Super"]));
+        assert!(has(|a| matches!(a, Action::Lower), &["Super", "Shift"]));
+    }
+
+    #[test]
+    fn default_bindings_include_toggle_sticky() {
+        let cfg = Config::with_default_bindings();
+        assert!(cfg.bindings.iter().any(|b| {
+            matches!(b.action, Action::ToggleSticky) && b.key == "s" && b.mods == ["Super"]
+        }));
+    }
+
+    #[test]
+    fn window_rule_sticky_action_parses() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id = \"mpv\" }
+actions = { sticky = true }
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.window_rules.len(), 1);
+        assert_eq!(cfg.window_rules[0].actions.sticky, Some(true));
+    }
+
+    #[test]
+    fn default_bindings_include_toggle_always_on_top() {
+        let cfg = Config::with_default_bindings();
+        assert!(cfg.bindings.iter().any(|b| {
+            matches!(b.action, Action::ToggleAlwaysOnTop) && b.key == "a" && b.mods == ["Super"]
+        }));
+    }
+
+    #[test]
+    fn window_rule_always_on_top_action_parses() {
+        let toml_src = "\
+[[window_rules]]
+match = { app_id = \"mpv\" }
+actions = { sticky = true, always_on_top = true }
+";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.window_rules.len(), 1);
+        assert_eq!(cfg.window_rules[0].actions.always_on_top, Some(true));
     }
 
     #[test]

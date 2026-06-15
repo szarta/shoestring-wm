@@ -20,10 +20,10 @@ use smithay::{
             Display, DisplayHandle,
         },
     },
-    utils::{Logical, Point},
+    utils::{IsAlive, Logical, Point},
     wayland::{
-        compositor::{CompositorClientState, CompositorState},
-        dmabuf::{DmabufGlobal, DmabufState},
+        compositor::{get_parent, CompositorClientState, CompositorState},
+        dmabuf::DmabufState,
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
@@ -39,6 +39,17 @@ use smithay::{
     },
 };
 
+// Held only by the tty/udev backend (see `dmabuf_global`); unused under winit.
+#[cfg(feature = "tty")]
+use smithay::wayland::dmabuf::DmabufGlobal;
+
+/// Smithay z-index for always-on-top windows. Sits between
+/// [`RenderZindex::Shell`] (30, ordinary windows) and
+/// [`RenderZindex::Top`] (40, layer-shell top surfaces — bars, overlay
+/// menus), so an always-on-top window floats above other windows while bars
+/// and pop-up menus stay reachable above it. See [`ShoestringWm::set_always_on_top`].
+const ALWAYS_ON_TOP_ZINDEX: u8 = 35;
+
 /// `(pointer_element_snapshot, pointer_location, (hotspot_x, hotspot_y))`.
 pub type CursorSnapshot = (
     crate::drawing::PointerElement,
@@ -48,6 +59,11 @@ pub type CursorSnapshot = (
 
 pub struct ShoestringWm {
     pub start_time: Instant,
+    /// Monotonic clock backing `wp_presentation` timestamps. Its id is what
+    /// the presentation global advertises so clients interpret the
+    /// `presented` times against the right clock. Also the fallback time
+    /// source when a backend can't supply a hardware vblank timestamp.
+    pub clock: smithay::utils::Clock<smithay::utils::Monotonic>,
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
     pub loop_signal: LoopSignal,
@@ -85,6 +101,14 @@ pub struct ShoestringWm {
     /// destroy is sufficient cleanup. Title/app_id changes are pushed in
     /// [`crate::handlers::compositor`]'s commit hook.
     pub foreign_toplevels: HashMap<Window, ForeignToplevelHandle>,
+    /// IPC-set display-name overrides, keyed by the live window. When present,
+    /// the value supersedes the client's `xdg_toplevel` title everywhere the WM
+    /// reports a title (the `windows`/`get_tree` snapshots, `find_windows`
+    /// matching, the `window_title_changed` event). Set/cleared via
+    /// [`Request::SetWindowName`](shoestring_ipc::Request::SetWindowName) and
+    /// dropped when the window closes. Not forwarded to
+    /// wlr-foreign-toplevel-management taskbars, which keep the raw client title.
+    pub window_name_overrides: HashMap<Window, String>,
     /// wlr-foreign-toplevel-management: the *writable* sibling of
     /// `foreign_toplevels` (the read-only ext list). Lets waybar-style taskbars
     /// activate/close/minimize/maximize windows and read their state. Hand-wired
@@ -115,7 +139,9 @@ pub struct ShoestringWm {
     /// for readback) respects the gate.
     pub dmabuf_state: DmabufState,
     /// `Some` once the dmabuf global has been created (held so it stays
-    /// registered). Created at most once, on the first udev `device_added`.
+    /// registered). Created at most once, on the first udev `device_added`,
+    /// so it only exists on the tty backend.
+    #[cfg(feature = "tty")]
     pub dmabuf_global: Option<DmabufGlobal>,
     /// dmabuf formats the primary GPU's renderer can import/render, captured
     /// when the global is created. Reused to advertise the screencopy
@@ -134,6 +160,18 @@ pub struct ShoestringWm {
     /// event via [`Self::notify_idle_activity`]. See
     /// [`crate::handlers`]'s `IdleNotifierHandler` impl.
     pub idle_notifier: Option<smithay::wayland::idle_notify::IdleNotifierState<Self>>,
+    /// `Some` alongside [`Self::idle_notifier`] (same opt-in): holds the
+    /// `zwp_idle_inhibit_manager_v1` global so video players and the like
+    /// can suppress idle while visible. Inhibition is meaningless without a
+    /// notifier to inhibit, so the two are advertised together. Held only to
+    /// keep the global registered for the session's lifetime.
+    #[allow(dead_code)]
+    pub idle_inhibit_manager: Option<smithay::wayland::idle_inhibit::IdleInhibitManagerState>,
+    /// Surfaces holding a live `zwp_idle_inhibitor_v1`. A `Vec` (not a set)
+    /// so two inhibitors on one surface are reference-counted by position.
+    /// Idle is actually inhibited only while at least one of these is
+    /// *visible* (mapped in the space); see [`Self::refresh_idle_inhibit`].
+    pub idle_inhibitors: Vec<WlSurface>,
     /// `Some` while a session lock is active. See
     /// [`crate::handlers::session_lock`] for the protocol wiring.
     pub lock_session: Option<crate::handlers::session_lock::LockState>,
@@ -153,12 +191,36 @@ pub struct ShoestringWm {
     /// held only to keep the global registered.
     #[allow(dead_code)]
     pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    /// `zwp_tablet_manager_v2`: drawing-tablet / stylus support (Wacom et al.).
+    /// Always advertised; the actual tablet/tool routing lives in
+    /// [`crate::input`]'s `TabletToolAxis`/`Proximity`/`Tip`/`Button` handling,
+    /// which registers tablets on the seat's tablet-seat on device hotplug.
+    /// Held only to keep the global registered for the session's lifetime.
+    #[allow(dead_code)]
+    pub tablet_manager: smithay::wayland::tablet_manager::TabletManagerState,
+    /// `wp_presentation` global. Clients use it to request precise on-screen
+    /// timestamps for the buffers they commit (video A/V sync, animation
+    /// pacing). The udev/DRM backend fulfils them from hardware vblank
+    /// timestamps; the winit backend marks them at submit time (best effort).
+    /// Held purely to keep the global registered for the WM's lifetime — the
+    /// protocol is driven through the blanket `delegate_dispatch2!`, not this
+    /// field.
+    #[allow(dead_code)]
+    pub presentation_state: smithay::wayland::presentation::PresentationState,
     /// Latest cursor-position hint from a locked-pointer client: the surface
     /// it named plus a surface-local point. When the lock is released the
     /// visible cursor is dropped back here (it was hidden while locked).
     /// Cleared once no constraint remains on the surface. See the
     /// `PointerConstraintsHandler` impl in [`crate::handlers`].
     pub pointer_constraint_cursor_hint: Option<(WlSurface, Point<f64, Logical>)>,
+    /// The surface (and its global origin offset) the pointer last *delivered*
+    /// focus to. Tracked so [`Self::refresh_pointer_focus`] can tell whether
+    /// the scene under a stationary pointer actually changed — a surface that
+    /// maps, unmaps, or slides under the cursor keeps the cursor still but
+    /// changes either the target surface or its offset, and the client must
+    /// then see enter/leave/motion. Updated wherever we hand the pointer a new
+    /// focus so the refresh pass doesn't re-send motion the client already saw.
+    pub last_pointer_focus: Option<(WlSurface, Point<f64, Logical>)>,
 
     pub ipc: Option<crate::ipc::Server>,
     /// Diagnostics registry: the latest sampled process/WM metrics plus
@@ -243,6 +305,22 @@ pub struct ShoestringWm {
     /// map. Entries are removed in `toplevel_destroyed`.
     pub rules_applied: HashSet<Window>,
 
+    /// Sticky windows — shown on every workspace. A sticky window is
+    /// exempt from the unmap/remap that a workspace switch does to every
+    /// other window (see [`Self::focus_workspace_id`]); it stays mapped
+    /// and is reassigned to whatever workspace becomes active so the
+    /// "windows on the active workspace == mapped elements" invariant
+    /// holds. Entries are removed in `toplevel_destroyed`.
+    pub sticky: HashSet<Window>,
+
+    /// Always-on-top windows — kept above all ordinary windows in the
+    /// stacking order. Implemented by bumping the window's smithay z-index
+    /// above [`RenderZindex::Shell`] (see [`Self::set_always_on_top`]); the
+    /// `Space` keeps elements sorted by z-index, so this set is just for
+    /// reporting + toggle bookkeeping. Entries are removed in
+    /// `toplevel_destroyed`.
+    pub always_on_top: HashSet<Window>,
+
     /// Windows awaiting an initial centering pass. At `new_toplevel` the
     /// client hasn't picked a size yet (geometry is 0×0), so we can't
     /// center properly; the first commit with a non-zero size triggers
@@ -313,7 +391,16 @@ impl ShoestringWm {
         for w in bind_warnings {
             tracing::warn!(target: "shoestring_wm::config", "{w}");
         }
+        for e in config.window_rule_regex_errors() {
+            tracing::warn!(target: "shoestring_wm::config", "{e}");
+        }
         bindings.log_compiled();
+
+        // Monotonic clock + the wp_presentation global, advertising that
+        // clock's id so clients read `presented` timestamps correctly.
+        let clock: smithay::utils::Clock<smithay::utils::Monotonic> = smithay::utils::Clock::new();
+        let presentation_state =
+            smithay::wayland::presentation::PresentationState::new::<Self>(&dh, clock.id() as u32);
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
@@ -416,6 +503,10 @@ impl ShoestringWm {
             smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
         let relative_pointer =
             smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
+        // Drawing tablets. Always-on global (no companion protocol to gate on,
+        // unlike idle-inhibit); real tool events arrive only from the libinput
+        // backend, but advertising costs nothing on winit.
+        let tablet_manager = smithay::wayland::tablet_manager::TabletManagerState::new::<Self>(&dh);
 
         let automation_enabled = config.general.automation_enabled;
 
@@ -425,6 +516,12 @@ impl ShoestringWm {
         let idle_notifier = config.general.idle_notifications_enabled.then(|| {
             smithay::wayland::idle_notify::IdleNotifierState::new(&dh, event_loop.handle())
         });
+        // Pair zwp_idle_inhibit_manager_v1 with the notifier: inhibiting idle
+        // only has meaning when something advertises idle in the first place.
+        let idle_inhibit_manager = config
+            .general
+            .idle_notifications_enabled
+            .then(|| smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(&dh));
 
         let space = Space::default();
         let popups = PopupManager::default();
@@ -440,6 +537,8 @@ impl ShoestringWm {
 
         Self {
             start_time: Instant::now(),
+            clock,
+            presentation_state,
             socket_name,
             display_handle: dh,
             loop_signal,
@@ -461,6 +560,7 @@ impl ShoestringWm {
             layer_shell_state,
             foreign_toplevel_list,
             foreign_toplevels: HashMap::new(),
+            window_name_overrides: HashMap::new(),
             foreign_toplevel_mgmt,
             shm_state,
             viewporter_state,
@@ -471,17 +571,22 @@ impl ShoestringWm {
             output_management,
             screencopy,
             dmabuf_state: DmabufState::new(),
+            #[cfg(feature = "tty")]
             dmabuf_global: None,
             dmabuf_formats: None,
             session_lock_state,
             #[cfg(feature = "tty")]
             gamma_control,
             idle_notifier,
+            idle_inhibit_manager,
+            idle_inhibitors: Vec::new(),
             lock_session: None,
             seat,
             pointer_constraints,
             relative_pointer,
+            tablet_manager,
             pointer_constraint_cursor_hint: None,
+            last_pointer_focus: None,
             ipc: None,
             metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
@@ -501,6 +606,8 @@ impl ShoestringWm {
             key_repeat: None,
             desktop_scroll_accum: 0.0,
             rules_applied: HashSet::new(),
+            sticky: HashSet::new(),
+            always_on_top: HashSet::new(),
             pending_initial_center: HashSet::new(),
             cursor: crate::cursor::Cursor::load(),
             cursor_status: CursorImageStatus::default_named(),
@@ -636,6 +743,70 @@ impl ShoestringWm {
         None
     }
 
+    /// Re-evaluate the surface under the pointer at its *current* location and,
+    /// if it changed, deliver pointer enter/leave/motion.
+    ///
+    /// Wayland requires pointer focus to track the scene, not just real motion:
+    /// when a surface maps, unmaps, or slides under a stationary cursor the
+    /// client must still see enter/leave/motion. The input handlers only
+    /// refocus on actual motion, so this runs once per event-loop iteration
+    /// (after client commits and any WM-driven map/move/unmap) to catch the
+    /// stationary cases — the WLCS `ClientSurfaceEventsTest` /
+    /// `SurfacePointerMotionTest` family.
+    ///
+    /// No-op while a pointer grab owns the focus (interactive move/resize,
+    /// super-drag — the grab drives its own focus) and while the pointer is
+    /// locked to a surface (a locked client must receive no absolute motion).
+    /// Cheap in the common case: it returns early unless the surface *or* its
+    /// global offset under the cursor differs from what was last delivered, so
+    /// running it every loop iteration costs one [`Self::surface_under`] lookup.
+    pub fn refresh_pointer_focus(&mut self) {
+        use smithay::input::pointer::MotionEvent;
+        use smithay::utils::SERIAL_COUNTER;
+        use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
+
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        if pointer.is_grabbed() {
+            return;
+        }
+
+        let location = pointer.current_location();
+        let under = self.surface_under(location);
+
+        // Same surface at the same offset — nothing the client hasn't seen.
+        if under == self.last_pointer_focus {
+            return;
+        }
+
+        // A locked pointer must not receive absolute motion. The cursor can't
+        // have moved under an active lock, so this only guards the degenerate
+        // "locked surface itself moved" case; the confined case is fine —
+        // motion already stayed inside the surface, so its region still holds.
+        if let Some((surface, _)) = under.as_ref() {
+            let locked = with_pointer_constraint(surface, &pointer, |c| {
+                c.is_some_and(|c| c.is_active() && matches!(&*c, PointerConstraint::Locked(_)))
+            });
+            if locked {
+                return;
+            }
+        }
+
+        self.last_pointer_focus = under.clone();
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location,
+                serial,
+                time: crate::inject::monotonic_msec(),
+            },
+        );
+        pointer.frame(self);
+    }
+
     /// Global-space origin (top-left) of the mapped window backing `surface`,
     /// for translating a surface-local point into compositor-global coords.
     /// Used to restore the visible cursor from a locked-pointer client's
@@ -722,6 +893,136 @@ impl ShoestringWm {
         crate::foreign_toplevel_mgmt::broadcast_all(self);
     }
 
+    /// Raise `window` to the top of the stacking order, leaving keyboard
+    /// focus and the activated state untouched (unlike [`focus_window`],
+    /// which raises *and* focuses). A no-op when the window isn't mapped —
+    /// minimized windows are unmapped from the space, and off-workspace
+    /// windows live only in the workspace manager. Emits `window_restacked`.
+    pub fn raise_window(&mut self, window: &Window) {
+        if self.space.element_location(window).is_none() {
+            return;
+        }
+        // activate=false: a pure restack must not steal the activated bit
+        // from whatever currently holds focus.
+        self.space.raise_element(window, false);
+        self.notify_restacked(window);
+    }
+
+    /// Lower `window` to the bottom of the stacking order, leaving keyboard
+    /// focus untouched. The complement of [`raise_window`]; same unmapped
+    /// no-op semantics.
+    pub fn lower_window(&mut self, window: &Window) {
+        if self.space.element_location(window).is_none() {
+            return;
+        }
+        self.space.lower_element(window);
+        self.notify_restacked(window);
+    }
+
+    /// Emit a `window_restacked` event for `window` after its Z position
+    /// changed. The whole stack's Z indices shift on a raise/lower, so the
+    /// event only names the window that moved; subscribers re-query
+    /// `windows` / `get_tree` for the full order.
+    fn notify_restacked(&mut self, window: &Window) {
+        if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
+            self.emit_ipc(shoestring_ipc::Event::WindowRestacked { id });
+        }
+    }
+
+    /// Whether `window` is sticky (shown on every workspace).
+    pub fn is_sticky(&self, window: &Window) -> bool {
+        self.sticky.contains(window)
+    }
+
+    /// Toggle the sticky flag on the focused window. No-op when nothing is
+    /// focused. Bound to Super+S by default ([`Action::ToggleSticky`]).
+    pub fn toggle_sticky_focused(&mut self) {
+        let Some(window) = self.focused_window() else {
+            tracing::debug!("toggle_sticky: no focused window");
+            return;
+        };
+        let now = !self.is_sticky(&window);
+        self.set_sticky(&window, now);
+    }
+
+    /// Set (or clear) the sticky flag on `window`. A sticky window stays
+    /// mapped across workspace switches and is reported as belonging to the
+    /// active workspace. Clearing it leaves the window on the currently
+    /// active workspace (where it is visible right now). Idempotent; emits
+    /// `window_sticky_changed` only on an actual change.
+    pub fn set_sticky(&mut self, window: &smithay::desktop::Window, sticky: bool) {
+        let changed = if sticky {
+            self.sticky.insert(window.clone())
+        } else {
+            self.sticky.remove(window)
+        };
+        if !changed {
+            return;
+        }
+        // A window made sticky belongs to the workspace it's visible on
+        // right now (the active one); clearing leaves it there too.
+        self.workspaces.reassign(window, self.workspaces.active());
+        tracing::debug!(sticky, "window sticky toggled");
+        if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
+            self.emit_ipc(shoestring_ipc::Event::WindowStickyChanged { id, sticky });
+        }
+    }
+
+    /// Whether `window` is always-on-top.
+    pub fn is_always_on_top(&self, window: &Window) -> bool {
+        self.always_on_top.contains(window)
+    }
+
+    /// Toggle the always-on-top flag on the focused window. No-op when
+    /// nothing is focused. Bound to Super+A by default
+    /// ([`Action::ToggleAlwaysOnTop`]).
+    pub fn toggle_always_on_top_focused(&mut self) {
+        let Some(window) = self.focused_window() else {
+            tracing::debug!("toggle_always_on_top: no focused window");
+            return;
+        };
+        let now = !self.is_always_on_top(&window);
+        self.set_always_on_top(&window, now);
+    }
+
+    /// Set (or clear) the always-on-top flag on `window`. Works by bumping
+    /// the window's smithay z-index above [`RenderZindex::Shell`] (ordinary
+    /// windows) but below [`RenderZindex::Top`] (layer-shell bars/overlays),
+    /// so it floats above other windows while bars and menus stay reachable.
+    /// The `Space` only re-sorts on insert/raise, so we re-raise a mapped
+    /// window to apply the new ordering immediately. Idempotent; emits
+    /// `window_always_on_top_changed` only on an actual change.
+    pub fn set_always_on_top(&mut self, window: &smithay::desktop::Window, on: bool) {
+        let changed = if on {
+            self.always_on_top.insert(window.clone())
+        } else {
+            self.always_on_top.remove(window)
+        };
+        if !changed {
+            return;
+        }
+        let z = if on {
+            ALWAYS_ON_TOP_ZINDEX
+        } else {
+            smithay::desktop::space::RenderZindex::Shell as u8
+        };
+        window.override_z_index(z);
+        // The Space keeps its element list sorted by z-index but only
+        // re-sorts when an element is (re-)inserted. Re-raise the window (no
+        // activation change) so the new z-index takes effect now; skip it
+        // when the window isn't mapped — the z-index persists for next map.
+        if self.space.element_location(window).is_some() {
+            self.space.raise_element(window, false);
+        }
+        tracing::debug!(on, "window always-on-top toggled");
+        if let Some(id) = self.foreign_toplevels.get(window).map(|h| h.identifier()) {
+            self.emit_ipc(shoestring_ipc::Event::WindowAlwaysOnTopChanged {
+                id,
+                always_on_top: on,
+            });
+        }
+    }
+
     /// Clear keyboard focus and deactivate every mapped window. Used when
     /// switching to an empty workspace or minimizing the last window.
     pub fn clear_focus(&mut self) {
@@ -758,6 +1059,51 @@ impl ShoestringWm {
             .or_else(|| self.workspaces.find_by_toplevel(surface))
     }
 
+    /// Recompute whether idle is inhibited and tell the idle notifier.
+    ///
+    /// Cheap and idempotent: a no-op when idle notifications are off, and an
+    /// `is_empty()` check away from free in the common case (nothing
+    /// inhibiting). Call it wherever an inhibitor is added/removed or a
+    /// window's visibility changes (map, unmap, workspace switch, minimize).
+    pub fn refresh_idle_inhibit(&mut self) {
+        if self.idle_notifier.is_none() {
+            return;
+        }
+        // Drop inhibitors whose surface died without an explicit destroy
+        // request (a crashed client never sends one). The visibility test
+        // below would already ignore them, but pruning keeps the Vec bounded.
+        self.idle_inhibitors.retain(IsAlive::alive);
+        let inhibited = self.idle_inhibit_active();
+        if let Some(notifier) = self.idle_notifier.as_mut() {
+            notifier.set_is_inhibited(inhibited);
+        }
+    }
+
+    /// True iff at least one inhibiting surface is currently *visible* —
+    /// mapped in the space, which (since off-workspace and minimized windows
+    /// are unmapped) means on the active workspace and not minimized. Smithay
+    /// explicitly leaves "ignore invisible/dead surfaces" to the compositor.
+    pub(crate) fn idle_inhibit_active(&self) -> bool {
+        if self.idle_inhibitors.is_empty() {
+            return false;
+        }
+        self.idle_inhibitors
+            .iter()
+            .any(|surface| self.surface_is_mapped(surface))
+    }
+
+    /// Whether `surface` (walked up to its root) belongs to a window
+    /// currently mapped in the space.
+    fn surface_is_mapped(&self, surface: &WlSurface) -> bool {
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        self.space
+            .elements()
+            .any(|w| crate::window_ext::matches_surface(w, &root))
+    }
+
     /// Switch to workspace `target`. Unmaps windows on the current workspace,
     /// remaps windows assigned to the target at their saved locations, and
     /// restores focus from the target's MRU stack.
@@ -773,7 +1119,9 @@ impl ShoestringWm {
             self.workspaces.record_focus(current, &focused);
         }
 
-        // Snapshot positions then unmap everything currently on screen.
+        // Snapshot positions then unmap everything currently on screen —
+        // except sticky windows, which stay mapped (and keep their spot)
+        // so they appear on every workspace.
         let to_unmap: Vec<Window> = self.space.elements().cloned().collect();
         for w in &to_unmap {
             if let Some(loc) = self.space.element_location(w) {
@@ -781,15 +1129,31 @@ impl ShoestringWm {
             }
         }
         for w in &to_unmap {
+            if self.sticky.contains(w) {
+                continue;
+            }
             self.space.unmap_elem(w);
         }
 
         self.workspaces.set_active(target);
 
+        // Sticky windows follow the active workspace so the "windows on the
+        // active workspace == mapped elements" invariant holds for the IPC
+        // queries and focus history.
+        for w in &to_unmap {
+            if self.sticky.contains(w) {
+                self.workspaces.reassign(w, target);
+            }
+        }
+
         // Re-map every window assigned to the target workspace, skipping
-        // those that are still minimized.
+        // those that are still minimized or already mapped (a sticky window
+        // that was never unmapped — re-mapping would disturb its stacking).
         for w in self.workspaces.windows_on(target) {
             if self.layout.is_minimized(&w) {
+                continue;
+            }
+            if self.space.elements().any(|el| el == &w) {
                 continue;
             }
             let loc = self.workspaces.saved_location(&w).unwrap_or((0, 0).into());
@@ -821,6 +1185,9 @@ impl ShoestringWm {
         self.emit_ipc(shoestring_ipc::Event::WorkspaceChanged {
             active: target.one_based(),
         });
+        // The set of mapped windows just changed wholesale; a video player
+        // may have come into or gone out of view.
+        self.refresh_idle_inhibit();
     }
 
     /// Refresh `pointer_element`'s memory buffer for the next render. Picks
@@ -913,6 +1280,29 @@ impl ShoestringWm {
                 }
             }
         }
+    }
+
+    /// Apply the automation gate, coupling the screen-capture gate to follow
+    /// it. Automation is a *superset* of screen capture: a session an agent can
+    /// drive, it can also observe — the automation-gated `screenshot` request
+    /// is implemented via the `zwlr_screencopy_manager_v1` global, which only
+    /// the capture gate raises. Enabling automation therefore also opens the
+    /// capture gate (so `automation on -> screenshot -> automation off` works
+    /// without a second toggle), and disabling it closes the capture gate again
+    /// so the session returns to a no-capture state. Coupling runs through
+    /// [`Self::set_screen_capture`], so the bar's capture indicator stays lit —
+    /// observation is never silent.
+    ///
+    /// Returns whether the screen-capture gate changed as a side effect, so the
+    /// caller can emit the matching `ScreenCaptureChanged` event. The caller
+    /// owns automation logging / `AutomationChanged` (mirrors set_screen_capture).
+    pub fn set_automation(&mut self, enabled: bool) -> bool {
+        self.automation_enabled = enabled;
+        let capture_changed = self.screen_capture_enabled != enabled;
+        if capture_changed {
+            self.set_screen_capture(enabled);
+        }
+        capture_changed
     }
 
     /// Apply the screen-capture gate. Idempotent: brings the
@@ -1017,6 +1407,14 @@ impl ShoestringWm {
                 ws = active.one_based(),
                 "move_window: target == active, skip"
             );
+            return;
+        }
+        // A sticky window is shown on every workspace, so moving it to one
+        // particular workspace is meaningless — ignore the request and keep
+        // it where it is. The user can un-stick it first if they want it to
+        // live on a single workspace again.
+        if self.is_sticky(window) {
+            tracing::debug!("move_window: window is sticky, ignoring move");
             return;
         }
         tracing::debug!(
@@ -1189,6 +1587,10 @@ fn build_workspace_manager(
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Cached metrics name (`comm-pid`) for this client, resolved once on
+    /// first surface creation. Lives here so the `/proc` lookup happens at
+    /// most once per client, not per surface. See [`crate::metrics`].
+    pub metrics_name: std::sync::OnceLock<String>,
 }
 
 impl ClientData for ClientState {

@@ -51,8 +51,8 @@ Each request is a JSON object with a ``type`` discriminator:
      - Switch into streaming mode. Server replies once with ``Ok`` then
        pushes events.
    * - ``{"type": "metrics"}``
-     - Snapshot the diagnostics registry — process resource gauges plus
-       WM counts. Reply is ``metrics``. Read-only and not gated by
+     - Snapshot the diagnostics registry — process resource gauges, WM
+       counts, and per-client surface gauges. Reply is ``metrics``. Read-only and not gated by
        automation. Sampled fresh on demand, so it answers even when
        ``[diagnostics].enabled`` is off.
    * - ``{"type": "metrics_stream", "interval_ms": 1000}``
@@ -111,6 +111,44 @@ Each request is a JSON object with a ``type`` discriminator:
        needed and switches to its workspace if it lives elsewhere,
        then raises + activates it the same way a click does. Returns
        ``error`` if no window matches.
+   * - ``{"type": "raise_window", "id": "..."}``
+     - Raise the window with the given identifier to the top of the
+       stacking order. A **pure restack**: keyboard focus and the active
+       workspace are left untouched (contrast ``focus_window``, which
+       raises *and* focuses). A no-op when the window is minimized or on a
+       non-active workspace — it isn't in the mapped stack — but the
+       lookup still succeeds. Broadcasts a ``window_restacked`` event.
+       Returns ``error`` if no window matches. Not gated by automation.
+   * - ``{"type": "lower_window", "id": "..."}``
+     - Lower the window with the given identifier to the bottom of the
+       stacking order. The complement of ``raise_window``; same
+       focus/gating/no-op semantics.
+   * - ``{"type": "set_window_sticky", "id": "...", "sticky": <bool>}``
+     - Set or clear the **sticky** flag (show on all workspaces) on the
+       window with the given identifier. A sticky window stays mapped across
+       workspace switches and is reported on whatever workspace is active.
+       Broadcasts a ``window_sticky_changed`` event. Returns ``error`` if no
+       window matches. Not gated by automation.
+   * - ``{"type": "set_window_always_on_top", "id": "...", "always_on_top": <bool>}``
+     - Set or clear the **always-on-top** flag on the window with the given
+       identifier. An always-on-top window stays above all ordinary windows
+       in the stacking order (but below layer-shell bars/menus). Broadcasts a
+       ``window_always_on_top_changed`` event. Returns ``error`` if no window
+       matches. Not gated by automation.
+   * - ``{"type": "set_window_name", "id": "...", "name": "..."}``
+     - Override the display name of the window with the given identifier.
+       The override wins over the client's ``xdg_toplevel`` title
+       everywhere the WM reports a title — the ``windows`` and
+       ``get_tree`` snapshots, the ``find_windows`` match surface, and
+       the ``window_title_changed`` event — so a bar or window-jump menu
+       shows and matches on it. An empty ``name`` clears the override and
+       reverts to the client's own title. ``app_id`` is never affected,
+       and the override is **not** forwarded to
+       wlr-foreign-toplevel-management taskbars (they keep the raw client
+       title). The override is keyed by the live window and dropped when
+       it closes — it does not persist. Setting or clearing it broadcasts
+       a ``window_title_changed`` event with the new effective title.
+       Returns ``error`` if no window matches. Not gated by automation.
    * - ``{"type": "find_windows", "title": "...", "app_id": "..."}``
      - List every mapped window whose ``title`` and ``app_id`` match
        the supplied regular expressions. Each filter is independent and
@@ -135,7 +173,11 @@ Each request is a JSON object with a ``type`` discriminator:
      - Flip the runtime automation gate. Reply is ``automation`` with
        the new state; ``automation_changed`` is broadcast to
        subscribers when the value actually changes. Not persisted to
-       disk.
+       disk. Automation is a superset of screen capture: this flips the
+       screen-capture gate the same way (so ``screenshot`` works under
+       automation alone, and turning automation off returns the session
+       to no-capture), emitting ``screen_capture_changed`` when capture
+       follows.
    * - ``{"type": "automation_status"}``
      - Read the current automation gate state without changing it.
        Reply is ``automation``.
@@ -202,6 +244,12 @@ it): ``inject_key``, ``inject_text``, ``inject_click``, ``move_mouse``,
 ``dispatch_action``, ``screenshot``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
+
+Because ``screenshot`` also needs the ``zwlr_screencopy_manager_v1``
+global (raised only by the screen-capture gate), enabling automation
+*also* enables screen capture — automation is a superset, so
+``automation on`` alone is enough to capture and ``automation off``
+returns the session to no-capture.
 
 Responses
 ---------
@@ -301,11 +349,38 @@ The server replies with a single JSON object tagged by ``type``:
          - Connected IPC clients.
        * - ``ipc.subscribers``
          - Long-lived stream subscribers (event + metrics).
+       * - ``wm.idle_inhibitors``
+         - Tracked ``zwp_idle_inhibitor_v1`` surfaces. Present only when
+           idle notifications are enabled (the inhibit manager is
+           advertised alongside the notifier).
+       * - ``wm.idle_inhibited``
+         - ``1`` while at least one inhibitor surface is *visible* (mapped
+           on the active workspace), so idle/lock is currently suppressed;
+           ``0`` otherwise. Answers "why won't the screen lock?".
+       * - ``client.<name>.surfaces``
+         - Live ``wl_surface`` count for one Wayland client. ``<name>`` is
+           the client's process ``comm`` joined with its pid
+           (``shoestring-bar-1234``); the pid keeps it unique when two
+           instances share a name. One row appears per client that holds at
+           least one surface and vanishes when its last surface is
+           destroyed. On platforms without ``/proc`` the name degrades to
+           ``pid-<n>``.
 
     The WM warns in its log when ``process.open_fds`` crosses
     ``[diagnostics].fd_warn_fraction`` of ``process.fd_limit`` or climbs
     monotonically — an early signal of a file-descriptor leak before it
-    can exhaust the limit and crash the session.
+    can exhaust the limit and crash the session. The per-client
+    ``client.<name>.surfaces`` gauges turn that process-wide signal into
+    attribution: a client whose surface count climbs without bound is the
+    likely offender.
+
+    .. note::
+
+       v1 attributes ``wl_surface`` only. Smithay exposes surface
+       create/destroy hooks but no creation hook for ``wl_buffer`` /
+       ``wl_shm_pool``, so those resource kinds can't yet be counted
+       per-client without reimplementing its shm dispatch. Surfaces are the
+       resource the compositor owns end-to-end.
 
 ``WindowSummary``::
 
@@ -315,7 +390,10 @@ The server replies with a single JSON object tagged by ``type``:
       "app_id":    "alacritty",
       "workspace": 3,
       "focused":   true,
-      "geometry":  {"x": 0, "y": 0, "w": 960, "h": 1080}
+      "geometry":     {"x": 0, "y": 0, "w": 960, "h": 1080},
+      "z":            2,
+      "sticky":       true,
+      "always_on_top": true
     }
 
 ``id`` matches the ``identifier`` event from ``ext-foreign-toplevel-list-v1``,
@@ -323,9 +401,15 @@ so a bar can cross-reference between protocols. ``geometry`` is the window's
 on-screen rectangle in compositor-global logical coords (same system as
 ``move_mouse`` / ``pointer_position``); it is **omitted** when the window is
 minimized or on a non-active workspace (only the active workspace is mapped,
-so an unmapped window has no rectangle). Older WM builds that pre-dated the
-field omit it too — clients should treat "absent" and "off-screen"
-identically.
+so an unmapped window has no rectangle). ``z`` is the window's stacking
+position within the mapped stack — ``0`` is bottom-most, higher is closer to
+the top — and the same value the ``get_tree`` ``WindowNode`` carries; it is
+**omitted** for unmapped windows (same condition as ``geometry``). ``sticky``
+is ``true`` when the window is pinned to all workspaces; ``always_on_top`` is
+``true`` when it is kept above ordinary windows. Both are **omitted**
+(defaulting to ``false``) for ordinary windows. Older WM builds that pre-dated
+these fields omit them too — clients should treat "absent" and "off-screen"
+(and "not sticky" / "not always-on-top") identically.
 
 ``OutputSummary``::
 
@@ -406,12 +490,36 @@ Each event is tagged by ``type``.
     window holds keyboard focus.
 
 ``window_title_changed``
-    ``{"type": "window_title_changed", "id": "...", "title": "...", "app_id": "..."}``
+    ``{"type": "window_title_changed", "id": "...", "title": "...", "app_id": "..."}``.
+    ``title`` is the *effective* title: the override set via
+    ``set_window_name`` when one is active, otherwise the client's own
+    title. Fired both when the client changes its title and when an
+    override is set or cleared.
 
 ``window_moved_to_workspace``
     ``{"type": "window_moved_to_workspace", "id": "...", "workspace": <1..count>}``.
     Fired when a window is reassigned to a different workspace via the
     move-to-workspace bindings or a ``[[window_rules]]`` action.
+
+``window_restacked``
+    ``{"type": "window_restacked", "id": "..."}``. Fired when a window's
+    stacking order changes — it was raised to the top or lowered to the
+    bottom via the ``raise`` / ``lower`` actions or the ``raise_window`` /
+    ``lower_window`` requests. A raise or lower shifts the ``z`` index of
+    every other mapped window too, so the event only names the window that
+    moved; re-query ``windows`` or ``get_tree`` for the updated stack.
+
+``window_sticky_changed``
+    ``{"type": "window_sticky_changed", "id": "...", "sticky": <bool>}``.
+    Fired when a window is pinned to (or released from) "show on all
+    workspaces" — via the ``toggle-sticky`` action, a ``[[window_rules]]``
+    ``sticky`` action, or the ``set_window_sticky`` request.
+
+``window_always_on_top_changed``
+    ``{"type": "window_always_on_top_changed", "id": "...", "always_on_top": <bool>}``.
+    Fired when a window is pinned to (or released from) the always-on-top
+    layer — via the ``toggle-always-on-top`` action, a ``[[window_rules]]``
+    ``always_on_top`` action, or the ``set_window_always_on_top`` request.
 
 ``output_added``
     Same shape as ``OutputSummary``.

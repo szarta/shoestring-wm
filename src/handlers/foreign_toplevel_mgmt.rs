@@ -122,6 +122,8 @@ impl Dispatch2<ZwlrForeignToplevelHandleV1, ShoestringWm> for ForeignToplevelHan
                 );
                 crate::foreign_toplevel_mgmt::sync_wlr_toplevel(state, &window);
             }
+            Request::SetFullscreen { output } => state.fullscreen_window(&window, output),
+            Request::UnsetFullscreen => state.unfullscreen_window(&window),
             // A minimize-animation hint the WM doesn't use; reject only an
             // invalid (negative) rectangle, otherwise ignore.
             Request::SetRectangle { width, height, .. } if width < 0 || height < 0 => {
@@ -131,8 +133,7 @@ impl Dispatch2<ZwlrForeignToplevelHandleV1, ShoestringWm> for ForeignToplevelHan
                 );
             }
             // Everything else is a no-op: already-correct max/unmax, valid
-            // set_rectangle, set/unset_fullscreen (no WM fullscreen concept),
-            // and destroy (cleanup happens in `destroyed`).
+            // set_rectangle, and destroy (cleanup happens in `destroyed`).
             _ => {}
         }
     }

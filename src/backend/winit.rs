@@ -3,7 +3,10 @@ use std::time::Duration;
 use anyhow::Result;
 use smithay::{
     backend::{
-        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
+        renderer::{
+            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
+            gles::GlesRenderer,
+        },
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -101,7 +104,7 @@ pub fn init_winit(
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
 
-                {
+                let render_states = {
                     let (renderer, mut framebuffer) = backend.bind().unwrap();
 
                     // Re-pick the cursor frame for the configured scale (cursors
@@ -145,10 +148,6 @@ pub fn init_winit(
                                 scale,
                             )
                         };
-                    // Empty space while locked so no client content leaks.
-                    let empty_space =
-                        smithay::desktop::Space::<smithay::desktop::Window>::default();
-                    let render_space = if locked { &empty_space } else { &state.space };
                     let clear = if locked {
                         [0.0, 0.0, 0.0, 1.0]
                     } else {
@@ -169,25 +168,74 @@ pub fn init_winit(
                         &cursor_elements,
                     );
 
-                    smithay::desktop::space::render_output::<
-                        _,
-                        crate::drawing::PointerRenderElement<GlesRenderer>,
-                        _,
-                        _,
-                    >(
-                        &output,
-                        renderer,
-                        &mut framebuffer,
-                        1.0,
-                        0,
-                        [render_space],
-                        &cursor_elements,
-                        &mut damage_tracker,
-                        clear,
-                    )
-                    .unwrap();
-                }
+                    // A fullscreen window on this output is rendered alone,
+                    // dropping the bar/layer surfaces it covers. While locked we
+                    // render an empty scene so no client content leaks.
+                    let fullscreen = if locked {
+                        None
+                    } else {
+                        crate::layout::fullscreen_window_on(&state.space, &state.layout, &output)
+                    };
+                    let space_elements = if locked {
+                        Vec::new()
+                    } else {
+                        crate::drawing::output_space_elements(
+                            renderer,
+                            &state.space,
+                            &output,
+                            fullscreen.as_ref(),
+                        )
+                    };
+                    // Cursor (custom) goes on top, then the space stack —
+                    // render_output draws first-element-first.
+                    let mut elements: Vec<
+                        crate::drawing::OutputRenderElements<
+                            GlesRenderer,
+                            WaylandSurfaceRenderElement<GlesRenderer>,
+                        >,
+                    > = Vec::with_capacity(cursor_elements.len() + space_elements.len());
+                    elements.extend(
+                        cursor_elements
+                            .into_iter()
+                            .map(crate::drawing::OutputRenderElements::Pointer),
+                    );
+                    elements.extend(
+                        space_elements
+                            .into_iter()
+                            .map(crate::drawing::OutputRenderElements::Space),
+                    );
+                    let result = damage_tracker
+                        .render_output(renderer, &mut framebuffer, 0, &elements, clear)
+                        .unwrap();
+                    result.states
+                };
                 backend.submit(Some(&[damage])).unwrap();
+
+                // wp_presentation, best effort: the nested winit backend has no
+                // hardware vblank, so mark the frame presented at submit time
+                // against the same monotonic clock the global advertises. No
+                // HwClock/HwCompletion flags and an unknown refresh — honest
+                // about the lack of a real page-flip timestamp. Without this,
+                // clients that request feedback would wait forever.
+                {
+                    use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+                    crate::presentation::update_primary_scanout_output(
+                        &state.space,
+                        &output,
+                        &render_states,
+                    );
+                    let mut feedback = crate::presentation::take_presentation_feedback(
+                        &state.space,
+                        &output,
+                        &render_states,
+                    );
+                    feedback.presented(
+                        state.clock.now(),
+                        smithay::wayland::presentation::Refresh::Unknown,
+                        0,
+                        Kind::Vsync,
+                    );
+                }
 
                 // Keep wp_fractional_scale clients on this output in sync with
                 // its current scale (no-op when unchanged).

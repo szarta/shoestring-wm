@@ -18,7 +18,12 @@ use smithay::{
         },
         ImportAll, ImportMem, Renderer, Texture,
     },
+    desktop::{
+        space::{space_render_elements, SpaceRenderElements},
+        Space, Window,
+    },
     input::pointer::CursorImageStatus,
+    output::Output,
     render_elements,
     utils::{Physical, Point, Scale},
 };
@@ -70,6 +75,47 @@ impl<R: Renderer> std::fmt::Debug for PointerRenderElement<R> {
             Self::Memory(e) => f.debug_tuple("Memory").field(e).finish(),
             Self::_GenericCatcher(_) => f.write_str("_GenericCatcher"),
         }
+    }
+}
+
+/// Build the space-layer render elements for `output` (everything below the
+/// cursor). When `fullscreen` names a window — one in
+/// [`crate::layout::LayoutState::Fullscreen`] on this output — render only that
+/// window, dropping every layer-shell surface (bars/docks on the Top/Overlay
+/// layers) and the other windows it covers edge-to-edge. Otherwise fall back to
+/// smithay's normal stack (background/bottom layers, windows, top/overlay
+/// layers) via `space_render_elements`.
+pub fn output_space_elements<R>(
+    renderer: &mut R,
+    space: &Space<Window>,
+    output: &Output,
+    fullscreen: Option<&Window>,
+) -> Vec<SpaceRenderElements<R, WaylandSurfaceRenderElement<R>>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + Texture + 'static,
+{
+    if let Some(window) = fullscreen {
+        let scale = output.current_scale().fractional_scale();
+        // The fullscreen surface sits at the output origin; render it relative
+        // to this output's framebuffer (subtract the output's global location).
+        let output_loc = space
+            .output_geometry(output)
+            .map(|g| g.loc)
+            .unwrap_or_default();
+        let loc = space.element_location(window).unwrap_or_default() - output_loc;
+        AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(
+            window,
+            renderer,
+            loc.to_physical_precise_round(scale),
+            Scale::from(scale),
+            1.0,
+        )
+        .into_iter()
+        .map(SpaceRenderElements::Surface)
+        .collect()
+    } else {
+        space_render_elements(renderer, [space], output, 1.0).unwrap_or_default()
     }
 }
 

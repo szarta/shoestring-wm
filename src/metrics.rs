@@ -18,13 +18,17 @@
 //! Everything here is `/proc` + `libc` — no Smithay involvement — so it
 //! stays cheap and works headless.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shoestring_ipc::MetricValue;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::wayland_server::backend::ObjectId;
+use smithay::reexports::wayland_server::Client;
 
-use crate::state::ShoestringWm;
+use crate::state::{ClientState, ShoestringWm};
 
 /// How many recent `open_fds` readings the growth detector keeps. At the
 /// default 1s cadence this is ~30s of history — long enough to tell a
@@ -35,6 +39,68 @@ const FD_HISTORY: usize = 30;
 /// non-decreasing) before we call it a leak. Below this, normal churn
 /// (a client mapping a few buffers) shouldn't trip the warning.
 const FD_GROWTH_FLOOR: u64 = 64;
+
+/// Per-client live census of a single Wayland resource kind, keyed by the
+/// resource object so create/destroy can be matched exactly.
+///
+/// `K` is the per-object key — [`ObjectId`] in production, a plain integer
+/// in tests (object ids can't be fabricated outside a live backend). The
+/// owner is a human-readable client name (`comm-pid`); because that name
+/// embeds the pid it's unique per client, so it doubles as the count key —
+/// two clients that share a `comm` still get distinct rows.
+#[derive(Debug)]
+struct ResourceCensus<K: Eq + Hash> {
+    /// Owner name → live object count. An entry exists iff the count is > 0.
+    counts: HashMap<String, u32>,
+    /// Object key → owner name, so a destroy decrements the right client
+    /// even when the resource's own `client()` no longer resolves.
+    owner: HashMap<K, String>,
+}
+
+// Manual `Default` — the derive would wrongly demand `K: Default` even
+// though both fields are maps that default empty regardless of `K`.
+impl<K: Eq + Hash> Default for ResourceCensus<K> {
+    fn default() -> Self {
+        Self {
+            counts: HashMap::new(),
+            owner: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash> ResourceCensus<K> {
+    /// Record a newly created object owned by `owner`. Idempotent on the
+    /// key: a duplicate create (shouldn't happen) replaces the old owner.
+    fn insert(&mut self, key: K, owner: String) {
+        if let Some(prev) = self.owner.insert(key, owner.clone()) {
+            decrement(&mut self.counts, &prev);
+        }
+        *self.counts.entry(owner).or_insert(0) += 1;
+    }
+
+    /// Record an object's destruction. No-op if we never saw its creation.
+    fn remove(&mut self, key: &K) {
+        if let Some(owner) = self.owner.remove(key) {
+            decrement(&mut self.counts, &owner);
+        }
+    }
+
+    /// `(owner, live_count)` for every client with at least one live object.
+    fn iter(&self) -> impl Iterator<Item = (&String, u32)> {
+        self.counts.iter().map(|(name, &n)| (name, n))
+    }
+}
+
+/// Decrement a name's count, dropping the entry when it reaches zero so a
+/// disconnected client leaves no stale row.
+fn decrement(counts: &mut HashMap<String, u32>, name: &str) {
+    if let Some(n) = counts.get_mut(name) {
+        *n -= 1;
+        if *n == 0 {
+            counts.remove(name);
+        }
+    }
+}
 
 /// Registry of the latest sampled metrics plus the leak detector's state.
 #[derive(Debug, Default)]
@@ -49,6 +115,9 @@ pub struct Metrics {
     fd_threshold_warned: bool,
     /// Latched likewise for the "monotonic fd growth" warning.
     fd_growth_warned: bool,
+    /// Per-client live `wl_surface` census — the attribution that turns a
+    /// process-wide fd-growth warning into "client X holds N surfaces".
+    surfaces: ResourceCensus<ObjectId>,
 }
 
 impl Metrics {
@@ -59,6 +128,35 @@ impl Metrics {
     fn set_gauge(&mut self, name: &str, value: i64) {
         self.values
             .insert(name.to_string(), MetricValue::Gauge { value });
+    }
+
+    /// Record a client's newly created `wl_surface`. `owner` is the
+    /// resolved client name (`comm-pid`); `surface` is the object's id.
+    pub fn track_surface(&mut self, surface: ObjectId, owner: String) {
+        self.surfaces.insert(surface, owner);
+    }
+
+    /// Record a `wl_surface` destruction. No-op if its creation went
+    /// unseen (e.g. it was created before diagnostics tracking existed).
+    pub fn untrack_surface(&mut self, surface: &ObjectId) {
+        self.surfaces.remove(surface);
+    }
+
+    /// Re-derive the `client.<name>.surfaces` gauges from the live census.
+    /// Stale `client.*` keys are cleared first so a client that just
+    /// dropped its last surface disappears from the snapshot.
+    fn refresh_client_gauges(&mut self) {
+        self.values.retain(|k, _| !k.starts_with("client."));
+        // Collect first to avoid borrowing `self.surfaces` and `self.values`
+        // at once.
+        let rows: Vec<(String, i64)> = self
+            .surfaces
+            .iter()
+            .map(|(name, n)| (format!("client.{name}.surfaces"), n as i64))
+            .collect();
+        for (key, value) in rows {
+            self.values.insert(key, MetricValue::Gauge { value });
+        }
     }
 
     /// A copy of the current registry for an IPC reply.
@@ -116,6 +214,35 @@ impl ShoestringWm {
     /// detector. Called on the diagnostics timer and on demand by the
     /// `metrics` snapshot request (so a snapshot is fresh even when the
     /// background sampler is off).
+    /// The cached metrics name (`comm-pid`) for a Wayland client,
+    /// resolving it on first call and memoising it in the client's
+    /// [`ClientState`] so the `/proc` lookup runs at most once per client.
+    /// Clients without our `ClientState` (notably Xwayland, which carries
+    /// `XWaylandClientData`) are resolved fresh each call — rare enough not
+    /// to matter.
+    pub fn client_metrics_name(&self, client: &Client) -> String {
+        let resolve = || {
+            // pid 0 is never a real client (Linux's swapper); FreeBSD's
+            // peer-cred lookup also reports 0 because its `LOCAL_PEERCRED`
+            // carries no pid. Treat ≤0 as "no pid" and fall back to a stable
+            // per-client serial so distinct clients stay distinct rows
+            // rather than all collapsing into one.
+            let pid = client
+                .get_credentials(&self.display_handle)
+                .ok()
+                .map(|creds| creds.pid)
+                .filter(|&pid| pid > 0);
+            match pid {
+                Some(pid) => client_name(Some(pid), read_comm(pid)),
+                None => format!("client-{}", next_client_serial()),
+            }
+        };
+        if let Some(state) = client.get_data::<ClientState>() {
+            return state.metrics_name.get_or_init(resolve).clone();
+        }
+        resolve()
+    }
+
     pub fn sample_metrics(&mut self) {
         let open_fds = read_open_fds();
         let fd_limit = read_fd_limit();
@@ -142,6 +269,22 @@ impl ShoestringWm {
         self.metrics.set_gauge("wm.clients", clients as i64);
         self.metrics
             .set_gauge("ipc.subscribers", subscribers as i64);
+
+        // Idle-inhibit visibility (only when the idle subsystem is on, since
+        // the inhibit manager is advertised only alongside the notifier).
+        // `wm.idle_inhibitors` counts tracked inhibitor surfaces; `idle_inhibited`
+        // is 1 only while at least one is *visible* — answering "why won't the
+        // screen lock during video?" at a glance.
+        if self.idle_notifier.is_some() {
+            let inhibitors = self.idle_inhibitors.len() as i64;
+            let inhibited = self.idle_inhibit_active() as i64;
+            self.metrics.set_gauge("wm.idle_inhibitors", inhibitors);
+            self.metrics.set_gauge("wm.idle_inhibited", inhibited);
+        }
+
+        // Per-client resource attribution: surface gauges, freshly derived
+        // from the live census maintained on surface create/destroy.
+        self.metrics.refresh_client_gauges();
 
         let fraction = self.config.diagnostics.fd_warn_fraction;
         if let (Some(fds), Some(limit)) = (open_fds, fd_limit) {
@@ -209,6 +352,61 @@ impl Metrics {
                 self.fd_growth_warned = false;
             }
         }
+    }
+}
+
+/// A stable, human-readable name for a Wayland client: its process
+/// `comm` joined with its pid (`shoestring-bar-1234`). The pid keeps the
+/// name unique even when two instances share a `comm`. Falls back to
+/// `pid-<n>` when `/proc` is unreadable (non-Linux) and `unknown` when even
+/// the pid is unavailable. Non-`[A-Za-z0-9_-]` bytes in `comm` are squashed
+/// to `_` so the name stays a clean dotted-metric segment.
+pub fn client_name(pid: Option<i32>, comm: Option<String>) -> String {
+    match (comm, pid) {
+        (Some(comm), Some(pid)) => format!("{}-{pid}", sanitize_segment(&comm)),
+        (None, Some(pid)) => format!("pid-{pid}"),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Hands out a monotonic id for clients whose pid we can't determine (no
+/// peer-cred pid — e.g. FreeBSD). Caching the result in [`ClientState`]
+/// makes it stable for the life of that client, so its census rows balance.
+fn next_client_serial() -> u64 {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Squash a string to the `[A-Za-z0-9_-]` charset used by metric-name
+/// segments, collapsing everything else (dots, spaces, slashes) to `_`.
+fn sanitize_segment(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "_".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Read a process's `comm` (the executable's basename, ≤15 chars) from
+/// `/proc/<pid>/comm`, trimmed of its trailing newline. `None` on any I/O
+/// error — notably every non-Linux platform, where there's no procfs.
+pub fn read_comm(pid: i32) -> Option<String> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -285,12 +483,19 @@ mod tests {
 
     #[test]
     fn open_fds_and_limit_are_readable() {
-        // On Linux these always resolve; the test doubles as a smoke check
-        // that the /proc + getrlimit plumbing works in the build env.
-        let fds = read_open_fds().expect("read /proc/self/fd");
-        assert!(fds > 0);
+        // getrlimit is portable (Linux + the BSDs), so the limit always
+        // resolves — assert it unconditionally.
         let limit = read_fd_limit().expect("getrlimit");
-        assert!(limit >= fds);
+        assert!(limit > 0);
+        // The fd count comes from /proc/self/fd, which only exists on Linux
+        // with procfs mounted. Where present it must be a sane positive count
+        // within the limit; where absent (e.g. FreeBSD, which mounts no
+        // procfs by default) read_open_fds is None and the gauge is simply
+        // omitted — that's graceful degradation, not a test failure.
+        if let Some(fds) = read_open_fds() {
+            assert!(fds > 0);
+            assert!(limit >= fds);
+        }
     }
 
     #[test]
@@ -331,5 +536,86 @@ mod tests {
         }
         assert!(!m.fd_threshold_warned);
         assert!(!m.fd_growth_warned);
+    }
+
+    // The census is generic over the object key; tests key by `u64` because
+    // a real `ObjectId` can't be built outside a live wayland backend.
+    fn count(c: &ResourceCensus<u64>, owner: &str) -> Option<u32> {
+        c.counts.get(owner).copied()
+    }
+
+    #[test]
+    fn census_counts_per_owner_and_prunes_at_zero() {
+        let mut c: ResourceCensus<u64> = ResourceCensus::default();
+        c.insert(1, "bar-10".into());
+        c.insert(2, "bar-10".into());
+        c.insert(3, "term-20".into());
+        assert_eq!(count(&c, "bar-10"), Some(2));
+        assert_eq!(count(&c, "term-20"), Some(1));
+
+        // Destroying one of bar's surfaces decrements; the row stays.
+        c.remove(&1);
+        assert_eq!(count(&c, "bar-10"), Some(1));
+        // Its last surface gone → the row disappears entirely.
+        c.remove(&2);
+        assert_eq!(count(&c, "bar-10"), None);
+        assert_eq!(count(&c, "term-20"), Some(1));
+    }
+
+    #[test]
+    fn census_remove_unknown_key_is_noop() {
+        let mut c: ResourceCensus<u64> = ResourceCensus::default();
+        c.insert(1, "bar-10".into());
+        c.remove(&999); // never inserted
+        assert_eq!(count(&c, "bar-10"), Some(1));
+    }
+
+    #[test]
+    fn census_same_comm_distinct_pids_are_separate_rows() {
+        // Two clients share a `comm` but differ by pid → the pid-suffixed
+        // names keep them apart, which is the whole point of embedding pid.
+        let mut c: ResourceCensus<u64> = ResourceCensus::default();
+        c.insert(1, "alacritty-10".into());
+        c.insert(2, "alacritty-20".into());
+        assert_eq!(count(&c, "alacritty-10"), Some(1));
+        assert_eq!(count(&c, "alacritty-20"), Some(1));
+    }
+
+    #[test]
+    fn client_name_formats_and_falls_back() {
+        assert_eq!(
+            client_name(Some(1234), Some("shoestring-bar".into())),
+            "shoestring-bar-1234"
+        );
+        // No comm (e.g. non-Linux) → pid-only form.
+        assert_eq!(client_name(Some(77), None), "pid-77");
+        // Nothing at all → a stable sentinel rather than an empty key.
+        assert_eq!(client_name(None, None), "unknown");
+    }
+
+    #[test]
+    fn sanitize_segment_squashes_metric_unsafe_chars() {
+        // Dots would split the dotted metric path; spaces/slashes are noise.
+        assert_eq!(sanitize_segment("a.b c/d"), "a_b_c_d");
+        assert_eq!(sanitize_segment("keep-_09"), "keep-_09");
+        assert_eq!(sanitize_segment(""), "_");
+    }
+
+    #[test]
+    fn refresh_client_gauges_reflects_live_census() {
+        let mut m = Metrics::new();
+        // The ObjectId-keyed census can't be driven from a unit test, so we
+        // verify the projection's contract directly: it clears any prior
+        // `client.*` keys and leaves unrelated gauges untouched.
+        m.values.insert(
+            "client.stale-1.surfaces".into(),
+            MetricValue::Gauge { value: 9 },
+        );
+        m.values
+            .insert("process.open_fds".into(), MetricValue::Gauge { value: 5 });
+        m.refresh_client_gauges();
+        // Stale per-client key is gone; unrelated keys survive.
+        assert!(!m.values.contains_key("client.stale-1.surfaces"));
+        assert!(m.values.contains_key("process.open_fds"));
     }
 }

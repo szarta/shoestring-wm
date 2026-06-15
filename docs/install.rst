@@ -53,8 +53,11 @@ inside it. Then generate a starter config::
    shoestring-wm is **not** published to crates.io, so
    ``cargo install shoestring-wm`` will not work. Its smithay dependency
    tracks a git revision newer than any crates.io release, which crates.io
-   does not allow. On distros without a prebuilt package — notably FreeBSD,
-   which has no port yet — build from source as below.
+   does not allow. On distros without a prebuilt package, build from source
+   as below. FreeBSD additionally carries an in-repo ports skeleton
+   (``packaging/freebsd``) that builds a real ``pkg`` locally — though it is
+   not yet in the official ports tree, so ``pkg install shoestring-wm`` does
+   not resolve it. See `FreeBSD`_.
 
 Build
 -----
@@ -161,19 +164,80 @@ Alpine
 FreeBSD
 ~~~~~~~
 
-::
+**The FreeBSD port.** The repository carries a ``USES=cargo`` ports
+skeleton at ``packaging/freebsd`` — the FreeBSD analogue of the ``.deb`` /
+``.rpm``. It is **not yet in the official FreeBSD ports tree** (a planned
+post-1.0 step), so ``pkg install shoestring-wm`` will not find it. To build
+and install it yourself, drop the skeleton into a ports tree and use the
+normal ports workflow:
+
+.. code-block:: console
+
+    # with a FreeBSD ports tree checked out at /usr/ports
+    # cp -R packaging/freebsd /usr/ports/x11-wm/shoestring-wm
+    # cd /usr/ports/x11-wm/shoestring-wm
+    # make install        # or `make package` to produce a .pkg
+
+The port pulls in every dependency (including the screen locker's
+``unix-selfauth-helper``) and installs the binaries, man pages, the Wayland
+session file, and the locker's PAM policy under ``/usr/local`` — so
+shoestring-wm appears in your display manager's session menu with no manual
+wiring, and the locker steps further down are handled for you. See
+``packaging/freebsd/README.md`` for how the dependency list and checksums
+are regenerated.
+
+To **build from source** instead, install the toolchain and libraries::
 
     pkg install rust pkgconf \
         wayland libxkbcommon \
         drm-kmod mesa-libs \
         libinput seatd libdisplay-info
 
-(PAM is provided by the base system.)
+For just the winit dev backend (which is the verified-working
+configuration on FreeBSD), only the first line is needed::
+
+    pkg install rust pkgconf wayland libxkbcommon
+
+**Linker path.** ``pkg`` installs libraries under ``/usr/local/lib``,
+which the base ``ld`` does not search by default, so the link step fails
+with ``unable to find library -lxkbcommon``. Point the linker at it via
+``RUSTFLAGS`` (or a ``.cargo/config.toml``)::
+
+    RUSTFLAGS="-L/usr/local/lib" \
+        cargo build --release --no-default-features --features winit -p shoestring-wm
+
+    # …or persist it for the checkout:
+    mkdir -p .cargo
+    printf '[build]\nrustflags = ["-L", "/usr/local/lib"]\n' > .cargo/config.toml
 
 DRM-KMS support on FreeBSD depends on the ``drm-kmod`` port matching
 your kernel; verify ``/dev/dri/card0`` exists after a reboot. The
 ``udev`` userland shim is provided automatically when ``libinput`` is
 installed.
+
+**The screen locker on FreeBSD.** ``shoestring-lock`` builds and runs on
+FreeBSD (via a vendored, OpenPAM-portable ``pam-client2`` under
+``third_party/``). It authenticates through a dedicated ``shoestring-lock``
+PAM policy that, on FreeBSD, delegates to the setuid
+``unix-selfauth-helper`` — so the locker binary itself stays unprivileged.
+A **from-source** install (the port does this for you) must therefore
+install both:
+
+.. code-block:: console
+
+    # pkg install unix-selfauth-helper
+    # install -m 644 resources/pam/shoestring-lock.freebsd \
+        /usr/local/etc/pam.d/shoestring-lock
+
+Without that policy file PAM denies every unlock (fails closed). Do **not**
+point the locker at the system ``login`` service on FreeBSD: it begins with
+``auth sufficient pam_self.so``, which unlocks for the calling user with no
+password.
+
+**Known gaps on FreeBSD.** The fd-leak and RSS metrics gauges read
+``/proc`` and are silently omitted when no procfs is mounted (the default);
+leak *detection* is therefore Linux-only. This does not affect the core
+compositor or the winit dev backend.
 
 NixOS
 ~~~~~

@@ -145,6 +145,9 @@ impl ShoestringWm {
             workspace,
             focused: self.focused_window().as_ref() == Some(window),
             geometry: crate::ipc::window_geometry(self, window),
+            z: crate::ipc::window_z(self, window),
+            sticky: self.is_sticky(window),
+            always_on_top: self.is_always_on_top(window),
         })
     }
 
@@ -173,6 +176,78 @@ impl ShoestringWm {
             .map(|(w, _)| w.clone())
             .ok_or_else(|| format!("no window with id {id:?}"))?;
         self.activate_window(&window);
+        Ok(())
+    }
+
+    /// Raise the toplevel whose FT identifier matches `id` to the top of the
+    /// stacking order, without changing keyboard focus or switching workspace
+    /// (a pure restack). No visible effect when the window is minimized or on
+    /// a non-active workspace — those aren't in the mapped stack — but the
+    /// lookup still succeeds, so it's not an error.
+    pub fn raise_window_by_id(&mut self, id: &str) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.raise_window(&window);
+        Ok(())
+    }
+
+    /// Lower the toplevel whose FT identifier matches `id` to the bottom of
+    /// the stacking order. The complement of [`Self::raise_window_by_id`].
+    pub fn lower_window_by_id(&mut self, id: &str) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.lower_window(&window);
+        Ok(())
+    }
+
+    /// Set or clear the sticky flag (show on all workspaces) on the toplevel
+    /// whose FT identifier matches `id`. Broadcasts `window_sticky_changed`.
+    pub fn set_window_sticky_by_id(&mut self, id: &str, sticky: bool) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.set_sticky(&window, sticky);
+        Ok(())
+    }
+
+    /// Set or clear the always-on-top flag on the toplevel whose FT
+    /// identifier matches `id`. Broadcasts `window_always_on_top_changed`.
+    pub fn set_window_always_on_top_by_id(&mut self, id: &str, on: bool) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        self.set_always_on_top(&window, on);
+        Ok(())
+    }
+
+    /// Look up a tracked window by its `ext-foreign-toplevel-list-v1`
+    /// identifier. Shared by the by-id IPC entry points.
+    fn window_by_ft_id(&self, id: &str) -> Result<Window, String> {
+        self.foreign_toplevels
+            .iter()
+            .find(|(_, h)| h.identifier() == id)
+            .map(|(w, _)| w.clone())
+            .ok_or_else(|| format!("no window with id {id:?}"))
+    }
+
+    /// Set (or, with an empty `name`, clear) the display-name override for the
+    /// toplevel whose FT identifier matches `id`. The override supersedes the
+    /// client's `xdg_toplevel` title everywhere the WM reports a title (see
+    /// [`crate::ipc::effective_title_app_id`]). Emits a `window_title_changed`
+    /// event carrying the new effective title so bars/menus update live.
+    pub fn set_window_name_by_id(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let (window, identifier) = self
+            .foreign_toplevels
+            .iter()
+            .find(|(_, h)| h.identifier() == id)
+            .map(|(w, h)| (w.clone(), h.identifier()))
+            .ok_or_else(|| format!("no window with id {id:?}"))?;
+        if name.is_empty() {
+            self.window_name_overrides.remove(&window);
+        } else {
+            self.window_name_overrides
+                .insert(window.clone(), name.to_string());
+        }
+        let (title, app_id) = crate::ipc::effective_title_app_id(self, &window);
+        self.emit_ipc(shoestring_ipc::Event::WindowTitleChanged {
+            id: identifier,
+            title,
+            app_id,
+        });
         Ok(())
     }
 

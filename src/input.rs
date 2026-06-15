@@ -3,8 +3,10 @@ use std::time::Duration;
 use shoestring_config::Action;
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
+        InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionEvent, ProximityState, TabletToolButtonEvent, TabletToolEvent,
+        TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
     },
     desktop::Window,
     input::{
@@ -14,12 +16,19 @@ use smithay::{
             RelativeMotionEvent,
         },
     },
-    reexports::calloop::{
-        timer::{TimeoutAction, Timer},
-        RegistrationToken,
+    output::Output,
+    reexports::{
+        calloop::{
+            timer::{TimeoutAction, Timer},
+            RegistrationToken,
+        },
+        wayland_server::protocol::wl_output::WlOutput,
     },
     utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
-    wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint},
+    wayland::{
+        pointer_constraints::{with_pointer_constraint, PointerConstraint},
+        tablet_manager::{TabletDescriptor, TabletSeatTrait},
+    },
 };
 
 use crate::{
@@ -149,6 +158,10 @@ impl ShoestringWm {
             Action::Unminimize => self.unminimize_last(),
             Action::Close => self.close_focused(),
             Action::CycleWindows => self.cycle_windows(),
+            Action::Raise => self.restack_focused(true),
+            Action::Lower => self.restack_focused(false),
+            Action::ToggleSticky => self.toggle_sticky_focused(),
+            Action::ToggleAlwaysOnTop => self.toggle_always_on_top_focused(),
             Action::FocusWorkspace { index } => {
                 tracing::debug!(index, "FocusWorkspace");
                 if let Some(ws) = self.workspaces.from_one_based(index) {
@@ -285,6 +298,30 @@ impl ShoestringWm {
         layout::set_layout(&mut self.space, &mut self.layout, &window, target);
     }
 
+    /// Put `window` into app-driven fullscreen (xdg `set_fullscreen`, X11, or
+    /// foreign-toplevel-management). `output`, when the client names one,
+    /// selects which monitor to cover; otherwise the window's current output is
+    /// used. Unlike Maximize, fullscreen covers the whole output edge-to-edge,
+    /// ignoring layer-shell exclusive zones (bars/docks).
+    pub fn fullscreen_window(&mut self, window: &Window, output: Option<WlOutput>) {
+        let geo = output
+            .and_then(|wl| Output::from_resource(&wl))
+            .and_then(|o| self.space.output_geometry(&o))
+            .or_else(|| layout::output_rect_for(&self.space, window));
+        let Some(geo) = geo else {
+            tracing::debug!("fullscreen: no output geometry, ignoring request");
+            return;
+        };
+        layout::set_fullscreen(&mut self.space, &mut self.layout, window, geo);
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+    }
+
+    /// Leave app-driven fullscreen, restoring the pre-fullscreen layout.
+    pub fn unfullscreen_window(&mut self, window: &Window) {
+        layout::unset_fullscreen(&mut self.space, &mut self.layout, window);
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+    }
+
     fn minimize_focused(&mut self) {
         let Some(window) = self.focused_window() else {
             tracing::debug!("minimize: no focused window");
@@ -318,6 +355,8 @@ impl ShoestringWm {
         }
         self.layout.push_minimized(window.clone(), rect);
         crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+        // A minimized window is unmapped, so it no longer inhibits idle.
+        self.refresh_idle_inhibit();
     }
 
     /// Restore a specific minimized `window` (taskbar click on its entry),
@@ -332,6 +371,8 @@ impl ShoestringWm {
         self.workspaces.assign(window.clone(), active, rect.loc);
         self.focus_window(window);
         crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+        // Restored into view — it may inhibit idle again.
+        self.refresh_idle_inhibit();
     }
 
     fn unminimize_last(&mut self) {
@@ -345,6 +386,8 @@ impl ShoestringWm {
         self.workspaces.assign(window.clone(), active, rect.loc);
         // focus_window records MRU on the active workspace.
         self.focus_window(&window);
+        // Restored into view — it may inhibit idle again.
+        self.refresh_idle_inhibit();
     }
 
     fn close_focused(&mut self) {
@@ -380,6 +423,21 @@ impl ShoestringWm {
             .cloned();
         if let Some(next) = next {
             self.focus_window(&next);
+        }
+    }
+
+    /// Raise (`up = true`) or lower (`up = false`) the focused window in the
+    /// stacking order. Pure restack — keyboard focus stays put. A no-op when
+    /// no window holds focus.
+    fn restack_focused(&mut self, up: bool) {
+        let Some(window) = self.focused_window() else {
+            tracing::debug!(up, "restack: no focused window");
+            return;
+        };
+        if up {
+            self.raise_window(&window);
+        } else {
+            self.lower_window(&window);
         }
     }
 
@@ -708,6 +766,10 @@ impl ShoestringWm {
                     },
                 );
                 pointer.frame(self);
+                // Record what the client just saw so the post-dispatch
+                // refresh pass (see `refresh_pointer_focus`) doesn't re-send
+                // this same focus as a phantom move.
+                self.last_pointer_focus = new_under.clone();
                 self.maybe_pointer_focus(new);
 
                 // Activate a constraint once the cursor enters its region (the
@@ -741,7 +803,7 @@ impl ShoestringWm {
                 let under = self.surface_under(pos);
                 pointer.motion(
                     self,
-                    under,
+                    under.clone(),
                     &MotionEvent {
                         location: pos,
                         serial,
@@ -749,6 +811,7 @@ impl ShoestringWm {
                     },
                 );
                 pointer.frame(self);
+                self.last_pointer_focus = under;
                 self.maybe_pointer_focus(pos);
             }
             InputEvent::PointerButton { event, .. } => {
@@ -925,7 +988,178 @@ impl ShoestringWm {
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
+            // Graphics tablets (Wacom et al.) over libinput. A tablet must be
+            // registered on the seat's tablet-seat before its tool events mean
+            // anything, so add/remove track device hotplug.
+            InputEvent::DeviceAdded { device }
+                if device.has_capability(DeviceCapability::TabletTool) =>
+            {
+                self.seat
+                    .tablet_seat()
+                    .add_tablet::<Self>(&self.display_handle, &TabletDescriptor::from(&device));
+            }
+            InputEvent::DeviceRemoved { device }
+                if device.has_capability(DeviceCapability::TabletTool) =>
+            {
+                let tablet_seat = self.seat.tablet_seat();
+                tablet_seat.remove_tablet(&TabletDescriptor::from(&device));
+                // With no tablets left, the tools they spawned are stale.
+                if tablet_seat.count_tablets() == 0 {
+                    tablet_seat.clear_tools();
+                }
+            }
+            InputEvent::TabletToolAxis { event, .. } => self.on_tablet_tool_axis::<I>(&event),
+            InputEvent::TabletToolProximity { event, .. } => {
+                self.on_tablet_tool_proximity::<I>(&event)
+            }
+            InputEvent::TabletToolTip { event, .. } => self.on_tablet_tool_tip::<I>(&event),
+            InputEvent::TabletToolButton { event, .. } => self.on_tablet_tool_button::<I>(&event),
             _ => {}
+        }
+    }
+
+    /// Map a tablet tool's absolute position onto the desktop. Tablets report
+    /// normalized coordinates; we project them onto the first output the same
+    /// way `PointerMotionAbsolute` does, so the stylus and the mouse share one
+    /// coordinate space.
+    fn tablet_tool_position<I: InputBackend, E: AbsolutePositionEvent<I>>(
+        &self,
+        evt: &E,
+    ) -> Option<Point<f64, Logical>> {
+        let output = self.space.outputs().next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        Some(evt.position_transformed(output_geo.size) + output_geo.loc.to_f64())
+    }
+
+    /// Stylus moved (and possibly changed pressure/tilt/etc.). Drives the
+    /// pointer so the cursor tracks the tool, then forwards the high-resolution
+    /// axes to the focused tool resource.
+    fn on_tablet_tool_axis<I: InputBackend>(&mut self, evt: &I::TabletToolAxisEvent) {
+        let Some(pos) = self.tablet_tool_position::<I, _>(evt) else {
+            return;
+        };
+        let tablet_seat = self.seat.tablet_seat();
+        let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&evt.device()));
+        let tool = tablet_seat.get_tool(&evt.tool());
+
+        let pointer = self.seat.get_pointer().unwrap();
+        let under = self.surface_under(pos);
+        pointer.motion(
+            self,
+            under.clone(),
+            &MotionEvent {
+                location: pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: evt.time_msec(),
+            },
+        );
+        pointer.frame(self);
+
+        if let (Some(tablet), Some(tool)) = (tablet, tool) {
+            if evt.pressure_has_changed() {
+                tool.pressure(evt.pressure());
+            }
+            if evt.distance_has_changed() {
+                tool.distance(evt.distance());
+            }
+            if evt.tilt_has_changed() {
+                tool.tilt(evt.tilt());
+            }
+            if evt.slider_has_changed() {
+                tool.slider_position(evt.slider_position());
+            }
+            if evt.rotation_has_changed() {
+                tool.rotation(evt.rotation());
+            }
+            if evt.wheel_has_changed() {
+                tool.wheel(evt.wheel_delta(), evt.wheel_delta_discrete());
+            }
+            tool.motion(
+                pos,
+                under,
+                &tablet,
+                SERIAL_COUNTER.next_serial(),
+                evt.time_msec(),
+            );
+        }
+    }
+
+    /// Stylus entered or left the tablet's hover range. Registers the tool on
+    /// first sight and sends proximity in/out to whatever surface it is over.
+    fn on_tablet_tool_proximity<I: InputBackend>(&mut self, evt: &I::TabletToolProximityEvent) {
+        let Some(pos) = self.tablet_tool_position::<I, _>(evt) else {
+            return;
+        };
+        let dh = self.display_handle.clone();
+        let tablet_seat = self.seat.tablet_seat();
+        let descriptor = evt.tool();
+        tablet_seat.add_tool::<Self>(self, &dh, &descriptor);
+
+        let tablet_seat = self.seat.tablet_seat();
+        let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&evt.device()));
+        let tool = tablet_seat.get_tool(&descriptor);
+
+        let pointer = self.seat.get_pointer().unwrap();
+        let under = self.surface_under(pos);
+        pointer.motion(
+            self,
+            under.clone(),
+            &MotionEvent {
+                location: pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: evt.time_msec(),
+            },
+        );
+        pointer.frame(self);
+
+        if let (Some((surface, loc)), Some(tablet), Some(tool)) = (under, tablet, tool) {
+            match evt.state() {
+                ProximityState::In => tool.proximity_in(
+                    pos,
+                    (surface, loc),
+                    &tablet,
+                    SERIAL_COUNTER.next_serial(),
+                    evt.time_msec(),
+                ),
+                ProximityState::Out => tool.proximity_out(evt.time_msec()),
+            }
+        }
+    }
+
+    /// Stylus touched down or lifted off. A tip-down behaves like a click: it
+    /// moves keyboard focus to the window under the tool before reporting the
+    /// contact to the client.
+    fn on_tablet_tool_tip<I: InputBackend>(&mut self, evt: &I::TabletToolTipEvent) {
+        let tool = self.seat.tablet_seat().get_tool(&evt.tool());
+        let Some(tool) = tool else {
+            return;
+        };
+        match evt.tip_state() {
+            TabletToolTipState::Down => {
+                let serial = SERIAL_COUNTER.next_serial();
+                tool.tip_down(serial, evt.time_msec());
+                if !self.is_locked() && self.pending_picker.is_none() {
+                    let pos = self.seat.get_pointer().unwrap().current_location();
+                    if let Some((window, _)) = self.space.element_under(pos) {
+                        let window = window.clone();
+                        self.focus_window(&window);
+                    }
+                }
+            }
+            TabletToolTipState::Up => tool.tip_up(evt.time_msec()),
+        }
+    }
+
+    /// A button on the stylus barrel (or the tablet pad routed as a tool
+    /// button) changed state; forward it verbatim to the tool's client.
+    fn on_tablet_tool_button<I: InputBackend>(&mut self, evt: &I::TabletToolButtonEvent) {
+        if let Some(tool) = self.seat.tablet_seat().get_tool(&evt.tool()) {
+            tool.button(
+                evt.button(),
+                evt.button_state(),
+                SERIAL_COUNTER.next_serial(),
+                evt.time_msec(),
+            );
         }
     }
 }

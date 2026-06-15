@@ -1,0 +1,9 @@
+# PAM policy for shoestring-lock (the screen locker) — Linux / Linux-PAM.
+#
+# A dedicated stack, NOT the system `login` service, so the locker verifies
+# the *current* user's password directly and inherits no login-time policy
+# surprises. `pam_unix` transparently uses the setuid `unix_chkpwd` helper
+# (shipped in libpam-modules / pam) so an unprivileged locker can check the
+# password without the binary itself being setuid.
+auth     required  pam_unix.so
+account  required  pam_unix.so

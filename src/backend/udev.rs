@@ -38,7 +38,8 @@ use smithay::{
             compositor::{FrameError, FrameFlags, RenderFrameError},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
-            CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType,
+            CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmEventMetadata,
+            DrmEventTime, DrmNode, NodeType,
         },
         egl::{self, context::ContextPriority, EGLContext, EGLDevice, EGLDisplay},
         input::InputEvent,
@@ -55,7 +56,7 @@ use smithay::{
         },
         udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent},
     },
-    desktop::space::SpaceRenderElements,
+    desktop::{space::SpaceRenderElements, utils::OutputPresentationFeedback},
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
         calloop::{
@@ -88,13 +89,22 @@ type UdevRenderer<'a> = MultiRenderer<
     GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
 >;
 
-type ShoestringDrmOutput =
-    DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
+/// Per-frame user-data we hang on each queued frame: the presentation
+/// feedback collected at render time, returned by `frame_submitted` on the
+/// matching VBlank so we can mark it `presented` with the hardware timestamp.
+type FrameUserData = Option<OutputPresentationFeedback>;
+
+type ShoestringDrmOutput = DrmOutput<
+    GbmAllocator<DrmDeviceFd>,
+    GbmFramebufferExporter<DrmDeviceFd>,
+    FrameUserData,
+    DrmDeviceFd,
+>;
 
 type ShoestringOutputManager = DrmOutputManager<
     GbmAllocator<DrmDeviceFd>,
     GbmFramebufferExporter<DrmDeviceFd>,
-    (),
+    FrameUserData,
     DrmDeviceFd,
 >;
 
@@ -416,8 +426,8 @@ fn device_added(
 
     let registration_token = state
         .loop_handle
-        .insert_source(drm_notifier, move |event, _meta, state| match event {
-            DrmEvent::VBlank(crtc) => state.frame_finish(node, crtc),
+        .insert_source(drm_notifier, move |event, meta, state| match event {
+            DrmEvent::VBlank(crtc) => state.frame_finish(node, crtc, meta.take()),
             DrmEvent::Error(error) => tracing::error!(?node, ?error, "drm error"),
         })
         .expect("insert drm notifier");
@@ -1217,8 +1227,19 @@ impl ShoestringWm {
 
 impl ShoestringWm {
     /// VBlank handler: the GPU just finished presenting a frame on `crtc`.
-    /// Acknowledge it and schedule the next render one frame later.
-    pub(crate) fn frame_finish(&mut self, node: DrmNode, crtc: crtc::Handle) {
+    /// Acknowledge it, mark the frame's `wp_presentation` feedback presented
+    /// (with the hardware timestamp when the driver supplied one), and
+    /// schedule the next render one frame later.
+    pub(crate) fn frame_finish(
+        &mut self,
+        node: DrmNode,
+        crtc: crtc::Handle,
+        metadata: Option<DrmEventMetadata>,
+    ) {
+        // Captured before borrowing `self.udev` so it's available as the
+        // fallback presentation time (when the driver gives no vblank stamp).
+        let fallback_now = self.clock.now();
+
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
@@ -1238,8 +1259,35 @@ impl ShoestringWm {
             return;
         };
 
-        if let Err(e) = surface.drm_output.frame_submitted() {
-            tracing::warn!(?crtc, error = ?e, "frame_submitted failed");
+        // A hardware monotonic vblank timestamp is the most accurate present
+        // time; fall back to "now" (still monotonic, same clock id) otherwise.
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+        let hw_tp = metadata.as_ref().and_then(|m| match m.time {
+            DrmEventTime::Monotonic(tp) if !tp.is_zero() => Some(tp),
+            _ => None,
+        });
+        let seq = metadata.as_ref().map(|m| m.sequence).unwrap_or(0) as u64;
+        let (present_time, flags) = match hw_tp {
+            Some(tp) => (tp.into(), Kind::Vsync | Kind::HwClock | Kind::HwCompletion),
+            None => (fallback_now, Kind::Vsync),
+        };
+        let refresh = surface
+            .output
+            .current_mode()
+            .map(|m| {
+                smithay::wayland::presentation::Refresh::fixed(Duration::from_secs_f64(
+                    1_000.0 / m.refresh as f64,
+                ))
+            })
+            .unwrap_or(smithay::wayland::presentation::Refresh::Unknown);
+
+        match surface.drm_output.frame_submitted() {
+            Ok(user_data) => {
+                if let Some(mut feedback) = user_data.flatten() {
+                    feedback.presented(present_time, refresh, seq, flags);
+                }
+            }
+            Err(e) => tracing::warn!(?crtc, error = ?e, "frame_submitted failed"),
         }
 
         if !session_active {
@@ -1310,6 +1358,12 @@ impl ShoestringWm {
         // borrow precludes calling &self methods further down.
         let locked = self.is_locked();
         let lock_surface = self.lock_surface_for(&output);
+        // Likewise capture the fullscreen window (if any) on this output now:
+        // the render path renders only it, dropping the bar/layer surfaces it
+        // covers. Skipped while locked (the lock surface owns the screen).
+        let fullscreen = (!locked)
+            .then(|| crate::layout::fullscreen_window_on(&self.space, &self.layout, &output))
+            .flatten();
 
         let Some(udev) = self.udev.as_mut() else {
             return;
@@ -1343,13 +1397,12 @@ impl ShoestringWm {
             // Drop all client windows from the composition while locked.
             Vec::new()
         } else {
-            smithay::desktop::space::space_render_elements(
+            crate::drawing::output_space_elements(
                 &mut renderer,
-                [&self.space],
+                &self.space,
                 &output,
-                1.0,
+                fullscreen.as_ref(),
             )
-            .unwrap_or_default()
         };
 
         // Cursor goes on top: build pointer elements from a captured snapshot
@@ -1432,8 +1485,8 @@ impl ShoestringWm {
                 .drm_output
                 .render_frame(&mut renderer, &elements, clear, FrameFlags::DEFAULT);
 
-        let rendered = match result {
-            Ok(frame) => !frame.is_empty,
+        let (rendered, render_states) = match result {
+            Ok(frame) => (!frame.is_empty, frame.states),
             Err(e) => {
                 let is_test_failed = matches!(
                     e,
@@ -1475,7 +1528,20 @@ impl ShoestringWm {
         };
 
         if rendered {
-            if let Err(e) = surface.drm_output.queue_frame(()) {
+            // Attribute each surface to this output, then collect its
+            // wp_presentation feedback and hand it to the frame so the
+            // matching VBlank can mark it `presented` (see `frame_finish`).
+            crate::presentation::update_primary_scanout_output(
+                &self.space,
+                &output,
+                &render_states,
+            );
+            let feedback = crate::presentation::take_presentation_feedback(
+                &self.space,
+                &output,
+                &render_states,
+            );
+            if let Err(e) = surface.drm_output.queue_frame(Some(feedback)) {
                 tracing::warn!(?crtc, ?e, session_active, "queue_frame failed");
                 if session_active {
                     let timer = Timer::from_duration(Duration::from_millis(16));

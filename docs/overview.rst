@@ -65,7 +65,7 @@ Explicit non-goals (v1)
 - Animations or fancy transitions.
 - Server-side decoration polish.
 - A built-in bar — shoestring-bar is intentionally a separate process.
-- Gestures, tablet, accessibility.
+- Gestures, accessibility.
 - (XWayland was deferred until GIMP forced it; now shipped — see the
   "What ships" section.)
 
@@ -99,6 +99,23 @@ Implemented today:
   clients can lock the cursor in place (receiving only relative deltas)
   or confine it to a region of their surface. A lock activates while the
   pointer is over the requesting surface and releases when it leaves.
+- Idle management (opt-in via ``[general].idle_notifications_enabled``):
+  ``ext_idle_notify_v1`` for idle daemons/auto-lockers, paired with
+  ``zwp_idle_inhibit_manager_v1`` so video players and browsers can
+  suppress idle while a *visible* surface requests it — an inhibitor on a
+  minimized or off-workspace window is ignored.
+- Graphics-tablet / stylus support (``zwp_tablet_manager_v2``): pen
+  proximity, pressure, tilt, distance, rotation and barrel buttons are
+  routed to the focused surface, so drawing apps (Krita, GIMP, Inkscape)
+  see a real tablet tool. The stylus drives the shared pointer cursor; a
+  tip-down focuses the window under the pen like a click. Tablets are
+  picked up on device hotplug from the libinput (TTY) backend.
+- Accurate frame-presentation timing (``wp_presentation``): clients that
+  request feedback get the precise on-screen timestamp for each buffer, so
+  video players sync audio/video and animations pace correctly. On the
+  TTY/DRM backend the timestamp comes straight from the hardware vblank
+  (flagged ``HwClock``/``HwCompletion``); the nested winit backend reports
+  it best-effort at submit time against the same monotonic clock.
 - xcursor sprite rendering at the pointer.
 - Configurable XKB keyboard layouts (``[general].xkb_layout`` and
   friends), with multiple layouts and a ``cycle-layout`` action

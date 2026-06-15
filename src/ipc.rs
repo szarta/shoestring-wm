@@ -366,11 +366,18 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             }
             Request::SetAutomation { enabled } => {
                 let changed = state.automation_enabled != enabled;
-                state.automation_enabled = enabled;
+                // Automation is a superset of screen capture: this also opens
+                // (or closes) the capture gate so `screenshot` works under
+                // automation alone. Returns whether capture followed.
+                let capture_changed = state.set_automation(enabled);
                 let _ = write_response(client, &Response::Automation { enabled });
                 if changed {
                     tracing::info!(enabled, "automation gate changed via ipc");
                     state.emit_ipc(Event::AutomationChanged { enabled });
+                }
+                if capture_changed {
+                    tracing::info!(enabled, "screen-capture gate followed automation gate");
+                    state.emit_ipc(Event::ScreenCaptureChanged { enabled });
                 }
                 return true;
             }
@@ -514,6 +521,55 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             }
             Request::FocusWindow { id: window_id } => {
                 let resp = match state.focus_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::RaiseWindow { id: window_id } => {
+                let resp = match state.raise_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::LowerWindow { id: window_id } => {
+                let resp = match state.lower_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::SetWindowSticky {
+                id: window_id,
+                sticky,
+            } => {
+                let resp = match state.set_window_sticky_by_id(&window_id, sticky) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::SetWindowAlwaysOnTop {
+                id: window_id,
+                always_on_top,
+            } => {
+                let resp = match state.set_window_always_on_top_by_id(&window_id, always_on_top) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::SetWindowName {
+                id: window_id,
+                name,
+            } => {
+                let resp = match state.set_window_name_by_id(&window_id, &name) {
                     Ok(()) => Response::Ok,
                     Err(message) => Response::Error { message },
                 };
@@ -754,7 +810,7 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
         .foreign_toplevels
         .iter()
         .map(|(window, handle)| {
-            let (title, app_id) = window_title_app_id(window);
+            let (title, app_id) = effective_title_app_id(state, window);
             let workspace = state
                 .workspaces
                 .windows_on_any()
@@ -768,6 +824,9 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
                 workspace,
                 focused: focused.as_ref() == Some(window),
                 geometry: window_geometry(state, window),
+                z: window_z(state, window),
+                sticky: state.is_sticky(window),
+                always_on_top: state.is_always_on_top(window),
             }
         })
         .collect()
@@ -790,6 +849,19 @@ pub(crate) fn window_geometry(
         w: size.w,
         h: size.h,
     })
+}
+
+/// Stacking position of `window` within the mapped stack: `space.elements()`
+/// yields bottom-to-top, so the enumeration index is the Z position (`0` is
+/// bottom-most). `None` for windows that aren't mapped — minimized windows are
+/// unmapped, and only the active workspace's windows are in the space. Shared
+/// by the `windows` and `get_tree` snapshots so both report the same order.
+pub(crate) fn window_z(state: &ShoestringWm, window: &smithay::desktop::Window) -> Option<u32> {
+    state
+        .space
+        .elements()
+        .position(|w| w == window)
+        .map(|i| i as u32)
 }
 
 /// Name of the output a window's center sits on, by point containment against
@@ -844,16 +916,6 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
         })
         .collect();
 
-    // Stacking order for mapped windows: `space.elements()` yields bottom to
-    // top, so the enumeration index is the Z position.
-    let z_of = |window: &smithay::desktop::Window| -> Option<u32> {
-        state
-            .space
-            .elements()
-            .position(|w| w == window)
-            .map(|i| i as u32)
-    };
-
     let focused = state.focused_window();
     let active = state.workspaces.active();
 
@@ -867,12 +929,13 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             .find(|(w, _)| w == window)
             .map(|(_, ws)| ws.one_based())
             .unwrap_or(0);
-        let (title, app_id) = window_title_app_id(window);
+        let (title, app_id) = effective_title_app_id(state, window);
         let layout = match state.layout.layout_state(window) {
             LayoutState::Floating => "floating",
             LayoutState::TiledLeft => "tiled_left",
             LayoutState::TiledRight => "tiled_right",
             LayoutState::Maximized => "maximized",
+            LayoutState::Fullscreen => "fullscreen",
         };
         by_workspace.entry(ws).or_default().push(WindowNode {
             id: handle.identifier(),
@@ -880,9 +943,11 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
             app_id,
             geometry: window_geometry(state, window),
             output: window_output(state, window),
-            z: z_of(window),
+            z: window_z(state, window),
             focused: focused.as_ref() == Some(window),
             minimized: state.layout.is_minimized(window),
+            sticky: state.is_sticky(window),
+            always_on_top: state.is_always_on_top(window),
             layout: layout.to_string(),
         });
     }
@@ -914,6 +979,25 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
         .collect();
 
     (outputs, workspaces, minimized)
+}
+
+/// `(effective_title, app_id)` for a window: the IPC-set name override
+/// (see [`Request::SetWindowName`]) when one is present, otherwise the
+/// client's own title. `app_id` is never overridden. This is the title the
+/// WM reports everywhere on its own IPC surface (`windows`, `get_tree`,
+/// `find_windows`, the `window_title_changed` event) so a bar or window-jump
+/// menu shows and matches on the override.
+pub(crate) fn effective_title_app_id(
+    state: &ShoestringWm,
+    window: &smithay::desktop::Window,
+) -> (String, String) {
+    let (title, app_id) = window_title_app_id(window);
+    let title = state
+        .window_name_overrides
+        .get(window)
+        .cloned()
+        .unwrap_or(title);
+    (title, app_id)
 }
 
 /// `(title, app_id)` for either an xdg toplevel or an X11 window.

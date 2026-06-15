@@ -240,6 +240,9 @@ impl XwmHandler for ShoestringWm {
             self.workspaces.forget(&window);
             self.pending_initial_center.remove(&window);
             self.rules_applied.remove(&window);
+            self.sticky.remove(&window);
+            self.always_on_top.remove(&window);
+            self.window_name_overrides.remove(&window);
             // Same FT cleanup the xdg destroy path runs — see
             // shoestring_wm_ft_drop memory note: dropping our Arc on the
             // handle is not enough, must explicitly remove_toplevel.
@@ -312,18 +315,19 @@ impl XwmHandler for ShoestringWm {
     }
 
     fn fullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let _ = surface.set_fullscreen(true);
+        // fullscreen_window → apply_geometry sets the X-side fullscreen property
+        // and configures the surface, so no manual set_fullscreen here. X11 has
+        // no per-output hint in this request, so fullscreen on the current one.
         if let Some(window) = self.space_element_for_x11(&surface) {
             self.focus_window(&window);
-            self.window_layout_action(LayoutState::Maximized);
+            self.fullscreen_window(&window, None);
         }
     }
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let _ = surface.set_fullscreen(false);
         if let Some(window) = self.space_element_for_x11(&surface) {
             self.focus_window(&window);
-            self.window_layout_action(LayoutState::Maximized);
+            self.unfullscreen_window(&window);
         }
     }
 

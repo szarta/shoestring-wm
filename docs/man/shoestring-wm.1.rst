@@ -129,7 +129,8 @@ The WM ships and (in some cases) spawns these companion binaries:
     Status bar; spawned by default via ``[general].autostart``.
 
 **shoestring-menu**\(1)
-    dmenu-style launcher; bound to ``Super+P`` / ``Super+B`` by default.
+    dmenu-style launcher and window switcher; bound to ``Super+P`` /
+    ``Super+B`` / ``Super+J`` by default.
 
 **shoestring-lock**
     Session locker; spawned by the ``lock`` action and the ``lock``

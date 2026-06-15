@@ -136,7 +136,11 @@ fn main() -> Result<()> {
     register_reaper_drain(&state.loop_handle, reap_read_fd)?;
 
     if cli.enable_automation && !state.automation_enabled {
-        state.automation_enabled = true;
+        // Couples the screen-capture gate on too (automation is a superset),
+        // so a session started with --enable-automation can screenshot without
+        // a separate `screen-capture on`. No subscribers exist yet, so the
+        // coupled ScreenCaptureChanged event is intentionally not emitted here.
+        state.set_automation(true);
         tracing::info!("automation gate forced on by --enable-automation");
     }
 
@@ -234,7 +238,14 @@ fn main() -> Result<()> {
         spawn_client(cmd);
     }
 
-    event_loop.run(None, &mut state, |_| {})?;
+    // After each batch of dispatched events (client commits, input, IPC
+    // actions, timers) re-evaluate what sits under a *stationary* pointer.
+    // Surfaces that mapped/unmapped/moved without a real pointer motion still
+    // owe the client enter/leave/motion; the input handlers only refocus on
+    // actual motion, so this is the catch-all. Cheap when nothing changed.
+    event_loop.run(None, &mut state, |state| {
+        state.refresh_pointer_focus();
+    })?;
     Ok(())
 }
 
@@ -289,11 +300,15 @@ fn check_config(path: Option<&std::path::Path>) -> Result<()> {
     for w in &warnings {
         eprintln!("warning: {w}");
     }
+    let regex_errors = config.window_rule_regex_errors();
+    for e in &regex_errors {
+        eprintln!("warning: {e}");
+    }
     println!(
         "{}: OK — {} binding(s), {} warning(s)",
         target.display(),
         config.bindings.len(),
-        warnings.len()
+        warnings.len() + regex_errors.len()
     );
     Ok(())
 }

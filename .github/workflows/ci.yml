@@ -54,3 +54,41 @@ jobs:
 
       - name: cargo build (release)
         run: cargo build --workspace --release
+
+  # The same fmt/clippy/test/build sequence on FreeBSD, inside a VM action
+  # (GitHub has no native FreeBSD runner). Catches OpenPAM/libudev-devd
+  # portability regressions — notably the vendored pam-client2 fork that
+  # lets shoestring-lock build there (third_party/pam-client2). Deps mirror
+  # the FreeBSD list in docs/install.rst; the whole workspace (tty backend
+  # + lock) compiles, so nothing is feature-gated out.
+  check-freebsd:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.0"
+          usesh: true
+          # git: cargo fetches smithay from a git revision, so the VM needs it.
+          # rust pkg bundles cargo + rustfmt + clippy. No drm-kmod: building
+          # only needs the userland libs/headers, not the kernel module.
+          prepare: |
+            pkg install -y \
+              git rust pkgconf \
+              wayland libxkbcommon \
+              libdrm mesa-libs \
+              libudev-devd libinput \
+              seatd libdisplay-info
+          # pkg installs libs under /usr/local/lib, which base ld(1) does not
+          # search — point the linker at it (matches docs/install.rst).
+          run: |
+            set -e
+            export RUSTFLAGS="-L/usr/local/lib"
+            export CARGO_TERM_COLOR=always
+            cargo fmt --all -- --check
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo test --workspace
+            cargo build --workspace --release

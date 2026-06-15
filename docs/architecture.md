@@ -37,7 +37,7 @@ Openbox-inspired ergonomics.
 - Animations / fancy transitions
 - Window decoration polish
 - Built-in bar / status panel (separate companion project)
-- Wayland gimmicks (gestures, fractional scaling, tablet, etc.)
+- Wayland gimmicks (gestures, etc.)
 
 ---
 
