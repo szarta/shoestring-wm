@@ -69,6 +69,7 @@ use smithay::{
         wayland_server::backend::GlobalId,
     },
     utils::DeviceFd,
+    wayland::drm_syncobj::{supports_syncobj_eventfd, DrmSyncobjHandler, DrmSyncobjState},
 };
 use smithay_drm_extras::{
     display_info,
@@ -136,6 +137,12 @@ pub struct UdevData {
     primary_gpu: DrmNode,
     gpus: GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
     backends: HashMap<DrmNode, BackendData>,
+    /// `wp_linux_drm_syncobj_v1` (explicit sync) delegate. Stood up once, on
+    /// the first GPU that supports `drmSyncobjEventfd` (see
+    /// [`supports_syncobj_eventfd`]); `None` until then or if unsupported.
+    /// Lets XWayland 23.2+ / Wine / Proton hand us GPU fences instead of
+    /// relying on implicit sync — fixes tearing/stutter in GL/Vulkan apps.
+    syncobj_state: Option<DrmSyncobjState>,
 }
 
 impl UdevData {
@@ -150,6 +157,15 @@ impl UdevData {
                 false
             }
         }
+    }
+}
+
+/// Explicit-sync (`wp_linux_drm_syncobj_v1`) routes through the udev backend:
+/// the delegate lives in [`UdevData`] because it owns the importing DRM device.
+/// The acquire-fence commit blocker is wired in [`crate::handlers::compositor`].
+impl DrmSyncobjHandler for ShoestringWm {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.udev.as_mut().and_then(|u| u.syncobj_state.as_mut())
     }
 }
 
@@ -238,6 +254,7 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
         primary_gpu,
         gpus,
         backends: HashMap::new(),
+        syncobj_state: None,
     });
 
     // udev: notifies us when DRM devices come and go.
@@ -508,6 +525,34 @@ fn device_added(
             "zwp_linux_dmabuf_v1 global created"
         );
         state.dmabuf_formats = Some(dmabuf_formats);
+    }
+
+    // The first GPU that supports `drmSyncobjEventfd` stands up the
+    // `wp_linux_drm_syncobj_v1` (explicit sync) global. Mirrors the dmabuf
+    // global above: a general GPU facility, created at most once, NOT behind
+    // the screen-capture gate. XWayland 23.2+ prefers explicit sync, so this
+    // removes the implicit-sync fallback that causes tearing/stutter in
+    // Wine/Proton GL/Vulkan apps. The udev borrow ended above; touch `state`.
+    if state
+        .udev
+        .as_ref()
+        .is_some_and(|u| u.syncobj_state.is_none())
+    {
+        let import_device = state
+            .udev
+            .as_ref()
+            .and_then(|u| u.backends.get(&node))
+            .map(|b| b.drm_output_manager.device().device_fd().clone());
+        if let Some(import_device) = import_device {
+            if supports_syncobj_eventfd(&import_device) {
+                let dh = state.display_handle.clone();
+                let syncobj_state = DrmSyncobjState::new::<ShoestringWm>(&dh, import_device);
+                state.udev.as_mut().unwrap().syncobj_state = Some(syncobj_state);
+                tracing::info!("wp_linux_drm_syncobj_v1 (explicit sync) global created");
+            } else {
+                tracing::info!("primary GPU lacks drmSyncobjEventfd; explicit sync not advertised");
+            }
+        }
     }
 
     device_changed(state, node);
