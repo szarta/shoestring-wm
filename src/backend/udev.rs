@@ -4,7 +4,8 @@
 //! Aggressively stripped vs. anvil's reference:
 //! - single primary GPU only (no multi-GPU fallback paths)
 //! - per-output scale via `[outputs.<name>].scale`; falls back to `general.output_scale`
-//! - no XWayland, dmabuf-feedback, syncobj, DRM lease, screencopy
+//! - no dmabuf-feedback, DRM lease
+//! - explicit sync (`wp_linux_drm_syncobj_v1`) and wlr-screencopy *are* wired
 //! - no cursor plane (cursor sprite is composited into the framebuffer
 //!   from an xcursor theme; see [`crate::cursor`] and [`crate::drawing`])
 //! - no FPS overlay, no presentation-throttle heuristics
