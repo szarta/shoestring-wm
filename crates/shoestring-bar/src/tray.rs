@@ -57,7 +57,11 @@ struct Item {
 pub struct Tray {
     rpc: RpcConn,
     items: Vec<Item>,
+    theme: crate::icons::IconTheme,
 }
+
+/// Target icon size in px (spike: fixed; real render will key off bar height).
+const ICON_PX: u16 = 24;
 
 impl Tray {
     /// Connect to the session bus and become the StatusNotifierWatcher + host.
@@ -108,6 +112,7 @@ impl Tray {
         Some(Tray {
             rpc,
             items: Vec::new(),
+            theme: crate::icons::IconTheme::detect(),
         })
     }
 
@@ -217,12 +222,37 @@ impl Tray {
         let _ = sig.body.push_param(format!("{service}{path}"));
         let _ = self.send(sig);
 
-        // De-risk the outgoing-call path: pull a couple of properties off the
-        // freshly registered item and log them.
-        for prop in ["Id", "Title", "Status", "IconName"] {
-            match self.item_get_string(&service, &path, prop) {
-                Some(val) => tracing::info!(%service, prop, value = %val, "tray: item property"),
-                None => tracing::debug!(%service, prop, "tray: item property unavailable"),
+        // Pull the item's identity + icon hints over an outgoing call...
+        let id = self
+            .item_get_string(&service, &path, "Id")
+            .unwrap_or_default();
+        let status = self
+            .item_get_string(&service, &path, "Status")
+            .unwrap_or_default();
+        let icon_name = self
+            .item_get_string(&service, &path, "IconName")
+            .unwrap_or_default();
+        let theme_path = self.item_get_string(&service, &path, "IconThemePath");
+        tracing::info!(%service, %id, %status, %icon_name, ?theme_path, "tray: item details");
+
+        // ...then exercise the icon module: resolve + decode to pixels.
+        if !icon_name.is_empty() {
+            let extra: Vec<std::path::PathBuf> = theme_path
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect();
+            match self.theme.lookup(&icon_name, ICON_PX, &extra) {
+                Some(file) => match crate::icons::decode(&file, ICON_PX) {
+                    Some(icon) => tracing::info!(
+                        %icon_name, path = %file.display(), w = icon.width, h = icon.height,
+                        bytes = icon.bgra.len(), "tray: icon decoded"
+                    ),
+                    None => {
+                        tracing::warn!(%icon_name, path = %file.display(), "tray: icon decode failed")
+                    }
+                },
+                None => tracing::warn!(%icon_name, "tray: icon not found in any theme"),
             }
         }
     }

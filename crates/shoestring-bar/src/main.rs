@@ -11,6 +11,7 @@
 
 mod battery;
 mod config;
+mod icons;
 mod ipc_client;
 mod tray;
 
