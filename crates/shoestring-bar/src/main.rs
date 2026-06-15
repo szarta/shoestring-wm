@@ -13,6 +13,7 @@ mod battery;
 mod config;
 mod icons;
 mod ipc_client;
+mod menu;
 mod tray;
 
 use std::{
@@ -37,6 +38,7 @@ use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
+        wl_keyboard::{self, KeyState, WlKeyboard},
         wl_output::WlOutput,
         wl_pointer::{self, ButtonState, WlPointer},
         wl_registry::WlRegistry,
@@ -65,10 +67,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 /// Dim color for inactive workspace boxes and unfocused entry backgrounds.
 /// Not currently user-configurable (the M24 config spec only exposes bg/fg).
-const DIM: u32 = 0xFF_55_55_55;
+pub(crate) const DIM: u32 = 0xFF_55_55_55;
 /// Accent: focused workspace box and focused window's highlight backdrop.
 /// Not currently user-configurable.
-const ACCENT: u32 = 0xFF_55_77_BB;
+pub(crate) const ACCENT: u32 = 0xFF_55_77_BB;
 /// Unfocused window-list entry chip background. Matches DIM so it uses the
 /// same visual grammar as the inactive workspace boxes on the left.
 const ENTRY_BG: u32 = DIM;
@@ -211,6 +213,31 @@ struct State {
     /// the last [`draw_window_list`] pass. Hit-tested by the pointer
     /// button handler; cleared and rebuilt on every redraw.
     window_entry_rects: Vec<(i32, i32, String)>,
+    /// `wp_viewporter` manager, kept so the tray menu can give its own
+    /// surface a viewport for HiDPI mapping. `None` if unsupported.
+    viewporter: Option<WpViewporter>,
+    /// Bar-side keyboard, bound when the seat advertises the capability.
+    /// Used only to drive + dismiss the tray menu (the bar itself takes
+    /// no keyboard focus).
+    keyboard: Option<WlKeyboard>,
+    /// Surface-local pointer y in pixels; companion to `pointer_x`, needed
+    /// for vertical hit-testing inside the tray menu.
+    pointer_y: Option<f64>,
+    /// True while the pointer is over the open tray menu (vs the bar), so
+    /// the button handler routes the click correctly.
+    pointer_on_menu: bool,
+    /// (x_start, width, tray item index) for each rendered tray icon from
+    /// the last redraw, in logical coords. Hit-tested to open a menu.
+    tray_icon_rects: Vec<(i32, i32, usize)>,
+    /// The open tray context menu, if any.
+    menu: Option<menu::Menu>,
+    /// Set when the menu needs a repaint (hover/nav/configure change).
+    menu_dirty: bool,
+    /// Tray item index whose menu the loop should fetch + open (set by the
+    /// pointer handler; consumed in the loop where the D-Bus conn lives).
+    pending_open_menu: Option<usize>,
+    /// dbusmenu id the loop should send a `clicked` event for, then dismiss.
+    pending_menu_click: Option<i32>,
     /// Auto-detected battery source. `None` on systems with no
     /// recognised battery — the indicator is hidden entirely in that
     /// case so the bar layout doesn't reserve dead space.
@@ -449,6 +476,15 @@ fn run_session() -> Result<()> {
         pointer: None,
         pointer_x: None,
         window_entry_rects: Vec::new(),
+        viewporter,
+        keyboard: None,
+        pointer_y: None,
+        pointer_on_menu: false,
+        tray_icon_rects: Vec::new(),
+        menu: None,
+        menu_dirty: false,
+        pending_open_menu: None,
+        pending_menu_click: None,
         battery_source,
         battery_reading,
         last_battery_poll: SystemTime::now(),
@@ -472,7 +508,7 @@ fn run_session() -> Result<()> {
     layer_surface.set_anchor(edge_anchor | Anchor::Left | Anchor::Right);
     layer_surface.set_exclusive_zone(state.cfg.height as i32);
     // Opt into fractional scaling so the bar renders crisp on HiDPI outputs.
-    if let (Some(vp), Some(mgr)) = (&viewporter, &fractional_mgr) {
+    if let (Some(vp), Some(mgr)) = (&state.viewporter, &fractional_mgr) {
         state.viewport = Some(vp.get_viewport(&surface, &qh, ()));
         state.fractional = Some(mgr.get_fractional_scale(&surface, &qh, ()));
     }
@@ -741,6 +777,25 @@ fn event_loop(
         // 3. Dispatch any events we got from `read()` above OR events
         //    that wayland-rs already had buffered (prepare_read returned None).
         queue.dispatch_pending(state)?;
+
+        // 4. Tray-menu commands queued by the input handlers, executed here
+        //    where the D-Bus connection (`tray`) is in scope.
+        if let Some(idx) = state.pending_open_menu.take() {
+            open_tray_menu(state, qh, tray.as_mut(), idx);
+        }
+        if let Some(id) = state.pending_menu_click.take() {
+            if let (Some(t), Some(m)) = (tray.as_mut(), state.menu.as_ref()) {
+                let ti = m.tray_idx;
+                t.menu_clicked(ti, id);
+            }
+            if let Some(m) = state.menu.take() {
+                m.destroy();
+            }
+        }
+        if state.menu_dirty {
+            state.menu_dirty = false;
+            render_menu(state, qh);
+        }
     }
     Ok(())
 }
@@ -835,16 +890,16 @@ fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
 
 /// A reused `wl_shm` buffer: a tempfile-backed pool whose `wl_buffer` we
 /// re-attach every frame. Recreated only when the bar's dimensions change.
-struct BarBuffer {
+pub(crate) struct BarBuffer {
     /// Backing tempfile, mapped afresh each redraw. The compositor holds
     /// its own dup of this fd via the pool, so it stays valid for the
     /// buffer's lifetime.
-    tmp: std::fs::File,
+    pub(crate) tmp: std::fs::File,
     /// The attachable buffer. Destroying it releases the compositor-side
     /// pool mapping; we only do that when reallocating for a new size.
-    buffer: WlBuffer,
+    pub(crate) buffer: WlBuffer,
     /// Pixel dimensions this buffer was allocated for.
-    dims: (u32, u32),
+    pub(crate) dims: (u32, u32),
 }
 
 /// Compose the bar into its reused wl_buffer and attach it.
@@ -1030,22 +1085,33 @@ fn redraw(
                 .or(cap_chip_left)
                 .or(auto_chip_left)
                 .unwrap_or(clock_x);
-            let tray_icons: Vec<&icons::Icon> = t.icons().collect();
-            if tray_icons.is_empty() {
+            let tray_items: Vec<(usize, &icons::Icon)> = t.visible_items().collect();
+            if tray_items.is_empty() {
+                state.tray_icon_rects.clear();
                 None
             } else {
-                // Right-to-left so the cluster hugs the battery/clock.
+                // Right-to-left so the cluster hugs the battery/clock. Capture
+                // each icon's logical rect + item index so the pointer handler
+                // can open the matching menu on click.
+                let mut rects: Vec<(i32, i32, usize)> = Vec::with_capacity(tray_items.len());
                 let mut x = right_anchor - gap;
-                for icon in tray_icons.iter().rev() {
+                for (idx, icon) in tray_items.iter().rev() {
                     x -= icon.width as i32;
                     let y = (ph as i32 - icon.height as i32) / 2;
                     blit_icon(&mut mmap, pw, ph, x, y, icon);
+                    let lx = ((x as f64) / scale).round() as i32;
+                    let lw = ((icon.width as f64) / scale).round() as i32;
+                    rects.push((lx, lw, *idx));
                     x -= gap;
                 }
+                state.tray_icon_rects = rects;
                 Some(x)
             }
         }
-        None => None,
+        None => {
+            state.tray_icon_rects.clear();
+            None
+        }
     };
 
     // Far left: workspace cluster. Active box in accent color, the rest
@@ -1150,7 +1216,7 @@ fn redraw(
 
 /// Total horizontal advance for rendering `text` at `size_px`. Doesn't
 /// account for kerning, but neither does our renderer — values match.
-fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
+pub(crate) fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
     let mut w = 0.0_f32;
     for ch in text.chars() {
         w += font.metrics(ch, size_px).advance_width;
@@ -1298,7 +1364,7 @@ fn draw_window_list(
 }
 
 /// Solid-color rectangle (no alpha blending). Clamped to the buffer.
-fn fill_rect(
+pub(crate) fn fill_rect(
     mmap: &mut MmapMut,
     dst_w: u32,
     dst_h: u32,
@@ -1324,7 +1390,7 @@ fn fill_rect(
     }
 }
 
-fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
+pub(crate) fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
     let bytes = color.to_ne_bytes();
     let stride = w as usize * 4;
     let row = bytes.repeat(w as usize);
@@ -1434,7 +1500,7 @@ fn blit_icon(
 
 /// Blit a single-channel coverage bitmap as `color`, alpha-blending against
 /// whatever ARGB is already in the destination.
-fn blit_alpha(
+pub(crate) fn blit_alpha(
     mmap: &mut MmapMut,
     dst_w: u32,
     dst_h: u32,
@@ -1501,25 +1567,52 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // Route strictly by proxy identity. A configure/closed can arrive for a
+        // menu surface we just destroyed; acking a dead object is a protocol
+        // error that severs the whole bar, so events for neither the live bar
+        // nor the current menu are ignored (NOT acked).
+        let is_bar = state.layer_surface.as_ref() == Some(layer_surface);
+        let is_menu = state
+            .menu
+            .as_ref()
+            .is_some_and(|m| &m.layer_surface == layer_surface);
         match event {
             zwlr_layer_surface_v1::Event::Configure {
                 serial,
                 width,
                 height,
             } => {
-                layer_surface.ack_configure(serial);
-                let w = if width == 0 { 1 } else { width };
-                let h = if height == 0 {
-                    state.cfg.height
-                } else {
-                    height
-                };
-                state.size = Some((w, h));
-                state.dirty = true;
+                if is_menu {
+                    layer_surface.ack_configure(serial);
+                    if let Some(m) = state.menu.as_mut() {
+                        let (ww, wh) = m.want_size();
+                        let w = if width == 0 { ww } else { width };
+                        let h = if height == 0 { wh } else { height };
+                        m.set_size(w, h);
+                    }
+                    state.menu_dirty = true;
+                } else if is_bar {
+                    layer_surface.ack_configure(serial);
+                    let w = if width == 0 { 1 } else { width };
+                    let h = if height == 0 {
+                        state.cfg.height
+                    } else {
+                        height
+                    };
+                    state.size = Some((w, h));
+                    state.dirty = true;
+                }
+                // else: stale surface (destroyed menu) — ignore, don't ack.
             }
             zwlr_layer_surface_v1::Event::Closed => {
-                tracing::info!("layer surface closed by compositor; exiting");
-                state.running = false;
+                if is_menu {
+                    if let Some(m) = state.menu.take() {
+                        m.destroy();
+                    }
+                } else if is_bar {
+                    tracing::info!("layer surface closed by compositor; exiting");
+                    state.running = false;
+                }
             }
             _ => {}
         }
@@ -1664,6 +1757,20 @@ impl Dispatch<WlSeat, ()> for State {
                     tracing::debug!("seat dropped pointer capability");
                 }
             }
+
+            // Keyboard: bound only so the tray menu can receive key nav and,
+            // crucially, a `Leave` when focus moves away (= click-elsewhere
+            // dismissal). The bar itself never requests keyboard focus.
+            let has_kbd = caps.contains(Capability::Keyboard);
+            if has_kbd && state.keyboard.is_none() {
+                state.keyboard = Some(seat.get_keyboard(qh, ()));
+                tracing::debug!("seat advertised keyboard; bound");
+            } else if !has_kbd {
+                if let Some(k) = state.keyboard.take() {
+                    k.release();
+                    tracing::debug!("seat dropped keyboard capability");
+                }
+            }
         }
     }
 }
@@ -1678,34 +1785,88 @@ impl Dispatch<WlPointer, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { surface_x, .. } => {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 state.pointer_x = Some(surface_x);
+                state.pointer_y = Some(surface_y);
+                state.pointer_on_menu = state.menu.as_ref().is_some_and(|m| m.owns(&surface));
+                if state.pointer_on_menu {
+                    if let Some(m) = state.menu.as_mut() {
+                        if m.hover_at(surface_y) {
+                            state.menu_dirty = true;
+                        }
+                    }
+                }
             }
-            wl_pointer::Event::Motion { surface_x, .. } => {
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 state.pointer_x = Some(surface_x);
+                state.pointer_y = Some(surface_y);
+                if state.pointer_on_menu {
+                    if let Some(m) = state.menu.as_mut() {
+                        if m.hover_at(surface_y) {
+                            state.menu_dirty = true;
+                        }
+                    }
+                }
             }
             wl_pointer::Event::Leave { .. } => {
                 state.pointer_x = None;
+                state.pointer_y = None;
+                state.pointer_on_menu = false;
             }
             wl_pointer::Event::Button {
                 button,
                 state: WEnum::Value(ButtonState::Pressed),
                 ..
             } => {
-                // BTN_LEFT == 0x110 (Linux input event code). Right /
-                // middle clicks are ignored for now — could be wired to
-                // close / move-to-workspace later.
+                // BTN_LEFT == 0x110 (Linux input event code).
                 const BTN_LEFT: u32 = 0x110;
                 if button != BTN_LEFT {
                     return;
                 }
+
+                // Click inside the open tray menu: resolve the hovered row.
+                if state.pointer_on_menu {
+                    let action = state.menu.as_ref().map(|m| m.activate_hover());
+                    if let Some(action) = action {
+                        apply_menu_action(state, action);
+                    }
+                    return;
+                }
+
                 let Some(x) = state.pointer_x else {
                     return;
                 };
                 let xi = x.floor() as i32;
-                // Hit-test against the entry rects captured during the
-                // last redraw. Linear scan — count is small (<20 in
-                // realistic use).
+
+                // Tray icons sit on the right; a hit opens that item's menu.
+                if let Some((_, _, idx)) = state
+                    .tray_icon_rects
+                    .iter()
+                    .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+                    .copied()
+                {
+                    // Clicking the icon whose menu is already open toggles it
+                    // shut; otherwise (re)open for this item.
+                    if state.menu.as_ref().is_some_and(|m| m.tray_idx == idx) {
+                        if let Some(m) = state.menu.take() {
+                            m.destroy();
+                        }
+                    } else {
+                        state.pending_open_menu = Some(idx);
+                    }
+                    return;
+                }
+
+                // Otherwise hit-test the window list (left/middle) → focus.
                 let hit = state
                     .window_entry_rects
                     .iter()
@@ -1720,6 +1881,146 @@ impl Dispatch<WlPointer, ()> for State {
             _ => {}
         }
     }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _kbd: &WlKeyboard,
+        event: <WlKeyboard as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(KeyState::Pressed),
+                ..
+            } => {
+                if let Some(action) = state.menu.as_mut().map(|m| m.key(key)) {
+                    apply_menu_action(state, action);
+                    state.menu_dirty = true;
+                }
+            }
+            // Focus moved off the menu (the user clicked elsewhere): dismiss.
+            // The guard ensures a stale Leave for an already-replaced menu
+            // surface can't tear down the current one.
+            wl_keyboard::Event::Leave { surface, .. }
+                if state.menu.as_ref().is_some_and(|m| m.owns(&surface)) =>
+            {
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Apply a resolved menu [`Action`]. UI-only variants mutate `State.menu`
+/// directly; `Activate` is deferred to the loop (it needs the D-Bus conn).
+fn apply_menu_action(state: &mut State, action: menu::Action) {
+    match action {
+        menu::Action::None => {}
+        menu::Action::Close => {
+            if let Some(m) = state.menu.take() {
+                m.destroy();
+            }
+        }
+        menu::Action::Activate(id) => {
+            state.pending_menu_click = Some(id);
+        }
+        menu::Action::NavInto(id) => {
+            let fs = state.cfg.font_size;
+            if let Some(m) = state.menu.as_mut() {
+                m.nav_into(id);
+                m.renavigate(&state.font, fs);
+            }
+            state.menu_dirty = true;
+        }
+        menu::Action::NavBack => {
+            let fs = state.cfg.font_size;
+            let mut close = false;
+            if let Some(m) = state.menu.as_mut() {
+                if m.nav_back() {
+                    m.renavigate(&state.font, fs);
+                } else {
+                    close = true;
+                }
+            }
+            if close {
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+            }
+            state.menu_dirty = true;
+        }
+    }
+}
+
+/// Render the open tray menu into its buffer. Split-borrow over `State`:
+/// `state.menu` (mut) and the read-only draw inputs are disjoint fields.
+fn render_menu(state: &mut State, qh: &QueueHandle<State>) {
+    let scale = state.scale;
+    let font_size = state.cfg.font_size;
+    let bg = state.cfg.background;
+    let fg = state.cfg.foreground;
+    let shm = state.shm.clone();
+    if let Some(menu) = state.menu.as_mut() {
+        if let Err(e) = menu.render(qh, &shm, &state.font, scale, font_size, bg, fg) {
+            tracing::warn!(error = ?e, "tray menu render failed");
+        }
+    }
+}
+
+/// Fetch + open the context menu for tray item `idx` (or fall back to an
+/// `Activate` for menu-less items). Runs in the loop where `tray` is in scope.
+fn open_tray_menu(
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    tray: Option<&mut tray::Tray>,
+    idx: usize,
+) {
+    if let Some(m) = state.menu.take() {
+        m.destroy();
+    }
+    let Some(t) = tray else {
+        return;
+    };
+    let anchor_x = state
+        .tray_icon_rects
+        .iter()
+        .find(|(_, _, i)| *i == idx)
+        .map(|(x, _, _)| *x)
+        .unwrap_or(0);
+    let (output_w, bar_h) = state.size.unwrap_or((0, state.cfg.height));
+
+    if t.has_menu(idx) {
+        if let Some(root) = t.fetch_menu(idx) {
+            let m = menu::Menu::open(
+                &state.compositor,
+                &state.layer_shell,
+                state.viewporter.as_ref(),
+                qh,
+                root,
+                idx,
+                anchor_x,
+                output_w,
+                bar_h,
+                state.cfg.position,
+                &state.font,
+                state.cfg.font_size,
+            );
+            tracing::debug!(idx, anchor_x, "tray menu opened");
+            state.menu = Some(m);
+            state.menu_dirty = true;
+            return;
+        }
+    }
+    // No usable dbusmenu — give the item an Activate so left-click does
+    // *something* (some items toggle visibility / raise a window).
+    t.activate(idx, 0, 0);
 }
 
 #[cfg(test)]

@@ -15,11 +15,14 @@
 //! `shoestring-notify` does (see `feedback_rustbus_dispatch_loop`): poll the
 //! D-Bus fd, then `refill_all` + drain `try_get_call` / `try_get_signal`.
 
+use std::collections::HashMap;
 use std::os::fd::{AsRawFd, RawFd};
+use std::time::Duration;
 
 use rustbus::connection::ll_conn::force_finish_on_error;
 use rustbus::connection::Timeout;
 use rustbus::message_builder::{MarshalledMessage, MessageBuilder, MessageType};
+use rustbus::wire::unmarshal::traits::Variant;
 use rustbus::{peer, standard_messages, RpcConn};
 
 const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
@@ -29,6 +32,28 @@ const ITEM_IFACE: &str = "org.kde.StatusNotifierItem";
 const ITEM_PATH_DEFAULT: &str = "/StatusNotifierItem";
 const PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
 const INTROSPECT_IFACE: &str = "org.freedesktop.DBus.Introspectable";
+/// Context-menu protocol exposed by appindicator/ayatana items (nm-applet,
+/// blueman): the item's `Menu` property is an object path implementing this.
+const DBUSMENU_IFACE: &str = "com.canonical.dbusmenu";
+
+/// One node of a `com.canonical.dbusmenu` layout, decoded into an owned tree
+/// for rendering. The root node's `children` are the top-level entries.
+#[derive(Debug, Clone)]
+pub struct MenuNode {
+    /// dbusmenu item id, echoed back in `Event`/`AboutToShow`.
+    pub id: i32,
+    /// Display label, mnemonic underscores stripped.
+    pub label: String,
+    pub enabled: bool,
+    pub visible: bool,
+    /// `type == "separator"` — drawn as a divider, never selectable.
+    pub separator: bool,
+    /// `children-display == "submenu"` — selecting it descends a level.
+    pub has_submenu: bool,
+    /// `Some(checked)` for checkmark/radio items; `None` for plain items.
+    pub toggle: Option<bool>,
+    pub children: Vec<MenuNode>,
+}
 
 /// Minimal introspection so KDE/Qt items (which introspect before registering)
 /// see a real watcher interface.
@@ -55,6 +80,9 @@ struct Item {
     icon_name: String,
     /// Item-private icon dirs from `IconThemePath`, searched first.
     theme_dirs: Vec<std::path::PathBuf>,
+    /// `com.canonical.dbusmenu` object path from the item's `Menu` property,
+    /// if it exposes one. Drives the click-to-open context menu.
+    menu_path: Option<String>,
     /// Decoded icon, lazily filled by [`Tray::ensure_icons`] at the bar's
     /// current pixel size; `icon_px` records that size so a bar resize
     /// re-decodes.
@@ -266,7 +294,12 @@ impl Tray {
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from)
             .collect();
-        tracing::info!(%service, %id, %icon_name, "tray: item registered");
+        // The `Menu` property is a D-Bus object path (sig 'o', not 's'); a
+        // missing/empty/"/" value means the item has no context menu.
+        let menu_path = self
+            .item_get_objpath(&service, &path, "Menu")
+            .filter(|p| !p.is_empty() && p != "/");
+        tracing::info!(%service, %id, %icon_name, has_menu = menu_path.is_some(), "tray: item registered");
 
         // Replace any prior registration from the same service/path.
         self.items
@@ -276,6 +309,7 @@ impl Tray {
             path,
             icon_name,
             theme_dirs,
+            menu_path,
             icon: None,
             icon_px: 0,
         });
@@ -301,9 +335,133 @@ impl Tray {
         }
     }
 
-    /// Decoded item icons in registration order, for the bar to blit.
-    pub fn icons(&self) -> impl Iterator<Item = &crate::icons::Icon> {
-        self.items.iter().filter_map(|i| i.icon.as_ref())
+    /// Visible tray items (those with a decoded icon) as `(item_index, &Icon)`
+    /// in registration order. Same set/order as [`Tray::icons`], but carrying
+    /// the index so the bar can map a click back to the item for menu actions.
+    pub fn visible_items(&self) -> impl Iterator<Item = (usize, &crate::icons::Icon)> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| it.icon.as_ref().map(|ic| (i, ic)))
+    }
+
+    /// Does the item at `item_idx` expose a context menu?
+    pub fn has_menu(&self, item_idx: usize) -> bool {
+        self.items
+            .get(item_idx)
+            .is_some_and(|i| i.menu_path.is_some())
+    }
+
+    /// Fetch + decode the item's `com.canonical.dbusmenu` layout into an owned
+    /// tree (root node; its `children` are the top-level entries). Blocking;
+    /// `None` if the item has no menu or the call fails/times out.
+    pub fn fetch_menu(&mut self, item_idx: usize) -> Option<MenuNode> {
+        let item = self.items.get(item_idx)?;
+        let service = item.service.clone();
+        let menu_path = item.menu_path.clone()?;
+
+        // Some items only populate their layout in response to AboutToShow.
+        self.about_to_show(&service, &menu_path, 0);
+
+        // GetLayout(parentId=0, recursionDepth=-1 [all], propertyNames=[] [all])
+        //   -> (u revision, (i a{sv} av) layout)
+        let mut call = MessageBuilder::new()
+            .call("GetLayout")
+            .at(service)
+            .on(menu_path)
+            .with_interface(DBUSMENU_IFACE)
+            .build();
+        call.body.push_param(0i32).ok()?;
+        call.body.push_param(-1i32).ok()?;
+        call.body.push_param(Vec::<String>::new()).ok()?;
+        let serial = self.rpc.send_message(&mut call).ok()?.write_all().ok()?;
+        let resp = self
+            .rpc
+            .wait_response(serial, Timeout::Duration(Duration::from_millis(800)))
+            .ok()?;
+        if resp.typ == MessageType::Error {
+            return None;
+        }
+        let mut p = resp.body.parser();
+        let _revision: u32 = p.get().ok()?;
+        let layout: (i32, HashMap<String, Variant>, Vec<Variant>) = p.get().ok()?;
+        Some(parse_menu_node(layout))
+    }
+
+    /// Tell the item we're about to show a (sub)menu so it can refresh it.
+    /// Best-effort: we wait briefly for the reply but ignore its `needUpdate`.
+    fn about_to_show(&mut self, service: &str, path: &str, id: i32) {
+        let mut call = MessageBuilder::new()
+            .call("AboutToShow")
+            .at(service.to_string())
+            .on(path.to_string())
+            .with_interface(DBUSMENU_IFACE)
+            .build();
+        if call.body.push_param(id).is_err() {
+            return;
+        }
+        let serial = {
+            let Ok(ctx) = self.rpc.send_message(&mut call) else {
+                return;
+            };
+            let Ok(s) = ctx.write_all() else { return };
+            s
+        };
+        let _ = self
+            .rpc
+            .wait_response(serial, Timeout::Duration(Duration::from_millis(400)));
+    }
+
+    /// Send a `clicked` Event for dbusmenu item `id` of tray item `item_idx`.
+    /// This is what makes a menu entry actually do its thing.
+    pub fn menu_clicked(&mut self, item_idx: usize, id: i32) {
+        let Some(item) = self.items.get(item_idx) else {
+            return;
+        };
+        let Some(menu_path) = item.menu_path.clone() else {
+            return;
+        };
+        let service = item.service.clone();
+        // Event(id i, eventId s, data v, timestamp u)
+        let mut call = MessageBuilder::new()
+            .call("Event")
+            .at(service)
+            .on(menu_path)
+            .with_interface(DBUSMENU_IFACE)
+            .build();
+        let _ = call.body.push_param(id);
+        let _ = call.body.push_param("clicked");
+        let _ = call.body.push_variant(0i32);
+        let _ = call.body.push_param(0u32);
+        // Drain the (empty) reply so it doesn't accumulate in the response map.
+        let serial = {
+            let Ok(ctx) = self.rpc.send_message(&mut call) else {
+                return;
+            };
+            let Ok(s) = ctx.write_all() else { return };
+            s
+        };
+        let _ = self
+            .rpc
+            .wait_response(serial, Timeout::Duration(Duration::from_millis(300)));
+    }
+
+    /// `org.kde.StatusNotifierItem.Activate(x, y)` — the left-click default for
+    /// items with no menu (some toggle visibility / raise a window). Best-effort.
+    pub fn activate(&mut self, item_idx: usize, x: i32, y: i32) {
+        let Some(item) = self.items.get(item_idx) else {
+            return;
+        };
+        let (service, path) = (item.service.clone(), item.path.clone());
+        let mut call = MessageBuilder::new()
+            .call("Activate")
+            .at(service)
+            .on(path)
+            .with_interface(ITEM_IFACE)
+            .build();
+        let _ = call.body.push_param(x);
+        let _ = call.body.push_param(y);
+        let _ = self.send(call);
     }
 
     /// Re-fetch the icon name for the item owned by `service` and drop its
@@ -381,9 +539,101 @@ impl Tray {
             .and_then(|v| v.get::<String>().ok())
     }
 
+    /// Like [`Tray::item_get_string`] but for a D-Bus *object path* property
+    /// (signature `o`, e.g. the item's `Menu`). A `String`-typed get would
+    /// reject the variant on signature mismatch, so we read `ObjectPath`.
+    fn item_get_objpath(&mut self, service: &str, path: &str, prop: &str) -> Option<String> {
+        let mut call = MessageBuilder::new()
+            .call("Get")
+            .at(service.to_string())
+            .on(path.to_string())
+            .with_interface(PROPS_IFACE)
+            .build();
+        call.body.push_param(ITEM_IFACE).ok()?;
+        call.body.push_param(prop).ok()?;
+        let serial = self.rpc.send_message(&mut call).ok()?.write_all().ok()?;
+        let resp = self
+            .rpc
+            .wait_response(serial, Timeout::Duration(Duration::from_millis(500)))
+            .ok()?;
+        if resp.typ == MessageType::Error {
+            return None;
+        }
+        resp.body
+            .parser()
+            .get::<Variant>()
+            .ok()
+            .and_then(|v| v.get::<rustbus::wire::ObjectPath<String>>().ok())
+            .map(|op| op.as_ref().to_string())
+    }
+
     fn send(&mut self, mut msg: MarshalledMessage) -> Result<(), ()> {
         send(&mut self.rpc, &mut msg)
     }
+}
+
+/// Decode one `(i a{sv} av)` dbusmenu layout node (and its descendants) into an
+/// owned [`MenuNode`]. Children are variant-wrapped structs of the same shape.
+fn parse_menu_node(node: (i32, HashMap<String, Variant>, Vec<Variant>)) -> MenuNode {
+    let (id, props, children) = node;
+    let get_str = |k: &str| props.get(k).and_then(|v| v.get::<String>().ok());
+    let get_bool = |k: &str, default: bool| {
+        props
+            .get(k)
+            .and_then(|v| v.get::<bool>().ok())
+            .unwrap_or(default)
+    };
+
+    let separator = get_str("type").as_deref() == Some("separator");
+    let has_submenu = get_str("children-display").as_deref() == Some("submenu");
+    let toggle = match get_str("toggle-type").as_deref() {
+        Some("") | None => None,
+        Some(_) => {
+            let st = props
+                .get("toggle-state")
+                .and_then(|v| v.get::<i32>().ok())
+                .unwrap_or(0);
+            Some(st > 0)
+        }
+    };
+    let kids = children
+        .into_iter()
+        .filter_map(|cv| {
+            cv.get::<(i32, HashMap<String, Variant>, Vec<Variant>)>()
+                .ok()
+                .map(parse_menu_node)
+        })
+        .collect();
+
+    MenuNode {
+        id,
+        label: strip_mnemonics(&get_str("label").unwrap_or_default()),
+        enabled: get_bool("enabled", true),
+        visible: get_bool("visible", true),
+        separator,
+        has_submenu,
+        toggle,
+        children: kids,
+    }
+}
+
+/// Strip GTK-style mnemonic markers: a lone `_` flags the next char as an
+/// accelerator and is dropped; `__` is a literal underscore.
+fn strip_mnemonics(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '_' {
+            if chars.peek() == Some(&'_') {
+                out.push('_');
+                chars.next();
+            }
+            // otherwise: drop the marker
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `RequestName` with DO_NOT_QUEUE; `Ok(true)` iff we became the primary owner.
