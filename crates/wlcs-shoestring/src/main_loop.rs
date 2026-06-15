@@ -138,6 +138,15 @@ pub fn run(channel: Channel<WlcsEvent>) {
             RUNNING.with(|r| r.set(false));
         } else {
             state.space.refresh();
+            // Re-evaluate the surface under a *stationary* pointer after this
+            // dispatch batch (surfaces that mapped/unmapped/moved owe the
+            // client enter/leave/motion). The real binary does this from its
+            // event-loop callback in main.rs; the harness has its own loop, so
+            // it calls the same shared method here — WlcsEvent::PositionWindow
+            // teleports a window under the pointer without any client motion,
+            // which the WLCS ClientSurfaceEvents / SurfacePointerMotion family
+            // checks for.
+            state.refresh_pointer_focus();
             state.popups.cleanup();
             state.display_handle.flush_clients().unwrap();
         }
@@ -181,7 +190,7 @@ fn handle_event(event: WlcsEvent, state: &mut ShoestringWm) {
             let ptr = state.seat.get_pointer().unwrap();
             ptr.motion(
                 state,
-                under,
+                under.clone(),
                 &MotionEvent {
                     location,
                     serial,
@@ -189,6 +198,10 @@ fn handle_event(event: WlcsEvent, state: &mut ShoestringWm) {
                 },
             );
             ptr.frame(state);
+            // Keep the focus cache in sync with what the client just saw, so
+            // the per-iteration refresh_pointer_focus() (called from the run
+            // loop) doesn't re-send this motion as a phantom event.
+            state.last_pointer_focus = under;
         }
         WlcsEvent::PointerMoveRelative { delta, .. } => {
             let ptr = state.seat.get_pointer().unwrap();
@@ -208,7 +221,7 @@ fn handle_event(event: WlcsEvent, state: &mut ShoestringWm) {
             );
             ptr.relative_motion(
                 state,
-                under,
+                under.clone(),
                 &RelativeMotionEvent {
                     delta,
                     delta_unaccel: delta,
@@ -216,6 +229,7 @@ fn handle_event(event: WlcsEvent, state: &mut ShoestringWm) {
                 },
             );
             ptr.frame(state);
+            state.last_pointer_focus = under;
         }
         WlcsEvent::PointerButtonDown { button_id, .. } => {
             let serial = SCOUNTER.next_serial();

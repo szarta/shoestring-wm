@@ -922,8 +922,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shoestring-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "regex",
  "serde",
  "thiserror",
  "toml",
@@ -931,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-ipc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -939,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-wm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bitflags",
