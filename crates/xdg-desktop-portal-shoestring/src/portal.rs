@@ -69,11 +69,15 @@ rustbus::dbus_variant_sig!(StreamProp, U32 => u32);
 rustbus::dbus_variant_sig!(PortalValue, U32 => u32; Streams => StreamList);
 
 /// Connect to the session bus and claim [`BUS_NAME`].
+///
+/// `DO_NOT_QUEUE` without `REPLACE_EXISTING`: if an instance already owns the
+/// name (e.g. the session autostarted us and the portal frontend then tries to
+/// D-Bus-activate a second copy), we don't steal it — we fail and exit, leaving
+/// the running instance in charge.
 pub fn acquire_bus() -> Result<RpcConn> {
     let mut rpc = RpcConn::session_conn(Timeout::Infinite).context("connect to session bus")?;
 
-    let flags = standard_messages::DBUS_NAME_FLAG_DO_NOT_QUEUE
-        | standard_messages::DBUS_NAME_FLAG_REPLACE_EXISTING;
+    let flags = standard_messages::DBUS_NAME_FLAG_DO_NOT_QUEUE;
     let serial = rpc
         .send_message(&mut standard_messages::request_name(BUS_NAME, flags))
         .context("send RequestName")?
