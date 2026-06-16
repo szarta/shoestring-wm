@@ -858,7 +858,16 @@ impl ShoestringWm {
                     }
 
                     match target {
-                        Some((window, _loc)) => self.focus_window(&window),
+                        // A window geometrically under the pointer is only the
+                        // real target if no Top/Overlay layer surface covers it.
+                        // Clicking a layer surface (tray menu, picker) that sits
+                        // above a window must not transfer focus to that window —
+                        // doing so yanked the menu's keyboard focus and made it
+                        // dismiss on its own clicks.
+                        Some((window, _loc)) if !self.overlay_layer_under(pos) => {
+                            self.focus_window(&window)
+                        }
+                        Some(_) => {}
                         None => {
                             // Only clear keyboard focus if nothing at all is
                             // under the pointer. A layer-shell surface (e.g.

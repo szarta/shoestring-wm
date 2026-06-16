@@ -1,8 +1,10 @@
 use smithay::{
     desktop::{
-        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, PopupKind,
-        PopupManager, Space, Window,
+        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Space,
+        Window, WindowSurfaceType,
     },
+    input::{pointer::Focus, Seat},
     reexports::wayland_server::protocol::{wl_output, wl_seat, wl_surface::WlSurface},
     utils::{Logical, Serial, Size},
     wayland::{
@@ -152,7 +154,42 @@ impl XdgShellHandler for ShoestringWm {
         _edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
     ) {
     }
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        // Wire the popup grab so menus (tray dbusmenus, app context menus)
+        // dismiss on click-outside and route keyboard/pointer correctly. Our
+        // keyboard/pointer focus type is `WlSurface`, so the popup's root
+        // surface (window or layer surface) IS the focus target — no enum
+        // mapping needed. Mirrors anvil's XdgShellHandler::grab.
+        let seat: Seat<Self> = Seat::from_resource(&seat).unwrap();
+        let kind = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&kind) else {
+            return;
+        };
+        let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else {
+            return;
+        };
+        if let Some(keyboard) = seat.get_keyboard() {
+            if keyboard.is_grabbed()
+                && !(keyboard.has_grab(serial)
+                    || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            keyboard.set_focus(self, grab.current_grab(), serial);
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = seat.get_pointer() {
+            if pointer.is_grabbed()
+                && !(pointer.has_grab(serial)
+                    || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
+    }
 }
 
 /// Size of the usable (non-exclusive) area on the output a freshly-mapped
@@ -224,29 +261,50 @@ impl ShoestringWm {
         let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
             return;
         };
-        let Some(window) = self
+
+        // Window-parented popup (app context menus): constrain within the
+        // output, relative to the owning window's position.
+        if let Some(window) = self
             .space
             .elements()
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &root))
-        else {
+        {
+            let Some(output) = self.space.outputs().next() else {
+                return;
+            };
+            let (Some(output_geo), Some(window_geo)) = (
+                self.space.output_geometry(output),
+                self.space.element_geometry(window),
+            ) else {
+                return;
+            };
+            let mut target = output_geo;
+            target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+            target.loc -= window_geo.loc;
+            popup.with_pending_state(|state| {
+                state.geometry = state.positioner.get_unconstrained_geometry(target);
+            });
             return;
-        };
-        let Some(output) = self.space.outputs().next() else {
-            return;
-        };
-        let Some(output_geo) = self.space.output_geometry(output) else {
-            return;
-        };
-        let Some(window_geo) = self.space.element_geometry(window) else {
-            return;
-        };
+        }
 
-        let mut target = output_geo;
-        target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
-        target.loc -= window_geo.loc;
-
-        popup.with_pending_state(|state| {
-            state.geometry = state.positioner.get_unconstrained_geometry(target);
-        });
+        // Layer-surface-parented popup (e.g. shoestring-bar's tray menu, via
+        // zwlr_layer_surface_v1.get_popup): constrain within the output the
+        // layer surface lives on, relative to the layer surface's position.
+        for output in self.space.outputs() {
+            let map = layer_map_for_output(output);
+            if let Some(layer) = map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL) {
+                let Some(output_geo) = self.space.output_geometry(output) else {
+                    return;
+                };
+                let layer_geo = map.layer_geometry(layer).unwrap_or_default();
+                let mut target = output_geo;
+                target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+                target.loc -= layer_geo.loc;
+                popup.with_pending_state(|state| {
+                    state.geometry = state.positioner.get_unconstrained_geometry(target);
+                });
+                return;
+            }
+        }
     }
 }

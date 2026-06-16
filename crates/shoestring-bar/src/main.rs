@@ -60,6 +60,12 @@ use wayland_protocols::wp::{
     },
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup::{self, XdgPopup},
+    xdg_positioner::XdgPositioner,
+    xdg_surface::{self, XdgSurface},
+    xdg_wm_base::{self, XdgWmBase},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
@@ -216,6 +222,12 @@ struct State {
     /// `wp_viewporter` manager, kept so the tray menu can give its own
     /// surface a viewport for HiDPI mapping. `None` if unsupported.
     viewporter: Option<WpViewporter>,
+    /// `xdg_wm_base`, for creating the tray menu's xdg_popup (parented to the
+    /// bar's layer surface) and its positioners.
+    xdg_wm_base: XdgWmBase,
+    /// Serial of the most recent pointer button press — needed as the grab
+    /// serial when opening the menu popup.
+    last_pointer_serial: u32,
     /// Bar-side keyboard, bound when the seat advertises the capability.
     /// Used only to drive + dismiss the tray menu (the bar itself takes
     /// no keyboard focus).
@@ -238,6 +250,9 @@ struct State {
     pending_open_menu: Option<usize>,
     /// dbusmenu id the loop should send a `clicked` event for, then dismiss.
     pending_menu_click: Option<i32>,
+    /// Submenu label the loop should fetch and descend into — submenu children
+    /// are populated lazily (and ids churn), so we re-query by label.
+    pending_menu_nav: Option<String>,
     /// Auto-detected battery source. `None` on systems with no
     /// recognised battery — the indicator is hidden entirely in that
     /// case so the bar layout doesn't reserve dead space.
@@ -371,6 +386,11 @@ fn run_session() -> Result<()> {
     let layer_shell: ZwlrLayerShellV1 = globals
         .bind(&qh, 1..=5, ())
         .context("zwlr_layer_shell_v1 missing (compositor doesn't support layer-shell?)")?;
+    // xdg_wm_base: needed to create the tray menu's xdg_popup (parented to the
+    // bar's layer surface via get_popup). Required for the menu to function.
+    let xdg_wm_base: XdgWmBase = globals
+        .bind(&qh, 1..=6, ())
+        .context("xdg_wm_base missing (compositor doesn't support xdg-shell?)")?;
     // Optional HiDPI globals: present under shoestring-wm.
     let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
     let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
@@ -477,6 +497,8 @@ fn run_session() -> Result<()> {
         pointer_x: None,
         window_entry_rects: Vec::new(),
         viewporter,
+        xdg_wm_base,
+        last_pointer_serial: 0,
         keyboard: None,
         pointer_y: None,
         pointer_on_menu: false,
@@ -485,6 +507,7 @@ fn run_session() -> Result<()> {
         menu_dirty: false,
         pending_open_menu: None,
         pending_menu_click: None,
+        pending_menu_nav: None,
         battery_source,
         battery_reading,
         last_battery_poll: SystemTime::now(),
@@ -790,6 +813,24 @@ fn event_loop(
             }
             if let Some(m) = state.menu.take() {
                 m.destroy();
+            }
+        }
+        if let Some(label) = state.pending_menu_nav.take() {
+            let ctx = state.menu.as_ref().map(|m| (m.tray_idx, m.path()));
+            if let (Some(t), Some((ti, mut path))) = (tray.as_mut(), ctx) {
+                path.push(label.clone());
+                match t.fetch_level(ti, &path) {
+                    Some(entries) => {
+                        tracing::debug!(%label, count = entries.len(), "tray submenu fetched");
+                        let fs = state.cfg.font_size;
+                        if let Some(m) = state.menu.as_mut() {
+                            m.push_level(label, entries);
+                            m.renavigate(&state.font, fs, qh);
+                        }
+                        state.menu_dirty = true;
+                    }
+                    None => tracing::warn!(%label, "tray submenu fetch failed"),
+                }
             }
         }
         if state.menu_dirty {
@@ -1567,52 +1608,26 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // Route strictly by proxy identity. A configure/closed can arrive for a
-        // menu surface we just destroyed; acking a dead object is a protocol
-        // error that severs the whole bar, so events for neither the live bar
-        // nor the current menu are ignored (NOT acked).
-        let is_bar = state.layer_surface.as_ref() == Some(layer_surface);
-        let is_menu = state
-            .menu
-            .as_ref()
-            .is_some_and(|m| &m.layer_surface == layer_surface);
+        // Only the bar is a layer surface now (the tray menu is an xdg_popup).
         match event {
             zwlr_layer_surface_v1::Event::Configure {
                 serial,
                 width,
                 height,
             } => {
-                if is_menu {
-                    layer_surface.ack_configure(serial);
-                    if let Some(m) = state.menu.as_mut() {
-                        let (ww, wh) = m.want_size();
-                        let w = if width == 0 { ww } else { width };
-                        let h = if height == 0 { wh } else { height };
-                        m.set_size(w, h);
-                    }
-                    state.menu_dirty = true;
-                } else if is_bar {
-                    layer_surface.ack_configure(serial);
-                    let w = if width == 0 { 1 } else { width };
-                    let h = if height == 0 {
-                        state.cfg.height
-                    } else {
-                        height
-                    };
-                    state.size = Some((w, h));
-                    state.dirty = true;
-                }
-                // else: stale surface (destroyed menu) — ignore, don't ack.
+                layer_surface.ack_configure(serial);
+                let w = if width == 0 { 1 } else { width };
+                let h = if height == 0 {
+                    state.cfg.height
+                } else {
+                    height
+                };
+                state.size = Some((w, h));
+                state.dirty = true;
             }
             zwlr_layer_surface_v1::Event::Closed => {
-                if is_menu {
-                    if let Some(m) = state.menu.take() {
-                        m.destroy();
-                    }
-                } else if is_bar {
-                    tracing::info!("layer surface closed by compositor; exiting");
-                    state.running = false;
-                }
+                tracing::info!("layer surface closed by compositor; exiting");
+                state.running = false;
             }
             _ => {}
         }
@@ -1711,7 +1726,70 @@ noop_dispatch!(
     WpViewporter,
     WpViewport,
     WpFractionalScaleManagerV1,
+    // xdg_positioner is request-only.
+    XdgPositioner,
 );
+
+impl Dispatch<XdgWmBase, ()> for State {
+    fn event(
+        _: &mut Self,
+        base: &XdgWmBase,
+        event: <XdgWmBase as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            base.pong(serial);
+        }
+    }
+}
+
+impl Dispatch<XdgSurface, ()> for State {
+    fn event(
+        state: &mut Self,
+        xs: &XdgSurface,
+        event: <XdgSurface as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The tray menu's xdg_surface: ack and (re)paint on the next loop tick.
+        if let xdg_surface::Event::Configure { serial } = event {
+            xs.ack_configure(serial);
+            state.menu_dirty = true;
+        }
+    }
+}
+
+impl Dispatch<XdgPopup, ()> for State {
+    fn event(
+        state: &mut Self,
+        _popup: &XdgPopup,
+        event: <XdgPopup as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            xdg_popup::Event::Configure { width, height, .. } => {
+                if width > 0 && height > 0 {
+                    if let Some(m) = state.menu.as_mut() {
+                        m.set_size(width as u32, height as u32);
+                    }
+                }
+                state.menu_dirty = true;
+            }
+            xdg_popup::Event::PopupDone => {
+                // Compositor dismissed the popup (click-outside / grab end).
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<WpFractionalScaleV1, ()> for State {
     fn event(
@@ -1782,7 +1860,7 @@ impl Dispatch<WlPointer, ()> for State {
         event: <WlPointer as Proxy>::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_pointer::Event::Enter {
@@ -1824,9 +1902,13 @@ impl Dispatch<WlPointer, ()> for State {
             }
             wl_pointer::Event::Button {
                 button,
+                serial,
                 state: WEnum::Value(ButtonState::Pressed),
                 ..
             } => {
+                // Remember the serial — opening the menu popup needs it for the
+                // xdg_popup grab to be honored.
+                state.last_pointer_serial = serial;
                 // BTN_LEFT == 0x110 (Linux input event code).
                 const BTN_LEFT: u32 = 0x110;
                 if button != BTN_LEFT {
@@ -1837,7 +1919,7 @@ impl Dispatch<WlPointer, ()> for State {
                 if state.pointer_on_menu {
                     let action = state.menu.as_ref().map(|m| m.activate_hover());
                     if let Some(action) = action {
-                        apply_menu_action(state, action);
+                        apply_menu_action(state, action, qh);
                     }
                     return;
                 }
@@ -1890,37 +1972,29 @@ impl Dispatch<WlKeyboard, ()> for State {
         event: <WlKeyboard as Proxy>::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_keyboard::Event::Key {
-                key,
-                state: WEnum::Value(KeyState::Pressed),
-                ..
-            } => {
-                if let Some(action) = state.menu.as_mut().map(|m| m.key(key)) {
-                    apply_menu_action(state, action);
-                    state.menu_dirty = true;
-                }
+        // Keyboard only drives the open menu (the popup grab gives it focus).
+        // Dismissal is the compositor's job now (xdg_popup popup_done), so we
+        // don't handle Leave here.
+        if let wl_keyboard::Event::Key {
+            key,
+            state: WEnum::Value(KeyState::Pressed),
+            ..
+        } = event
+        {
+            if let Some(action) = state.menu.as_mut().map(|m| m.key(key)) {
+                apply_menu_action(state, action, qh);
+                state.menu_dirty = true;
             }
-            // Focus moved off the menu (the user clicked elsewhere): dismiss.
-            // The guard ensures a stale Leave for an already-replaced menu
-            // surface can't tear down the current one.
-            wl_keyboard::Event::Leave { surface, .. }
-                if state.menu.as_ref().is_some_and(|m| m.owns(&surface)) =>
-            {
-                if let Some(m) = state.menu.take() {
-                    m.destroy();
-                }
-            }
-            _ => {}
         }
     }
 }
 
 /// Apply a resolved menu [`Action`]. UI-only variants mutate `State.menu`
 /// directly; `Activate` is deferred to the loop (it needs the D-Bus conn).
-fn apply_menu_action(state: &mut State, action: menu::Action) {
+fn apply_menu_action(state: &mut State, action: menu::Action, qh: &QueueHandle<State>) {
+    tracing::debug!(?action, "menu action");
     match action {
         menu::Action::None => {}
         menu::Action::Close => {
@@ -1931,20 +2005,17 @@ fn apply_menu_action(state: &mut State, action: menu::Action) {
         menu::Action::Activate(id) => {
             state.pending_menu_click = Some(id);
         }
-        menu::Action::NavInto(id) => {
-            let fs = state.cfg.font_size;
-            if let Some(m) = state.menu.as_mut() {
-                m.nav_into(id);
-                m.renavigate(&state.font, fs);
-            }
-            state.menu_dirty = true;
+        menu::Action::NavInto(label) => {
+            // Deferred: descending fetches the submenu (lazy population), which
+            // needs the D-Bus connection that lives in the loop, not here.
+            state.pending_menu_nav = Some(label);
         }
         menu::Action::NavBack => {
             let fs = state.cfg.font_size;
             let mut close = false;
             if let Some(m) = state.menu.as_mut() {
-                if m.nav_back() {
-                    m.renavigate(&state.font, fs);
+                if m.pop_level() {
+                    m.renavigate(&state.font, fs, qh);
                 } else {
                     close = true;
                 }
@@ -1988,39 +2059,49 @@ fn open_tray_menu(
     let Some(t) = tray else {
         return;
     };
-    let anchor_x = state
+    // Anchor rect = the clicked icon's rect in the bar's surface-local coords
+    // (full bar height vertically). The compositor positions the popup against it.
+    let (icon_x, icon_w) = state
         .tray_icon_rects
         .iter()
         .find(|(_, _, i)| *i == idx)
-        .map(|(x, _, _)| *x)
-        .unwrap_or(0);
-    let (output_w, bar_h) = state.size.unwrap_or((0, state.cfg.height));
+        .map(|(x, w, _)| (*x, *w))
+        .unwrap_or((0, 1));
+    let bar_h = state.size.map(|(_, h)| h).unwrap_or(state.cfg.height) as i32;
+    let anchor_rect = (icon_x, 0, icon_w, bar_h);
 
-    if t.has_menu(idx) {
-        if let Some(root) = t.fetch_menu(idx) {
-            let m = menu::Menu::open(
-                &state.compositor,
-                &state.layer_shell,
-                state.viewporter.as_ref(),
-                qh,
-                root,
-                idx,
-                anchor_x,
-                output_w,
-                bar_h,
-                state.cfg.position,
-                &state.font,
-                state.cfg.font_size,
-            );
-            tracing::debug!(idx, anchor_x, "tray menu opened");
-            state.menu = Some(m);
-            state.menu_dirty = true;
-            return;
-        }
+    if !t.has_menu(idx) {
+        // No usable dbusmenu — Activate so left-click still does something.
+        t.activate(idx, 0, 0);
+        return;
     }
-    // No usable dbusmenu — give the item an Activate so left-click does
-    // *something* (some items toggle visibility / raise a window).
-    t.activate(idx, 0, 0);
+    let Some(entries) = t.fetch_level(idx, &[]) else {
+        return;
+    };
+    let Some(seat) = state.seat.as_ref() else {
+        return;
+    };
+    let Some(bar_layer) = state.layer_surface.as_ref() else {
+        return;
+    };
+    let m = menu::Menu::open(
+        &state.compositor,
+        &state.xdg_wm_base,
+        bar_layer,
+        state.viewporter.as_ref(),
+        qh,
+        entries,
+        idx,
+        anchor_rect,
+        state.cfg.position,
+        seat,
+        state.last_pointer_serial,
+        &state.font,
+        state.cfg.font_size,
+    );
+    tracing::debug!(idx, ?anchor_rect, "tray menu opened");
+    state.menu = Some(m);
+    state.menu_dirty = true;
 }
 
 #[cfg(test)]

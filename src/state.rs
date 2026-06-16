@@ -702,6 +702,36 @@ impl ShoestringWm {
         None
     }
 
+    /// True if an **Overlay**- or **Top**-layer surface sits under `pos`, above
+    /// the window stack. Such a click belongs to that layer surface (a tray
+    /// menu, the region picker), so focusing a window it merely overlaps would
+    /// wrongly steal the layer surface's keyboard focus — see the click-to-focus
+    /// path in [`crate::input`].
+    pub fn overlay_layer_under(&self, pos: Point<f64, Logical>) -> bool {
+        use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
+
+        let Some((output, geo)) = self.space.outputs().find_map(|o| {
+            self.space
+                .output_geometry(o)
+                .filter(|g| g.to_f64().contains(pos))
+                .map(|g| (o.clone(), g))
+        }) else {
+            return false;
+        };
+        let local = pos - geo.loc.to_f64();
+        let map = layer_map_for_output(&output);
+        for layer in [WlrLayer::Overlay, WlrLayer::Top] {
+            if let Some(ls) = map.layer_under(layer, local) {
+                let layer_loc = map.layer_geometry(ls).map(|g| g.loc).unwrap_or_default();
+                let inner = local - layer_loc.to_f64();
+                if ls.surface_under(inner, WindowSurfaceType::ALL).is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Re-evaluate the surface under the pointer at its *current* location and,
     /// if it changed, deliver pointer enter/leave/motion.
     ///

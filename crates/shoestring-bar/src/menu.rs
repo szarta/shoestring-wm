@@ -20,6 +20,7 @@ use memmap2::MmapMut;
 use wayland_client::{
     protocol::{
         wl_compositor::WlCompositor,
+        wl_seat::WlSeat,
         wl_shm::{Format, WlShm},
         wl_surface::WlSurface,
     },
@@ -28,10 +29,13 @@ use wayland_client::{
 use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
-use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup::XdgPopup,
+    xdg_positioner::{Anchor, ConstraintAdjustment, Gravity, XdgPositioner},
+    xdg_surface::XdgSurface,
+    xdg_wm_base::XdgWmBase,
 };
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
 
 use crate::config::Position;
 use crate::tray::MenuNode;
@@ -57,7 +61,7 @@ const KEY_RIGHT: u32 = 106;
 /// What a click / keypress resolved to. The bar's input handlers apply the
 /// UI-only variants directly to `State.menu`, and queue the tray ones (which
 /// need the D-Bus connection that lives outside `State`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Nothing actionable (e.g. clicked a separator or disabled row).
     None,
@@ -65,8 +69,8 @@ pub enum Action {
     Close,
     /// Pop one submenu level.
     NavBack,
-    /// Descend into the submenu with this dbusmenu id.
-    NavInto(i32),
+    /// Descend into the submenu with this label (ids churn — see [`crate::tray`]).
+    NavInto(String),
     /// Send a `clicked` event for this dbusmenu id, then dismiss.
     Activate(i32),
 }
@@ -91,92 +95,114 @@ struct Row {
 
 pub struct Menu {
     pub surface: WlSurface,
-    pub layer_surface: ZwlrLayerSurfaceV1,
+    xdg_surface: XdgSurface,
+    xdg_popup: XdgPopup,
+    /// `xdg_wm_base`, kept so submenu navigation can build a fresh positioner
+    /// for `xdg_popup.reposition`.
+    wm_base: XdgWmBase,
     viewport: Option<WpViewport>,
     buffer: Option<BarBuffer>,
-    /// Acked size from the compositor configure (logical). Render no-ops until set.
+    /// Size from the compositor's `xdg_popup.configure` (logical). Render
+    /// no-ops until the first configure arrives.
     size: Option<(u32, u32)>,
-    /// Size we asked for via `set_size` (logical); also the basis for hit-tests.
+    /// Size we request via the positioner (logical); also the hit-test basis.
     want_size: (u32, u32),
     /// Which tray item (index into `Tray.items`) this menu belongs to.
     pub tray_idx: usize,
-    /// Full fetched tree; `root.children` are the top-level entries.
-    root: MenuNode,
-    /// Submenu path (dbusmenu ids) we've descended into.
-    nav: Vec<i32>,
+    /// Entries at the level currently displayed.
+    current: Vec<MenuNode>,
+    /// Saved parent levels, innermost last — restored on "Back".
+    stack: Vec<Vec<MenuNode>>,
+    /// Submenu labels descended into (depth == `stack.len()`); the fetch context
+    /// for re-querying a level with current ids (see [`crate::tray::Tray::fetch_level`]).
+    path: Vec<String>,
     /// Display rows for the current level, rebuilt on every (re)layout.
     rows: Vec<Row>,
     /// Currently highlighted row index (into `rows`), if any.
     hover: Option<usize>,
-    // Anchoring inputs, kept so a resize on nav can re-clamp the margin.
-    anchor_x: i32,
-    output_w: u32,
-    bar_h: u32,
+    /// Anchor rectangle (the clicked icon) in the bar surface's local coords —
+    /// the compositor positions the popup relative to this. Reused on reposition.
+    anchor_rect: (i32, i32, i32, i32),
     position: Position,
+    /// Monotonic token for `xdg_popup.reposition`.
+    reposition_token: u32,
+    /// Widest level seen; the menu never shrinks below this, so descending into
+    /// a narrower submenu keeps the column under the pointer (preserves hover).
+    min_w: i32,
 }
 
 impl Menu {
-    /// Create + map the menu surface for `root`, anchored at `anchor_x` (the
-    /// clicked icon's logical left edge) above/below the bar.
+    /// Create the menu as an `xdg_popup` parented to the bar's layer surface,
+    /// positioned by the compositor relative to `anchor_rect` (the clicked
+    /// icon's rect in bar-local coords). Grabs the popup with `serial` (the
+    /// click's input serial) so the compositor handles click-outside dismissal
+    /// and keyboard/pointer focus. Returns `None` if the seat is unavailable.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         compositor: &WlCompositor,
-        layer_shell: &ZwlrLayerShellV1,
+        wm_base: &XdgWmBase,
+        bar_layer: &ZwlrLayerSurfaceV1,
         viewporter: Option<&WpViewporter>,
         qh: &QueueHandle<State>,
-        root: MenuNode,
+        entries: Vec<MenuNode>,
         tray_idx: usize,
-        anchor_x: i32,
-        output_w: u32,
-        bar_h: u32,
+        anchor_rect: (i32, i32, i32, i32),
         position: Position,
+        seat: &WlSeat,
+        serial: u32,
         font: &Font,
         font_size: f32,
     ) -> Menu {
         let surface = compositor.create_surface(qh, ());
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
-            None,
-            Layer::Overlay,
-            "shoestring-bar-menu".to_string(),
-            qh,
-            (),
-        );
-        let viewport = viewporter.map(|vp| vp.get_viewport(&surface, qh, ()));
+        let xdg_surface = wm_base.get_xdg_surface(&surface, qh, ());
 
-        let mut m = Menu {
+        // Compute the level's rows + size before building the positioner.
+        let mut min_w = 0;
+        let (rows, want_size) = compute_layout(&entries, false, font, font_size, &mut min_w);
+
+        let positioner = make_positioner(wm_base, qh, want_size, anchor_rect, position);
+        let xdg_popup = xdg_surface.get_popup(None, &positioner, qh, ());
+        positioner.destroy();
+        // Parent the popup to the bar's layer surface, then grab so the
+        // compositor handles click-outside dismissal + keyboard/pointer focus.
+        bar_layer.get_popup(&xdg_popup);
+        xdg_popup.grab(seat, serial);
+        let viewport = viewporter.map(|vp| vp.get_viewport(&surface, qh, ()));
+        // Initial commit with no buffer: await the first xdg_surface.configure.
+        surface.commit();
+        tracing::debug!(
+            ?anchor_rect,
+            want_w = want_size.0,
+            want_h = want_size.1,
+            "tray menu open"
+        );
+
+        let hover = first_selectable_in(&rows);
+        Menu {
             surface,
-            layer_surface,
+            xdg_surface,
+            xdg_popup,
+            wm_base: wm_base.clone(),
             viewport,
             buffer: None,
             size: None,
-            want_size: (MIN_W as u32, 1),
+            want_size,
             tray_idx,
-            root,
-            nav: Vec::new(),
-            rows: Vec::new(),
-            hover: None,
-            anchor_x,
-            output_w,
-            bar_h,
+            current: entries,
+            stack: Vec::new(),
+            path: Vec::new(),
+            rows,
+            hover,
+            anchor_rect,
             position,
-        };
-        m.relayout(font, font_size);
-        m.reanchor();
-        m.layer_surface
-            .set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        m.surface.commit();
-        m
+            reposition_token: 0,
+            min_w,
+        }
     }
 
     /// True if `s` is this menu's surface (for routing pointer/keyboard events).
     pub fn owns(&self, s: &WlSurface) -> bool {
         &self.surface == s
-    }
-
-    /// The logical size we last requested via `set_size` (configure fallback).
-    pub fn want_size(&self) -> (u32, u32) {
-        self.want_size
     }
 
     /// Record the compositor's acked size. Returns whether it changed (→ redraw).
@@ -190,90 +216,62 @@ impl Menu {
         }
     }
 
-    /// Rebuild `rows`/`want_size` for the current nav level and request that
-    /// size from the compositor. Does not commit (caller does).
+    /// Rebuild `rows`/`want_size`/`hover` for the current nav level.
     fn relayout(&mut self, font: &Font, font_size: f32) {
-        let row_h = (font_size + 10.0).round() as i32;
-        let mut rows: Vec<Row> = Vec::new();
-        let mut y = VPAD;
-        let mut max_label = measure_text(font, font_size, "‹ Back");
-
-        if !self.nav.is_empty() {
-            rows.push(Row {
-                y0: y,
-                y1: y + row_h,
-                kind: RowKind::Back,
-            });
-            y += row_h;
-        }
-        for n in level_nodes(&self.root, &self.nav) {
-            if !n.visible {
-                continue;
-            }
-            if n.separator {
-                rows.push(Row {
-                    y0: y,
-                    y1: y + SEP_H,
-                    kind: RowKind::Separator,
-                });
-                y += SEP_H;
-            } else {
-                max_label = max_label.max(measure_text(font, font_size, &n.label));
-                rows.push(Row {
-                    y0: y,
-                    y1: y + row_h,
-                    kind: RowKind::Entry {
-                        id: n.id,
-                        label: n.label.clone(),
-                        enabled: n.enabled,
-                        submenu: n.has_submenu,
-                        toggle: n.toggle,
-                    },
-                });
-                y += row_h;
-            }
-        }
-        y += VPAD;
-
-        let w = (PAD_X * 2 + GUTTER + max_label).clamp(MIN_W, MAX_W);
-        let h = y.max(row_h + VPAD * 2);
-        self.want_size = (w as u32, h as u32);
+        let (rows, want_size) = compute_layout(
+            &self.current,
+            !self.stack.is_empty(),
+            font,
+            font_size,
+            &mut self.min_w,
+        );
+        self.want_size = want_size;
         self.rows = rows;
-        self.hover = self.first_selectable();
-        self.layer_surface.set_size(w as u32, h as u32);
+        self.hover = first_selectable_in(&self.rows);
     }
 
-    fn reanchor(&self) {
-        let edge = match self.position {
-            Position::Bottom => Anchor::Bottom,
-            Position::Top => Anchor::Top,
-        };
-        self.layer_surface.set_anchor(edge | Anchor::Left);
-        let menu_w = self.want_size.0 as i32;
-        let left = self
-            .anchor_x
-            .clamp(0, (self.output_w as i32 - menu_w).max(0));
-        let (top, bottom) = match self.position {
-            Position::Bottom => (0, self.bar_h as i32),
-            Position::Top => (self.bar_h as i32, 0),
-        };
-        self.layer_surface.set_margin(top, 0, bottom, left);
-    }
-
-    /// Apply a navigation change (into/back), re-laying out and committing.
-    pub fn renavigate(&mut self, font: &Font, font_size: f32) {
+    /// Apply a navigation change (into/back): re-lay out and ask the compositor
+    /// to reposition the popup to the new size via `xdg_popup.reposition`.
+    pub fn renavigate(&mut self, font: &Font, font_size: f32, qh: &QueueHandle<State>) {
         self.relayout(font, font_size);
-        self.reanchor();
-        self.surface.commit();
+        let positioner = make_positioner(
+            &self.wm_base,
+            qh,
+            self.want_size,
+            self.anchor_rect,
+            self.position,
+        );
+        self.reposition_token = self.reposition_token.wrapping_add(1);
+        self.xdg_popup
+            .reposition(&positioner, self.reposition_token);
+        positioner.destroy();
     }
 
-    pub fn nav_into(&mut self, id: i32) {
-        self.nav.push(id);
+    /// The submenu label path currently descended into — the fetch context for
+    /// [`crate::tray::Tray::fetch_level`].
+    pub fn path(&self) -> Vec<String> {
+        self.path.clone()
+    }
+
+    /// Descend into a freshly-fetched submenu `label`: save the current level
+    /// and make `children` the new one. (Fetched by the caller via
+    /// `Tray::fetch_level`, since it needs the D-Bus connection.)
+    pub fn push_level(&mut self, label: String, children: Vec<MenuNode>) {
+        let prev = std::mem::take(&mut self.current);
+        self.stack.push(prev);
+        self.path.push(label);
+        self.current = children;
     }
 
     /// Pop a level; returns false if already at the root (→ caller closes).
-    pub fn nav_back(&mut self) -> bool {
-        self.nav.pop().is_some()
+    pub fn pop_level(&mut self) -> bool {
+        if let Some(prev) = self.stack.pop() {
+            self.current = prev;
+            self.path.pop();
+            true
+        } else {
+            false
+        }
     }
 
     fn selectable(&self, idx: usize) -> bool {
@@ -283,8 +281,9 @@ impl Menu {
         )
     }
 
+    #[allow(dead_code)]
     fn first_selectable(&self) -> Option<usize> {
-        (0..self.rows.len()).find(|&i| self.selectable(i))
+        first_selectable_in(&self.rows)
     }
 
     /// Move the highlight by `delta` rows (±1), skipping non-selectable rows
@@ -327,12 +326,13 @@ impl Menu {
             Some(RowKind::Back) => Action::NavBack,
             Some(RowKind::Entry {
                 id,
+                label,
                 submenu,
                 enabled,
                 ..
             }) if *enabled => {
                 if *submenu {
-                    Action::NavInto(*id)
+                    Action::NavInto(label.clone())
                 } else {
                     Action::Activate(*id)
                 }
@@ -346,14 +346,14 @@ impl Menu {
     pub fn key(&mut self, code: u32) -> Action {
         match code {
             KEY_ESC => {
-                if self.nav.is_empty() {
+                if self.stack.is_empty() {
                     Action::Close
                 } else {
                     Action::NavBack
                 }
             }
             KEY_LEFT => {
-                if self.nav.is_empty() {
+                if self.stack.is_empty() {
                     Action::None
                 } else {
                     Action::NavBack
@@ -386,6 +386,12 @@ impl Menu {
         let Some((w, h)) = self.size else {
             return Ok(());
         };
+        tracing::debug!(
+            size_w = w,
+            size_h = h,
+            rows = self.rows.len(),
+            "menu render"
+        );
         let pw = ((w as f64) * scale).round().max(1.0) as u32;
         let ph = ((h as f64) * scale).round().max(1.0) as u32;
         let s = |v: i32| ((v as f64) * scale).round() as i32;
@@ -533,7 +539,8 @@ impl Menu {
         Ok(())
     }
 
-    /// Tear down the surface (called on dismiss).
+    /// Tear down the popup (called on dismiss / popup_done). Destroy in the
+    /// xdg-shell order: popup, then xdg_surface, then the wl_surface.
     pub fn destroy(self) {
         if let Some(b) = self.buffer {
             b.buffer.destroy();
@@ -541,26 +548,108 @@ impl Menu {
         if let Some(vp) = self.viewport {
             vp.destroy();
         }
-        self.layer_surface.destroy();
+        self.xdg_popup.destroy();
+        self.xdg_surface.destroy();
         self.surface.destroy();
     }
 }
 
-fn row_selectable(kind: &RowKind) -> bool {
-    matches!(kind, RowKind::Back | RowKind::Entry { enabled: true, .. })
-}
-
-/// Walk `root.children` down the `nav` path of submenu ids. Returns the slice
-/// of nodes at that level (empty if the path no longer resolves).
-fn level_nodes<'a>(root: &'a MenuNode, nav: &[i32]) -> &'a [MenuNode] {
-    let mut nodes = root.children.as_slice();
-    for id in nav {
-        match nodes.iter().find(|n| n.id == *id) {
-            Some(n) => nodes = n.children.as_slice(),
-            None => return &[],
+/// Build an `xdg_positioner` for `want_size`, anchored to `anchor_rect` (the
+/// icon, in bar-local coords) and opening away from the bar edge.
+fn make_positioner(
+    wm_base: &XdgWmBase,
+    qh: &QueueHandle<State>,
+    want_size: (u32, u32),
+    anchor_rect: (i32, i32, i32, i32),
+    position: Position,
+) -> XdgPositioner {
+    let p = wm_base.create_positioner(qh, ());
+    p.set_size(want_size.0.max(1) as i32, want_size.1.max(1) as i32);
+    let (ax, ay, aw, ah) = anchor_rect;
+    p.set_anchor_rect(ax, ay, aw.max(1), ah.max(1));
+    match position {
+        Position::Bottom => {
+            p.set_anchor(Anchor::Top);
+            p.set_gravity(Gravity::Top);
+        }
+        Position::Top => {
+            p.set_anchor(Anchor::Bottom);
+            p.set_gravity(Gravity::Bottom);
         }
     }
-    nodes
+    p.set_constraint_adjustment(
+        ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX | ConstraintAdjustment::ResizeY,
+    );
+    p
+}
+
+/// First selectable (Back or enabled Entry) row index, if any.
+fn first_selectable_in(rows: &[Row]) -> Option<usize> {
+    (0..rows.len()).find(|&i| row_selectable(&rows[i].kind))
+}
+
+/// Compute display `rows` + logical `want_size` for `current` (plus a leading
+/// "‹ Back" row when `has_back`). `min_w` is the widest level seen so far and is
+/// bumped (never shrinks) so descending into a narrower submenu keeps the column
+/// under the pointer.
+fn compute_layout(
+    current: &[MenuNode],
+    has_back: bool,
+    font: &Font,
+    font_size: f32,
+    min_w: &mut i32,
+) -> (Vec<Row>, (u32, u32)) {
+    let row_h = (font_size + 10.0).round() as i32;
+    let mut rows: Vec<Row> = Vec::new();
+    let mut y = VPAD;
+    let mut max_label = measure_text(font, font_size, "‹ Back");
+
+    if has_back {
+        rows.push(Row {
+            y0: y,
+            y1: y + row_h,
+            kind: RowKind::Back,
+        });
+        y += row_h;
+    }
+    for n in current {
+        if !n.visible {
+            continue;
+        }
+        if n.separator {
+            rows.push(Row {
+                y0: y,
+                y1: y + SEP_H,
+                kind: RowKind::Separator,
+            });
+            y += SEP_H;
+        } else {
+            max_label = max_label.max(measure_text(font, font_size, &n.label));
+            rows.push(Row {
+                y0: y,
+                y1: y + row_h,
+                kind: RowKind::Entry {
+                    id: n.id,
+                    label: n.label.clone(),
+                    enabled: n.enabled,
+                    submenu: n.has_submenu,
+                    toggle: n.toggle,
+                },
+            });
+            y += row_h;
+        }
+    }
+    y += VPAD;
+
+    let cw = (PAD_X * 2 + GUTTER + max_label).clamp(MIN_W, MAX_W);
+    *min_w = (*min_w).max(cw);
+    let w = *min_w;
+    let h = y.max(row_h + VPAD * 2);
+    (rows, (w as u32, h as u32))
+}
+
+fn row_selectable(kind: &RowKind) -> bool {
+    matches!(kind, RowKind::Back | RowKind::Entry { enabled: true, .. })
 }
 
 /// Draw a row's text, vertically centered within the band `[py0, py1)`

@@ -352,39 +352,111 @@ impl Tray {
             .is_some_and(|i| i.menu_path.is_some())
     }
 
-    /// Fetch + decode the item's `com.canonical.dbusmenu` layout into an owned
-    /// tree (root node; its `children` are the top-level entries). Blocking;
-    /// `None` if the item has no menu or the call fails/times out.
-    pub fn fetch_menu(&mut self, item_idx: usize) -> Option<MenuNode> {
+    /// Fetch + decode the item's top-level menu (root node; its `children` are
+    /// the top-level entries). Blocking; `None` if the item has no menu or the
+    /// call fails/times out.
+    /// Fetch the entries to display at `path` (a list of submenu *labels* from
+    /// the root). Returns the children at that level.
+    ///
+    /// Navigation is by **label, not id**: appindicator items (nm-applet) rebuild
+    /// their menu and reassign ids on every `AboutToShow` / Wi-Fi rescan, so a
+    /// cached id goes stale within seconds (`GetLayout(stale_id)` → libdbusmenu
+    /// "id not found"). We instead re-fetch the whole tree (`GetLayout(0,-1)`),
+    /// re-derive the current id for each level by matching its label, and
+    /// `AboutToShow` that fresh id to populate the next level. Heavier (a few
+    /// round-trips per descent) but immune to id churn.
+    pub fn fetch_level(&mut self, item_idx: usize, path: &[String]) -> Option<Vec<MenuNode>> {
+        let mut root = self.get_layout(item_idx, 0)?;
+        if path.is_empty() {
+            return Some(root.children);
+        }
+        for depth in 1..=path.len() {
+            // Re-derive this level's id by label from the freshly-fetched tree
+            // (ids churn), then descend.
+            let sid = find_by_path(&root, &path[..depth])
+                .filter(|n| n.has_submenu)
+                .map(|n| n.id)?;
+            if depth == path.len() {
+                // Deepest level: fetch the submenu directly by its current id —
+                // GetLayout on a *fresh* id returns its (now-populated) children.
+                return self.get_layout(item_idx, sid).map(|n| n.children);
+            }
+            self.about_to_show_id(item_idx, sid);
+            root = self.get_layout(item_idx, 0)?;
+        }
+        None
+    }
+
+    /// `AboutToShow(id)` against the item's menu, resolving service/path from
+    /// `item_idx`. Best-effort (errors ignored — it only prompts population).
+    fn about_to_show_id(&mut self, item_idx: usize, id: i32) {
+        let Some(item) = self.items.get(item_idx) else {
+            return;
+        };
+        let Some(menu_path) = item.menu_path.clone() else {
+            return;
+        };
+        let service = item.service.clone();
+        self.about_to_show(&service, &menu_path, id);
+    }
+
+    /// `AboutToShow(parent_id)` then `GetLayout(parent_id, -1, [])`, decoding the
+    /// reply `(u revision, (i a{sv} av) layout)` into an owned [`MenuNode`].
+    fn get_layout(&mut self, item_idx: usize, parent_id: i32) -> Option<MenuNode> {
         let item = self.items.get(item_idx)?;
         let service = item.service.clone();
         let menu_path = item.menu_path.clone()?;
 
-        // Some items only populate their layout in response to AboutToShow.
-        self.about_to_show(&service, &menu_path, 0);
+        // Prompt (lazy) population of this (sub)menu before reading it.
+        self.about_to_show(&service, &menu_path, parent_id);
 
-        // GetLayout(parentId=0, recursionDepth=-1 [all], propertyNames=[] [all])
-        //   -> (u revision, (i a{sv} av) layout)
         let mut call = MessageBuilder::new()
             .call("GetLayout")
             .at(service)
             .on(menu_path)
             .with_interface(DBUSMENU_IFACE)
             .build();
-        call.body.push_param(0i32).ok()?;
+        call.body.push_param(parent_id).ok()?;
         call.body.push_param(-1i32).ok()?;
         call.body.push_param(Vec::<String>::new()).ok()?;
-        let serial = self.rpc.send_message(&mut call).ok()?.write_all().ok()?;
-        let resp = self
+        let serial = match self
             .rpc
-            .wait_response(serial, Timeout::Duration(Duration::from_millis(800)))
-            .ok()?;
+            .send_message(&mut call)
+            .and_then(|c| c.write_all().map_err(|(_, e)| e))
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(parent_id, error = ?e, "GetLayout send failed");
+                return None;
+            }
+        };
+        let resp = match self
+            .rpc
+            .wait_response(serial, Timeout::Duration(Duration::from_millis(2000)))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(parent_id, error = ?e, "GetLayout wait_response failed");
+                return None;
+            }
+        };
         if resp.typ == MessageType::Error {
+            tracing::warn!(
+                parent_id,
+                name = ?resp.dynheader.error_name,
+                "GetLayout returned D-Bus error"
+            );
             return None;
         }
         let mut p = resp.body.parser();
         let _revision: u32 = p.get().ok()?;
-        let layout: (i32, HashMap<String, Variant>, Vec<Variant>) = p.get().ok()?;
+        let layout: (i32, HashMap<String, Variant>, Vec<Variant>) = match p.get() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(parent_id, error = ?e, "GetLayout parse failed");
+                return None;
+            }
+        };
         Some(parse_menu_node(layout))
     }
 
@@ -570,6 +642,20 @@ impl Tray {
     fn send(&mut self, mut msg: MarshalledMessage) -> Result<(), ()> {
         send(&mut self.rpc, &mut msg)
     }
+}
+
+/// Walk `root` down a path of submenu *labels*, returning the node at that
+/// level (`root` itself for an empty path). Matches submenu children by label
+/// so it survives dbusmenu id reassignment.
+fn find_by_path<'a>(root: &'a MenuNode, path: &[String]) -> Option<&'a MenuNode> {
+    let mut node = root;
+    for label in path {
+        node = node
+            .children
+            .iter()
+            .find(|c| c.has_submenu && &c.label == label)?;
+    }
+    Some(node)
 }
 
 /// Decode one `(i a{sv} av)` dbusmenu layout node (and its descendants) into an
