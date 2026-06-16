@@ -32,6 +32,10 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
 tempfile = "3"
 
+# PNG encoder for the Screenshot portal. Same crate/version shoestring-screenshot
+# uses, so the resolved dep set stays shared.
+png = "0.17"
+
 # Lightweight error type for `main`.
 anyhow = "1"
 

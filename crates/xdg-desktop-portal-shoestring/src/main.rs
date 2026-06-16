@@ -22,6 +22,7 @@
 mod capture;
 mod cast;
 mod portal;
+mod screenshot;
 mod state;
 
 use std::os::unix::io::{AsRawFd, RawFd};

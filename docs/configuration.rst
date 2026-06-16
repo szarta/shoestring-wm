@@ -107,8 +107,9 @@ The ``[general]`` section
      - bool
      - ``false``
      - Gate for screen capture via the ``zwlr_screencopy`` protocol — the
-       path tools like OBS, ``grim`` and the ``xdg-desktop-portal-wlr``
-       screencast backend use to read the screen. Off by default: unlike
+       path tools like OBS, ``grim`` and the
+       ``xdg-desktop-portal-shoestring`` screencast/screenshot backend use
+       to read the screen. Off by default: unlike
        X11, Wayland isolates clients, so leaving it off means a stray or
        malicious client simply cannot capture the screen. When ``false``
        the ``zwlr_screencopy_manager_v1`` global is not advertised and any

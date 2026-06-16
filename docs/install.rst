@@ -100,8 +100,9 @@ backend to use for our session::
     sudo install -Dm644 resources/shoestring-wm-portals.conf \
         /usr/share/xdg-desktop-portal/shoestring-wm-portals.conf
 
-See :doc:`portals` for the prerequisites (``xdg-desktop-portal-wlr``,
-PipeWire) and the optional xdpw output-chooser config.
+See :doc:`portals` for the prerequisites (``xdg-desktop-portal``,
+PipeWire) and the native ScreenCast + Screenshot backend, plus the
+descriptor/``.service`` files the packages install.
 
 (The ``.deb`` / ``.rpm`` packages do all of this for you.)
 

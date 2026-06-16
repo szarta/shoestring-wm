@@ -54,13 +54,13 @@ OPTIONS_SUB=		yes
 XWAYLAND_DESC=		Run X11 applications via Xwayland
 XWAYLAND_RUN_DEPENDS=	Xwayland:x11-servers/xwayland
 
-# Screen sharing: builds xdg-desktop-portal-shoestring (our ScreenCast portal
-# backend) and pulls in the PipeWire stack + portal frontend. Disable it for a
-# leaner dependency set with no screen-capture support.
-SCREENCAST_DESC=	Screen sharing via xdg-desktop-portal + PipeWire
+# Screen sharing: builds xdg-desktop-portal-shoestring (our ScreenCast +
+# Screenshot portal backend) and pulls in the PipeWire stack + portal frontend.
+# Both portal interfaces are served natively, so xdg-desktop-portal-wlr is not
+# required. Disable it for a leaner dependency set with no screen-capture support.
+SCREENCAST_DESC=	Screen sharing + screenshots via xdg-desktop-portal + PipeWire
 SCREENCAST_LIB_DEPENDS=	libpipewire-0.3.so:multimedia/pipewire
-SCREENCAST_RUN_DEPENDS=	xdg-desktop-portal>0:deskutils/xdg-desktop-portal \
-			xdg-desktop-portal-wlr>0:deskutils/xdg-desktop-portal-wlr
+SCREENCAST_RUN_DEPENDS=	xdg-desktop-portal>0:deskutils/xdg-desktop-portal
 # Append the portal crate to what cargo installs (lands in bin; moved to
 # libexec in post-install-SCREENCAST-on). pipewire dev headers come with the
 # pipewire LIB_DEPENDS above; clang/bindgen is in the FreeBSD base.

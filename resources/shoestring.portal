@@ -6,10 +6,10 @@
 #
 # Install to: /usr/share/xdg-desktop-portal/portals/shoestring.portal
 #
-# We implement only ScreenCast here; everything else stays routed to its
-# existing backend (see shoestring-wm-portals.conf). Screenshot is still
-# served by xdg-desktop-portal-wlr for now.
+# We implement ScreenCast and Screenshot here; everything else stays routed to
+# its existing backend (see shoestring-wm-portals.conf). With both interfaces
+# served natively the session no longer needs xdg-desktop-portal-wlr.
 [portal]
 DBusName=org.freedesktop.impl.portal.desktop.shoestring
-Interfaces=org.freedesktop.impl.portal.ScreenCast;
+Interfaces=org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.Screenshot;
 UseIn=shoestring-wm

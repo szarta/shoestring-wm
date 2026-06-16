@@ -22,30 +22,43 @@ backends for our desktop:
 
 - ``ScreenCast`` → **xdg-desktop-portal-shoestring**, our own backend
   (below);
-- ``Screenshot`` → **xdg-desktop-portal-wlr** (xdpw), the wlroots backend,
-  which speaks the ``zwlr_screencopy`` protocol this compositor implements;
+- ``Screenshot`` → **xdg-desktop-portal-shoestring**, the same backend;
 - everything else (file chooser, settings, …) → the **GTK** backend.
 
-The shoestring ScreenCast backend
-----------------------------------
+Serving both screen-capture interfaces ourselves means the session needs
+**no xdg-desktop-portal-wlr** at all.
+
+The shoestring portal backend
+------------------------------
 
 ``xdg-desktop-portal-shoestring`` is a small standalone D-Bus service
 (``org.freedesktop.impl.portal.desktop.shoestring``) that implements
-``org.freedesktop.impl.portal.ScreenCast``. It feeds PipeWire itself and
-offers each consumer **both dmabuf and shm**, letting the consumer pick:
-fast consumers (browsers, OBS) take zero-copy dmabuf, while picky ones —
-notably Zoom, whose bundled Mesa can't import our dmabuf — take shm. The
-older ``xdg-desktop-portal-wlr`` path could only offer one buffer type
-globally (dmabuf on a GPU box), which is why Zoom's share dropped.
+``org.freedesktop.impl.portal.ScreenCast`` **and**
+``org.freedesktop.impl.portal.Screenshot``. For ScreenCast it feeds
+PipeWire itself and offers each consumer **both dmabuf and shm**, letting
+the consumer pick: fast consumers (browsers, OBS) take zero-copy dmabuf,
+while picky ones — notably Zoom, whose bundled Mesa can't import our dmabuf
+— take shm. The older ``xdg-desktop-portal-wlr`` path could only offer one
+buffer type globally (dmabuf on a GPU box), which is why Zoom's share
+dropped.
 
-It captures frames from the compositor over the same ``zwlr_screencopy_v1``
-protocol used by ``shoestring-screenshot``, so the compositor needs no
-screencast-specific code, and a fault in the portal (PipeWire/D-Bus) can't
-take down the desktop. It honors the **screen-capture gate**: the
+For Screenshot it captures a frame and writes a PNG, returning its
+``file://`` URI to the frontend. A non-interactive request grabs the whole
+default output; an ``interactive`` request shells out to
+``shoestring-screenshot --region`` so the user can rubber-band a rectangle
+with the ``shoestring-region`` picker. ``PickColor`` (the eyedropper) is
+not yet implemented and reports failure so the app falls back to its own.
+
+Both interfaces capture frames from the compositor over the same
+``zwlr_screencopy_v1`` protocol used by ``shoestring-screenshot``, so the
+compositor needs no portal-specific code, and a fault in the portal
+(PipeWire/D-Bus) can't take down the desktop. They honor the
+**screen-capture gate**: the
 ``zwlr_screencopy`` manager is only advertised while capture is enabled, so
-a cast fails cleanly until you turn it on (``shoestring-ctl screen-capture
-on`` for the session, or ``general.screen_capture_enabled = true`` in the
-config; see :doc:`configuration`).
+a cast or screenshot fails cleanly until you turn it on
+(``shoestring-ctl screen-capture on`` for the session, or
+``general.screen_capture_enabled = true`` in the config; see
+:doc:`configuration`).
 
 Installation
 ------------
@@ -93,19 +106,10 @@ with the session — it inherits the live environment directly and the
 frontend finds it already owning the name.
 
 Confirm the frontend resolved the backend (look for
-``Using shoestring.portal for … ScreenCast``)::
+``Using shoestring.portal for … ScreenCast`` and ``… Screenshot``)::
 
     systemctl --user restart xdg-desktop-portal
     /usr/libexec/xdg-desktop-portal -vr   # foreground, prints its choices
-
-xdpw output selection (Screenshot)
-----------------------------------
-
-``resources/xdg-desktop-portal-wlr.conf`` is an optional example for xdpw,
-which still backs the ``Screenshot`` portal. With no config xdpw prompts
-for an output via its built-in chooser; on a single-monitor or scripted
-setup you can pin one output instead. See the comments in that file and
-``xdg-desktop-portal-wlr(5)``.
 
 Prerequisites
 -------------
@@ -114,14 +118,19 @@ Prerequisites
   (``xdg-desktop-portal-gtk``) — almost always already installed.
 - ``pipewire`` running in the session — screencast streams are delivered
   over PipeWire, and the backend links ``libpipewire``.
-- ``xdg-desktop-portal-wlr`` for the ``Screenshot`` interface.
+- For interactive (region) screenshots, ``shoestring-screenshot`` and
+  ``shoestring-region`` on ``$PATH`` — both ship in this package.
+  ``xdg-desktop-portal-wlr`` is **no longer required**; the Screenshot
+  interface is served by ``xdg-desktop-portal-shoestring``.
 
 .. note::
 
-   **Screen sharing status.** Routing + the native ScreenCast backend are
-   complete: with the screen-capture gate on, browsers and Zoom both share
-   the whole screen. The backend's capture is currently shm-only on the
-   PipeWire side (every consumer gets shm — correct, just more CPU than
+   **Screen sharing status.** Routing + the native ScreenCast and
+   Screenshot backends are complete: with the screen-capture gate on,
+   browsers and Zoom both share the whole screen, and the Screenshot portal
+   captures via the same backend — so the session no longer depends on
+   xdg-desktop-portal-wlr. The ScreenCast capture is currently shm-only on
+   the PipeWire side (every consumer gets shm — correct, just more CPU than
    dmabuf); per-consumer dmabuf negotiation (so browsers/OBS regain
-   zero-copy while Zoom keeps shm) is the next step. Implementing the
-   ``Screenshot`` portal here too would let xdpw be dropped entirely.
+   zero-copy while Zoom keeps shm) is the next step. ``PickColor`` (the
+   eyedropper) is not yet implemented.

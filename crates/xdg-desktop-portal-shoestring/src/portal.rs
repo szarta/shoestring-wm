@@ -14,6 +14,11 @@
 //! `AvailableSourceTypes`, `AvailableCursorModes`) via
 //! `org.freedesktop.DBus.Properties`, and may `Close` a Session or Request.
 //!
+//! It also implements `org.freedesktop.impl.portal.Screenshot` (`Screenshot` +
+//! a stubbed `PickColor`) so the same backend serves the Screenshot portal and
+//! the session no longer needs xdg-desktop-portal-wlr; the capture/encode lives
+//! in [`crate::screenshot`].
+//!
 //! This module only translates wire calls into state mutations + reply
 //! messages; it sends nothing itself (see [`crate::state::State`] and the
 //! dispatch loop in `main`). The PipeWire stream it drives on `Start` lives in
@@ -34,12 +39,14 @@ use rustbus::{standard_messages, RpcConn};
 
 use crate::capture::Capture;
 use crate::cast;
+use crate::screenshot;
 use crate::state::{Session, State};
 
 pub const BUS_NAME: &str = "org.freedesktop.impl.portal.desktop.shoestring";
 pub const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 
 const SCREENCAST_IFACE: &str = "org.freedesktop.impl.portal.ScreenCast";
+const SCREENSHOT_IFACE: &str = "org.freedesktop.impl.portal.Screenshot";
 const SESSION_IFACE: &str = "org.freedesktop.impl.portal.Session";
 const REQUEST_IFACE: &str = "org.freedesktop.impl.portal.Request";
 const PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
@@ -59,6 +66,9 @@ const CURSOR_MODE_EMBEDDED: u32 = 2;
 /// Interface version we implement. v2 is enough for source-type + cursor-mode
 /// selection; restore tokens (v3+) are not implemented.
 const SCREENCAST_VERSION: u32 = 2;
+/// Screenshot impl-portal version. v2 advertises the `interactive` option (we
+/// route it to the region picker) and the `PickColor` method (stubbed below).
+const SCREENSHOT_VERSION: u32 = 2;
 
 // Variant enum for marshalling property / results values. The `_sig` macro
 // generates an owned (lifetime-free) enum, which is what we want for building
@@ -66,7 +76,7 @@ const SCREENCAST_VERSION: u32 = 2;
 // shape Start returns.
 type StreamList = Vec<(u32, HashMap<String, StreamProp>)>;
 rustbus::dbus_variant_sig!(StreamProp, U32 => u32);
-rustbus::dbus_variant_sig!(PortalValue, U32 => u32; Streams => StreamList);
+rustbus::dbus_variant_sig!(PortalValue, U32 => u32; Str => String; Streams => StreamList);
 
 /// Connect to the session bus and claim [`BUS_NAME`].
 ///
@@ -131,6 +141,8 @@ pub fn dispatch(call: &MarshalledMessage, state: &mut State) -> Option<Marshalle
         (Some(SCREENCAST_IFACE), "SelectSources") => select_sources(call, state),
         (Some(SCREENCAST_IFACE), "Start") => start(call, state),
         (Some(SCREENCAST_IFACE), "OpenPipeWireRemote") => open_pipewire_remote(call, state),
+        (Some(SCREENSHOT_IFACE), "Screenshot") => screenshot(call),
+        (Some(SCREENSHOT_IFACE), "PickColor") => pick_color(call),
         (Some(SESSION_IFACE), "Close") => close_session(call, state),
         (Some(REQUEST_IFACE), "Close") => close_request(call),
         (Some(INTROSPECTABLE_IFACE) | None, "Introspect") => introspect(call),
@@ -144,12 +156,22 @@ pub fn dispatch(call: &MarshalledMessage, state: &mut State) -> Option<Marshalle
 
 // ---- properties ----------------------------------------------------------
 
-fn property_value(name: &str) -> Option<PortalValue> {
-    match name {
-        "version" => Some(PortalValue::U32(SCREENCAST_VERSION)),
-        "AvailableSourceTypes" => Some(PortalValue::U32(SOURCE_TYPE_MONITOR)),
-        "AvailableCursorModes" => Some(PortalValue::U32(CURSOR_MODE_EMBEDDED)),
+fn property_value(iface: &str, name: &str) -> Option<PortalValue> {
+    match (iface, name) {
+        (SCREENCAST_IFACE, "version") => Some(PortalValue::U32(SCREENCAST_VERSION)),
+        (SCREENCAST_IFACE, "AvailableSourceTypes") => Some(PortalValue::U32(SOURCE_TYPE_MONITOR)),
+        (SCREENCAST_IFACE, "AvailableCursorModes") => Some(PortalValue::U32(CURSOR_MODE_EMBEDDED)),
+        (SCREENSHOT_IFACE, "version") => Some(PortalValue::U32(SCREENSHOT_VERSION)),
         _ => None,
+    }
+}
+
+/// Property names per interface, for `GetAll`.
+fn property_names(iface: &str) -> &'static [&'static str] {
+    match iface {
+        SCREENCAST_IFACE => &["version", "AvailableSourceTypes", "AvailableCursorModes"],
+        SCREENSHOT_IFACE => &["version"],
+        _ => &[],
     }
 }
 
@@ -159,16 +181,13 @@ fn properties_get(call: &MarshalledMessage) -> MarshalledMessage {
         Ok(v) => v,
         Err(e) => return invalid_args(call, &format!("Get args: {e:?}")),
     };
-    if iface != SCREENCAST_IFACE {
-        return invalid_args(call, &format!("no properties on interface {iface}"));
-    }
-    match property_value(prop) {
+    match property_value(iface, prop) {
         Some(v) => {
             let mut reply = call.dynheader.make_response();
             reply.body.push_param(v).expect("push property variant");
             reply
         }
-        None => invalid_args(call, &format!("unknown property {prop}")),
+        None => invalid_args(call, &format!("unknown property {iface}.{prop}")),
     }
 }
 
@@ -178,11 +197,9 @@ fn properties_get_all(call: &MarshalledMessage) -> MarshalledMessage {
         Err(e) => return invalid_args(call, &format!("GetAll arg: {e:?}")),
     };
     let mut props: HashMap<String, PortalValue> = HashMap::new();
-    if iface == SCREENCAST_IFACE {
-        for name in ["version", "AvailableSourceTypes", "AvailableCursorModes"] {
-            if let Some(v) = property_value(name) {
-                props.insert(name.to_owned(), v);
-            }
+    for name in property_names(iface) {
+        if let Some(v) = property_value(iface, name) {
+            props.insert((*name).to_owned(), v);
         }
     }
     let mut reply = call.dynheader.make_response();
@@ -338,6 +355,47 @@ fn open_pipewire_remote(call: &MarshalledMessage, _state: &mut State) -> Marshal
     }
 }
 
+// ---- Screenshot methods --------------------------------------------------
+
+/// `Screenshot(handle o, app_id s, parent_window s, options a{sv})` →
+/// `(response u, results a{sv})` with `results["uri"]` = `file://…png`.
+fn screenshot(call: &MarshalledMessage) -> MarshalledMessage {
+    let mut p = call.body.parser();
+    if let Err(e) = p.get::<ObjectPath<String>>() {
+        return invalid_args(call, &format!("handle: {e:?}"));
+    }
+    let app_id: String = p.get().unwrap_or_default();
+    let _parent: String = p.get().unwrap_or_default();
+    let options: HashMap<String, Variant> = p.get().unwrap_or_default();
+    let interactive = variant_bool(&options, "interactive").unwrap_or(false);
+
+    tracing::info!(%app_id, interactive, "Screenshot");
+    match screenshot::capture_to_uri(interactive) {
+        Ok(uri) => {
+            let mut results: HashMap<String, PortalValue> = HashMap::new();
+            results.insert("uri".to_owned(), PortalValue::Str(uri));
+            let mut reply = call.dynheader.make_response();
+            reply
+                .body
+                .push_param(RESPONSE_SUCCESS)
+                .expect("push response code");
+            reply.body.push_param(results).expect("push results");
+            reply
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Screenshot failed");
+            response(call, RESPONSE_OTHER)
+        }
+    }
+}
+
+/// `PickColor` — an eyedropper needs interactive single-pixel UI we don't have
+/// yet, so report failure cleanly (the app falls back to its own picker).
+fn pick_color(call: &MarshalledMessage) -> MarshalledMessage {
+    tracing::info!("PickColor requested — not implemented, returning failure");
+    response(call, RESPONSE_OTHER)
+}
+
 // ---- Session / Request lifecycle -----------------------------------------
 
 fn close_session(call: &MarshalledMessage, state: &mut State) -> MarshalledMessage {
@@ -443,6 +501,25 @@ const INTROSPECTION_XML: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-
       <arg name="session_handle" type="o" direction="in"/>
       <arg name="options" type="a{sv}" direction="in"/>
       <arg name="fd" type="h" direction="out"/>
+    </method>
+  </interface>
+  <interface name="org.freedesktop.impl.portal.Screenshot">
+    <property name="version" type="u" access="read"/>
+    <method name="Screenshot">
+      <arg name="handle" type="o" direction="in"/>
+      <arg name="app_id" type="s" direction="in"/>
+      <arg name="parent_window" type="s" direction="in"/>
+      <arg name="options" type="a{sv}" direction="in"/>
+      <arg name="response" type="u" direction="out"/>
+      <arg name="results" type="a{sv}" direction="out"/>
+    </method>
+    <method name="PickColor">
+      <arg name="handle" type="o" direction="in"/>
+      <arg name="app_id" type="s" direction="in"/>
+      <arg name="parent_window" type="s" direction="in"/>
+      <arg name="options" type="a{sv}" direction="in"/>
+      <arg name="response" type="u" direction="out"/>
+      <arg name="results" type="a{sv}" direction="out"/>
     </method>
   </interface>
   <interface name="org.freedesktop.impl.portal.Session">

@@ -109,11 +109,12 @@ priority = "optional"
 # minimal installs).
 depends = "$auto, libpam-modules"
 # xwayland is optional — only needed to run X11 apps (GIMP, Inkscape, etc.).
-# xdg-desktop-portal (the frontend) + pipewire enable screen sharing via our
-# ScreenCast backend; xdg-desktop-portal-wlr still serves the Screenshot portal
-# (we route Screenshot=wlr for now). The libpipewire/libspa shared libs the
-# portal binary links are pinned automatically by $auto.
-recommends = "xwayland, xdg-desktop-portal, xdg-desktop-portal-wlr, pipewire"
+# xdg-desktop-portal (the frontend) + pipewire enable screen sharing and
+# screenshots via our own ScreenCast + Screenshot backend; we no longer need
+# xdg-desktop-portal-wlr (both portal interfaces are served natively). The
+# libpipewire/libspa shared libs the portal binary links are pinned
+# automatically by $auto.
+recommends = "xwayland, xdg-desktop-portal, pipewire"
 extended-description = """\
 A lightweight Rust Wayland window manager built on Smithay, shipped with \
 its companion tools: a status bar, dmenu-style launcher, notification \
