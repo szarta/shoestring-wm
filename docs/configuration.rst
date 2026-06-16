@@ -116,19 +116,6 @@ The ``[general]`` section
        ``shoestring-ctl screen-capture on``) override it without writing
        to disk. Independent of the ``screenshot`` IPC request, which is
        behind ``automation_enabled``.
-   * - ``screencast_prefer_shm``
-     - bool
-     - ``false``
-     - Capture-buffer policy for ``zwlr_screencopy``. By default a dmabuf
-       format is advertised for full-output captures, giving the screencast
-       consumer (via ``xdg-desktop-portal-wlr``) zero-copy GPU buffers — fast,
-       and what browsers/OBS prefer. Some consumers can't import a dmabuf,
-       though: notably Zoom, whose bundled Mesa fails with ``MESA-LOADER:
-       failed to retrieve device information`` so the share starts then drops.
-       Set ``true`` to advertise **shm only**, forcing the portal onto
-       shared-memory frames those consumers can read. Global trade-off (every
-       consumer takes the slower CPU-copy path); the long-term fix is
-       per-consumer buffer negotiation in a native screencast portal.
    * - ``idle_notifications_enabled``
      - bool
      - ``false``
@@ -183,7 +170,6 @@ Example::
     autostart = ["shoestring-bar", "swww init"]
     automation_enabled = false
     screen_capture_enabled = false
-    screencast_prefer_shm = false
     idle_notifications_enabled = false
     xkb_layout = "us,de"
     xkb_options = "grp:alt_shift_toggle"

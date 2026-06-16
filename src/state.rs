@@ -256,11 +256,6 @@ pub struct ShoestringWm {
     /// Never written back to disk; the config file is the source of truth at
     /// next start.
     pub screen_capture_enabled: bool,
-    /// When `true`, `zwlr_screencopy_v1` advertises shm only (no dmabuf), from
-    /// `general.screencast_prefer_shm`. Forces picky portal consumers (e.g.
-    /// Zoom, which fails to import our dmabuf) onto CPU-copy shm frames. See
-    /// [`Self::screencopy_dmabuf_formats`].
-    pub screencast_prefer_shm: bool,
     /// Throttle for [`shoestring_ipc::Event::ScreenCaptured`]: the
     /// `Instant` of the last emitted live-capture event. `None` until the
     /// first capture. Keeps a high-FPS cast from flooding subscribers.
@@ -419,7 +414,6 @@ impl ShoestringWm {
         // global when the gate is on, so by default no client can even
         // discover the capability. Toggled at runtime by `set_screen_capture`.
         let screen_capture_enabled = config.general.screen_capture_enabled;
-        let screencast_prefer_shm = config.general.screencast_prefer_shm;
         let screencopy = crate::screencopy::ScreencopyState {
             manager_global: screen_capture_enabled.then(|| {
                 dh.create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData)
@@ -585,7 +579,6 @@ impl ShoestringWm {
             session_integration: false,
             automation_enabled,
             screen_capture_enabled,
-            screencast_prefer_shm,
             last_screen_capture_event: None,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
@@ -1382,11 +1375,6 @@ impl ShoestringWm {
     /// renderer can actually import.
     pub fn screencopy_dmabuf_formats(&self) -> Vec<smithay::backend::allocator::Fourcc> {
         use smithay::backend::allocator::Fourcc;
-        // Escape hatch: advertise shm only, so consumers that can't import a
-        // dmabuf (e.g. Zoom) get CPU-copy frames they can read.
-        if self.screencast_prefer_shm {
-            return Vec::new();
-        }
         let Some(formats) = self.dmabuf_formats.as_ref() else {
             return Vec::new();
         };
