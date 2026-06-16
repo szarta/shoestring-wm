@@ -108,8 +108,12 @@ priority = "optional"
 # lives in that package (present by default on desktops, but not on
 # minimal installs).
 depends = "$auto, libpam-modules"
-# xwayland is optional — only needed to run X11 apps (GIMP, Inkscape, etc.)
-recommends = "xwayland"
+# xwayland is optional — only needed to run X11 apps (GIMP, Inkscape, etc.).
+# xdg-desktop-portal (the frontend) + pipewire enable screen sharing via our
+# ScreenCast backend; xdg-desktop-portal-wlr still serves the Screenshot portal
+# (we route Screenshot=wlr for now). The libpipewire/libspa shared libs the
+# portal binary links are pinned automatically by $auto.
+recommends = "xwayland, xdg-desktop-portal, xdg-desktop-portal-wlr, pipewire"
 extended-description = """\
 A lightweight Rust Wayland window manager built on Smithay, shipped with \
 its companion tools: a status bar, dmenu-style launcher, notification \
@@ -126,6 +130,16 @@ assets = [
     ["target/release/shoestring-confirm",    "usr/bin/", "755"],
     ["target/release/shoestring-menu",       "usr/bin/", "755"],
     ["target/release/shoestring-region",     "usr/bin/", "755"],
+    # Screencast portal backend. The helper goes in libexec (a backend, not a
+    # user command). Its *.portal descriptor MUST live in a system data dir:
+    # xdg-desktop-portal scans XDG_DATA_DIRS (/usr/share, ...), NOT
+    # XDG_DATA_HOME, so a per-user ~/.local/share copy is never discovered.
+    # The .service is D-Bus activation; the *-portals.conf routes ScreenCast to
+    # us (basename "shoestring" = the .portal filename).
+    ["target/release/xdg-desktop-portal-shoestring", "usr/libexec/", "755"],
+    ["resources/shoestring.portal",          "usr/share/xdg-desktop-portal/portals/", "644"],
+    ["resources/org.freedesktop.impl.portal.desktop.shoestring.service", "usr/share/dbus-1/services/", "644"],
+    ["resources/shoestring-wm-portals.conf", "usr/share/xdg-desktop-portal/", "644"],
     ["resources/shoestring-wm-session",      "usr/bin/", "755"],
     ["resources/shoestring-wm.desktop",      "usr/share/wayland-sessions/", "644"],
     ["docs/_build/man/shoestring-wm.1",      "usr/share/man/man1/", "644"],
@@ -173,6 +187,13 @@ assets = [
     { source = "target/release/shoestring-confirm",    dest = "/usr/bin/shoestring-confirm",    mode = "0755" },
     { source = "target/release/shoestring-menu",       dest = "/usr/bin/shoestring-menu",       mode = "0755" },
     { source = "target/release/shoestring-region",     dest = "/usr/bin/shoestring-region",     mode = "0755" },
+    # Screencast portal backend. The *.portal descriptor MUST go in a system
+    # data dir (/usr/share/...): xdg-desktop-portal scans XDG_DATA_DIRS, not
+    # XDG_DATA_HOME, so a per-user copy is never found. See the deb block.
+    { source = "target/release/xdg-desktop-portal-shoestring", dest = "/usr/libexec/xdg-desktop-portal-shoestring", mode = "0755" },
+    { source = "resources/shoestring.portal",          dest = "/usr/share/xdg-desktop-portal/portals/shoestring.portal", mode = "0644" },
+    { source = "resources/org.freedesktop.impl.portal.desktop.shoestring.service", dest = "/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.shoestring.service", mode = "0644" },
+    { source = "resources/shoestring-wm-portals.conf", dest = "/usr/share/xdg-desktop-portal/shoestring-wm-portals.conf", mode = "0644" },
     { source = "resources/shoestring-wm-session",      dest = "/usr/bin/shoestring-wm-session", mode = "0755" },
     { source = "resources/shoestring-wm.desktop",      dest = "/usr/share/wayland-sessions/shoestring-wm.desktop", mode = "0644" },
     { source = "docs/_build/man/shoestring-wm.1",      dest = "/usr/share/man/man1/shoestring-wm.1",   mode = "0644", doc = true },
