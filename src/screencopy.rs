@@ -86,6 +86,13 @@ pub struct FrameInner {
     /// True once `copy`/`copy_with_damage` has been processed. A frame can
     /// only be used once (protocol error otherwise).
     pub used: bool,
+    /// Set when the client used `copy_with_damage` rather than `copy`. The
+    /// protocol requires the compositor to emit `damage` event(s) before
+    /// `ready` in that case; consumers that use the damage variant (e.g.
+    /// xdg-desktop-portal-wlr's screencast loop) rely on it and mismanage
+    /// their per-frame state if it's missing. We always repaint the full
+    /// output, so the damage box is the whole capture region.
+    pub with_damage: bool,
 }
 
 /// Process every pending screencopy frame whose target matches `output`:
@@ -198,8 +205,7 @@ pub fn process_pending<R>(
                 // (here over the dmabuf's EGLImage), whose bottom-left origin
                 // leaves the buffer rows bottom-to-top. Matches wlroots' GL
                 // screencopy behaviour.
-                frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
-                send_ready(&frame);
+                finish_frame(&frame);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: dmabuf render failed");
@@ -302,8 +308,7 @@ pub fn process_pending<R>(
 
             match copy_region(renderer, &framebuffer, region, format, stride, &buffer) {
                 Ok(()) => {
-                    frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
-                    send_ready(&frame);
+                    finish_frame(&frame);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "screencopy: copy_region failed");
@@ -313,6 +318,31 @@ pub fn process_pending<R>(
         }
         drop(framebuffer);
     }
+}
+
+/// Complete a successfully captured frame: send `flags`, then a `damage`
+/// event if the client used `copy_with_damage`, then `ready` — in that order,
+/// matching wlroots. The damage box covers the whole capture region because
+/// each capture repaints the full output (no incremental damage tracking
+/// against prior captures). Reads `with_damage`/`region` from the frame's own
+/// user data so both the dmabuf and shm paths share one code path.
+fn finish_frame(frame: &ZwlrScreencopyFrameV1) {
+    frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
+    if let Some(user) = frame.data::<ScreencopyFrameData>() {
+        let (with_damage, region) = {
+            let inner = user.inner.lock().unwrap();
+            (inner.with_damage, inner.region)
+        };
+        if with_damage {
+            frame.damage(
+                0,
+                0,
+                region.size.w.max(0) as u32,
+                region.size.h.max(0) as u32,
+            );
+        }
+    }
+    send_ready(frame);
 }
 
 /// Send the `ready` event with a wall-clock presentation timestamp split into
