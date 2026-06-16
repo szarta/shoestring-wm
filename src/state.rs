@@ -663,16 +663,29 @@ impl ShoestringWm {
         loop_handle
             .insert_source(
                 Generic::new(display, Interest::READ, Mode::Level),
-                |_, display, state| {
+                move |_, display, state| {
                     // SAFETY: we never drop the display while the source is registered.
                     unsafe {
                         let d = display.get_mut();
                         if let Err(e) = d.dispatch_clients(state) {
                             tracing::error!("dispatch_clients error: {e}");
                         }
-                        // Flush eagerly so clients receive replies even when no
-                        // redraw is firing (e.g. nested winit window not visible).
-                        let _ = d.flush_clients();
+                        // Real sessions flush eagerly so clients receive replies even
+                        // when no redraw is firing (e.g. nested winit not visible).
+                        //
+                        // The headless WLCS harness (open_socket == false) must NOT:
+                        // eager-flushing here sends a client's `wl_display.sync` reply
+                        // the instant the sync request is dispatched — before a pending
+                        // fake-input `WlcsEvent` (a separate calloop source) has been
+                        // applied. WLCS injects input then roundtrips to observe it, so
+                        // the premature reply makes the roundtrip see stale pointer
+                        // focus and the assertion fails (often flakily). Deferring to
+                        // the harness loop's single end-of-iteration `flush_clients`
+                        // — exactly what smithay's `wlcs_anvil` does — keeps injected
+                        // input ordered ahead of the sync that observes it.
+                        if open_socket {
+                            let _ = d.flush_clients();
+                        }
                     }
                     Ok(PostAction::Continue)
                 },
