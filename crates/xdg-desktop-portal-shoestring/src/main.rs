@@ -19,6 +19,7 @@
 //! portal protocol lives in [`portal`]; PipeWire + the screencopy client land
 //! in later phases.
 
+mod capture;
 mod cast;
 mod portal;
 mod state;

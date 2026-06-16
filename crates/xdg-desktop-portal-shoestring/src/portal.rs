@@ -20,7 +20,9 @@
 //! [`crate::cast`]. (Phase 1b streams a test pattern; Phase 2 swaps in real
 //! frames captured from the WM over `zwlr_screencopy_v1`.)
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use anyhow::{anyhow, Context, Result};
 use rustbus::connection::Timeout;
@@ -30,6 +32,7 @@ use rustbus::wire::ObjectPath;
 use rustbus::wire::UnixFd;
 use rustbus::{standard_messages, RpcConn};
 
+use crate::capture::Capture;
 use crate::cast;
 use crate::state::{Session, State};
 
@@ -258,10 +261,24 @@ fn start(call: &MarshalledMessage, state: &mut State) -> MarshalledMessage {
     tracing::info!(%session, app = %s.app_id, types = s.source_types,
         cursor_mode = s.cursor_mode, multiple = s.multiple, "Start");
 
-    // Phase 1b: fixed placeholder geometry for the test pattern. Phase 2 will
-    // query the WM's output dimensions over the IPC/wayland connection.
-    let (width, height) = (1280u32, 720u32);
-    match cast::start(&state.pw, width, height) {
+    // Connect to the WM and learn the output geometry. `Capture::new` fails if
+    // the screen-capture gate is off (the screencopy manager global is absent).
+    let capture = match Capture::new(None) {
+        Ok(c) => Rc::new(RefCell::new(c)),
+        Err(e) => {
+            tracing::warn!(error = %e, "Start: cannot capture (screen-capture gate off?)");
+            return response(call, RESPONSE_OTHER);
+        }
+    };
+    let info = match capture.borrow_mut().dimensions() {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(error = %e, "Start: could not capture initial frame");
+            return response(call, RESPONSE_OTHER);
+        }
+    };
+
+    match cast::start(&state.pw, capture, info.width, info.height) {
         Ok((c, node_id)) => {
             state.casts.insert(session, c);
             start_response(call, node_id)

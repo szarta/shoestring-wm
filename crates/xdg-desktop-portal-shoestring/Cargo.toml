@@ -22,6 +22,16 @@ rustbus = "0.19"
 pipewire = "0.10"
 libspa = "0.10"
 
+# Wayland client: we pull frames from the WM over zwlr_screencopy_v1. Versions
+# match the sibling crates (shoestring-screenshot/bar) so the resolved deps stay
+# shared.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# wl_shm capture buffer: mmap a tempfile, hand the fd to the WM, read pixels back.
+memmap2 = "0.9"
+tempfile = "3"
+
 # Lightweight error type for `main`.
 anyhow = "1"
 

@@ -15,9 +15,11 @@
 //! backend's `poll(2)` set and [`Pw::iterate`] is pumped from there, keeping
 //! everything single-threaded alongside D-Bus.
 
+use std::cell::RefCell;
 use std::io::Cursor;
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -32,6 +34,8 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 use spa::param::ParamType;
 use spa::pod::{serialize::PodSerializer, Object, Pod, Property, Value};
 use spa::utils::{Direction, Fraction, Rectangle, SpaTypes};
+
+use crate::capture::{Capture, FrameInfo};
 
 /// Long-lived PipeWire connection shared by every cast.
 pub struct Pw {
@@ -69,15 +73,13 @@ impl Pw {
     }
 }
 
-/// Per-session capture state held by the daemon. Filled in the stream
-/// callbacks; the test pattern's frame counter and the negotiated geometry
-/// live here. Phase 2 adds the latest captured frame.
+/// Per-session stream state held by the listener: the negotiated geometry,
+/// set in `param_changed` and read in `process`.
 #[derive(Default)]
 struct StreamData {
     width: u32,
     height: u32,
     have_format: bool,
-    frame: u64,
 }
 
 /// One active screencast: the output stream plus its listener. Dropping it
@@ -90,7 +92,16 @@ pub struct Cast {
 /// Create + connect an output stream of the given size, returning the cast and
 /// its PipeWire node id (the value handed back to the app in Start's
 /// `results["streams"]`). Pumps the loop until the node id is assigned.
-pub fn start(pw: &Pw, width: u32, height: u32) -> Result<(Cast, u32)> {
+///
+/// `capture` is the WM frame source; the `process` callback captures a fresh
+/// frame and copies it into the PipeWire buffer (BGRx, top-to-bottom). It is
+/// shared (`Rc`) so the callback — which outlives this call — can keep using it.
+pub fn start(
+    pw: &Pw,
+    capture: Rc<RefCell<Capture>>,
+    width: u32,
+    height: u32,
+) -> Result<(Cast, u32)> {
     let stream = StreamRc::new(
         pw.core.clone(),
         "shoestring-screencast",
@@ -141,7 +152,7 @@ pub fn start(pw: &Pw, width: u32, height: u32) -> Result<(Cast, u32)> {
                 }
             }
         })
-        .process(|stream, data| {
+        .process(move |stream, data| {
             if !data.have_format {
                 return;
             }
@@ -152,18 +163,32 @@ pub fn start(pw: &Pw, width: u32, height: u32) -> Result<(Cast, u32)> {
             if datas.is_empty() {
                 return;
             }
-            data.frame = data.frame.wrapping_add(1);
-            let (w, h, frame) = (data.width, data.height, data.frame);
-            let stride = (w * 4) as i32;
+            let (dst_w, dst_h) = (data.width as usize, data.height as usize);
+            let dst_stride = dst_w * 4;
+
+            let mut cap = capture.borrow_mut();
+            let captured = match cap.capture() {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(error = %e, "screencast capture failed");
+                    false
+                }
+            };
             let d = &mut datas[0];
-            let filled = match d.data() {
-                Some(buf) => fill_test_pattern(buf, w, h, frame),
-                None => 0,
+            let filled = if captured {
+                match (d.data(), cap.frame()) {
+                    (Some(dst), Some((info, src))) => {
+                        copy_frame(dst, dst_stride, dst_w, dst_h, src, &info)
+                    }
+                    _ => 0,
+                }
+            } else {
+                0
             };
             let chunk = d.chunk_mut();
             *chunk.size_mut() = filled as u32;
             *chunk.offset_mut() = 0;
-            *chunk.stride_mut() = stride;
+            *chunk.stride_mut() = dst_stride as i32;
         })
         .register()
         .map_err(|e| anyhow!("pw stream register: {e}"))?;
@@ -262,28 +287,30 @@ fn buffers_param(stride: i32, size: i32) -> Vec<u8> {
     pod_bytes(&Value::Object(obj))
 }
 
-/// Fill a BGRx buffer with a moving diagonal pattern so a consumer sees live,
-/// changing video. Returns the number of bytes written. Placeholder until the
-/// screencopy capture lands in Phase 2.
-fn fill_test_pattern(buf: &mut [u8], width: u32, height: u32, frame: u64) -> usize {
-    let stride = (width * 4) as usize;
-    let h = height as usize;
-    let w = width as usize;
-    let phase = (frame & 0xff) as usize;
-    let total = (stride * h).min(buf.len());
-    for y in 0..h {
-        let row = y * stride;
-        if row + stride > buf.len() {
+/// Copy a captured frame into the PipeWire buffer, row by row, flipping
+/// vertically when the WM marked the capture `YInvert`. Source is wl_shm
+/// `Xrgb8888`/`Argb8888` (little-endian `[B,G,R,A]`), which matches our offered
+/// PipeWire `BGRx` byte-for-byte. Returns the number of bytes written.
+fn copy_frame(
+    dst: &mut [u8],
+    dst_stride: usize,
+    dst_w: usize,
+    dst_h: usize,
+    src: &[u8],
+    info: &FrameInfo,
+) -> usize {
+    let src_stride = info.stride as usize;
+    let src_h = info.height as usize;
+    let rows = dst_h.min(src_h);
+    let row_bytes = dst_w.min(info.width as usize) * 4;
+    for y in 0..rows {
+        let src_y = if info.yinvert { src_h - 1 - y } else { y };
+        let so = src_y * src_stride;
+        let doo = y * dst_stride;
+        if so + row_bytes > src.len() || doo + row_bytes > dst.len() {
             break;
         }
-        for x in 0..w {
-            let i = row + x * 4;
-            let v = ((x + y + phase) & 0xff) as u8;
-            buf[i] = v; // B
-            buf[i + 1] = v.wrapping_mul(2); // G
-            buf[i + 2] = 0x80u8.wrapping_add(v); // R
-            buf[i + 3] = 0xff; // x
-        }
+        dst[doo..doo + row_bytes].copy_from_slice(&src[so..so + row_bytes]);
     }
-    total
+    dst_stride * rows
 }

@@ -3657,10 +3657,14 @@ dependencies = [
  "anyhow",
  "libc",
  "libspa",
+ "memmap2",
  "pipewire",
  "rustbus",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]
