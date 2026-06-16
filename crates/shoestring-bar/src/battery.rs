@@ -57,11 +57,21 @@ pub fn auto_detect() -> Option<Box<dyn BatterySource>> {
 /// when charging, `-` when discharging, empty otherwise. Anything else
 /// in the template is passed through verbatim — no escaping needed,
 /// the placeholders are full strings rather than printf-style %s.
+///
+/// At 100% capacity the sign is always suppressed: a battery sitting on
+/// AC at full charge flickers its kernel status between `Full`,
+/// `Charging`, and `Discharging` (the latter as it sheds a trickle
+/// before topping back up), which otherwise makes the bar cycle between
+/// `100%` and `100%-`/`100%+`. At full there is nothing to signal.
 pub fn format_reading(reading: &BatteryReading, fmt: &str) -> String {
-    let sign = match reading.state {
-        BatteryState::Charging => "+",
-        BatteryState::Discharging => "-",
-        BatteryState::Full | BatteryState::Unknown => "",
+    let sign = if reading.capacity >= 100 {
+        ""
+    } else {
+        match reading.state {
+            BatteryState::Charging => "+",
+            BatteryState::Discharging => "-",
+            BatteryState::Full | BatteryState::Unknown => "",
+        }
     };
     fmt.replace("{pct}", &reading.capacity.to_string())
         .replace("{sign}", sign)
@@ -248,6 +258,16 @@ mod tests {
         );
         assert_eq!(
             format_reading(&reading(100, BatteryState::Full), fmt),
+            "100%"
+        );
+        // At full charge the sign is suppressed regardless of the
+        // (flickering) reported state — no "100%+"/"100%-" churn.
+        assert_eq!(
+            format_reading(&reading(100, BatteryState::Charging), fmt),
+            "100%"
+        );
+        assert_eq!(
+            format_reading(&reading(100, BatteryState::Discharging), fmt),
             "100%"
         );
         assert_eq!(

@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "regex",
  "serde",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-confirm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-ctl"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-ipc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-kill"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-lock"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-region"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-screenshot"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-wm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bitflags 2.13.0",
