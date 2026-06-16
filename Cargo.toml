@@ -12,6 +12,7 @@ members = [
     "crates/shoestring-notify",
     "crates/shoestring-region",
     "crates/shoestring-screenshot",
+    "crates/xdg-desktop-portal-shoestring",
 ]
 
 [workspace.package]

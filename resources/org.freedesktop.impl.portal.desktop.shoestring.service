@@ -1,0 +1,10 @@
+# D-Bus activation file for the shoestring-wm ScreenCast portal backend.
+# Lets the portal frontend launch us on demand if we aren't already running.
+# In a normal session the WM autostarts the helper (so it inherits the live
+# WAYLAND_DISPLAY/XDG_RUNTIME_DIR env and already owns the name); this file is
+# the fallback for setups that rely on D-Bus activation instead.
+#
+# Install to: /usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.shoestring.service
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.shoestring
+Exec=/usr/libexec/xdg-desktop-portal-shoestring

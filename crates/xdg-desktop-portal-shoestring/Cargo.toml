@@ -1,0 +1,35 @@
+[package]
+name = "xdg-desktop-portal-shoestring"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native xdg-desktop-portal ScreenCast backend for shoestring-wm: per-consumer dmabuf+shm PipeWire screencast over zwlr_screencopy_v1."
+repository = "https://github.com/barrendo/shoestring-wm"
+
+[[bin]]
+name = "xdg-desktop-portal-shoestring"
+path = "src/main.rs"
+
+[dependencies]
+# org.freedesktop.impl.portal.ScreenCast on the session bus. Pure-Rust DBus
+# stack — no libdbus/zbus async runtime — matching shoestring-notify so the
+# resolved dep set stays shared.
+rustbus = "0.19"
+
+# PipeWire client: we create the screencast stream and feed it frames. The
+# -sys crates bind libpipewire-0.3 / libspa-0.2 via bindgen (build-deps:
+# libclang + the pipewire dev headers).
+pipewire = "0.10"
+libspa = "0.10"
+
+# Lightweight error type for `main`.
+anyhow = "1"
+
+# `poll(2)` for the hand-rolled three-fd event loop (dbus + wayland +
+# pipewire). Already in the transitive tree via rustbus, so adds no crates.
+libc = "0.2"
+
+# Structured logs (env-filterable). Match shoestring-wm so RUST_LOG and the
+# SHOESTRING_*_LOG file redirect work the same way.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
