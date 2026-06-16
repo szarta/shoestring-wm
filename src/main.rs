@@ -27,6 +27,7 @@ mod remote_screenshot;
 mod scale;
 mod screencopy;
 mod state;
+mod virtual_pointer;
 mod window_ext;
 mod window_rules;
 mod workspace;

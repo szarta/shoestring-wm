@@ -99,6 +99,12 @@ Implemented today:
   clients can lock the cursor in place (receiving only relative deltas)
   or confine it to a region of their surface. A lock activates while the
   pointer is over the requesting surface and releases when it leaves.
+- Virtual pointer (``zwlr_virtual_pointer_v1``): clients such as
+  ``wlrctl``, remote-desktop agents and accessibility tools can emulate a
+  physical pointer — relative/absolute motion, buttons and scroll. Events
+  are buffered per device and delivered when the client sends ``frame``,
+  exactly like a real ``wl_pointer``. Unlike the IPC injection path this
+  is a standard client protocol and is *not* behind the automation gate.
 - Idle management (opt-in via ``[general].idle_notifications_enabled``):
   ``ext_idle_notify_v1`` for idle daemons/auto-lockers, paired with
   ``zwp_idle_inhibit_manager_v1`` so video players and browsers can

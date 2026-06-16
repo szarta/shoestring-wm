@@ -130,6 +130,12 @@ pub struct ShoestringWm {
     pub data_device_state: DataDeviceState,
     pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
+    /// wlr-virtual-pointer manager: lets clients (wlrctl, remote desktop)
+    /// emulate a physical pointer. Always-on and backend-agnostic; the per
+    /// resource event batching lives in [`crate::virtual_pointer`]. Held only
+    /// to keep the manager global registered for the WM's lifetime.
+    #[allow(dead_code)]
+    pub virtual_pointer: crate::virtual_pointer::VirtualPointerState,
     /// `zwp_linux_dmabuf_v1` delegate. The global is stood up lazily once the
     /// first GPU (udev backend) reports its render formats — see
     /// [`crate::backend::udev`]. Unlike the screencopy manager this is *not*
@@ -414,6 +420,14 @@ impl ShoestringWm {
             }),
             pending: Vec::new(),
         };
+        // wlr-virtual-pointer: advertise the manager (v2) unconditionally so
+        // pointer-injection clients (wlrctl, remote desktop) work out of the
+        // box, the way wlroots does. Unlike the WM's own IPC inject path, this
+        // is a standard client protocol and isn't behind the automation gate.
+        let virtual_pointer = crate::virtual_pointer::VirtualPointerState {
+            manager_global: dh
+                .create_global::<Self, _, _>(2, crate::virtual_pointer::VirtualPointerManagerData),
+        };
         // wlr-gamma-control: advertise the manager so night-light tools can
         // drive per-output gamma. Honored only for KMS outputs; binding it for
         // a non-udev output fails gracefully (see the handler). Version 1.
@@ -540,6 +554,7 @@ impl ShoestringWm {
             data_device_state,
             output_management,
             screencopy,
+            virtual_pointer,
             dmabuf_state: DmabufState::new(),
             #[cfg(feature = "tty")]
             dmabuf_global: None,

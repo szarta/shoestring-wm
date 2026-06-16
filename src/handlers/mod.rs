@@ -7,6 +7,7 @@ mod layer_shell;
 mod output_management;
 mod screencopy;
 pub(crate) mod session_lock;
+mod virtual_pointer;
 mod xdg_decoration;
 mod xdg_shell;
 
