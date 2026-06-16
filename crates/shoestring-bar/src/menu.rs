@@ -1,17 +1,17 @@
-//! Tray context menu — a popup rendered from a `com.canonical.dbusmenu` layout.
+//! Tray context menu — a cascade of `xdg_popup`s rendered from a
+//! `com.canonical.dbusmenu` layout.
 //!
-//! When the user clicks a tray icon the bar fetches that item's menu tree
-//! (see [`crate::tray::Tray::fetch_menu`]) and opens one of these: a second
-//! layer-shell surface on the **Overlay** layer, anchored just above (or below)
-//! the clicked icon. It requests `KeyboardInteractivity::Exclusive`, which the
-//! WM honours by transferring keyboard focus to it — so when the user clicks
-//! away (focus moves elsewhere) we get a `wl_keyboard::Leave` and dismiss,
-//! exactly like the shoestring-menu launcher. No xdg-popup grab needed (the
-//! WM's popup grab is a no-op), and no compositor changes.
+//! Clicking a tray icon opens the root menu: an `xdg_popup` parented to the
+//! bar's layer surface (`zwlr_layer_surface_v1.get_popup`), positioned by the
+//! compositor via an `xdg_positioner` and grabbed (`xdg_popup.grab`) so the
+//! compositor owns click-outside dismissal + focus. Submenus open as **nested
+//! child popups** anchored to the parent row and opening to the side (like
+//! GTK/Qt menus) — the grab covers the whole popup chain, so one grab on the
+//! root suffices.
 //!
-//! Submenus are navigated *in place* (a "‹ Back" row appears) rather than as
-//! cascading surfaces, which avoids the cross-gap pointer-leave problems of
-//! multi-surface menus and keeps everything in one buffer.
+//! Each level is a [`Level`] with its own surface/popup/buffer. The menu tracks
+//! which level the pointer is over (`active`) to route clicks, and re-fetches
+//! each submenu by label on descent (ids churn — see [`crate::tray`]).
 
 use std::os::fd::AsFd;
 
@@ -31,7 +31,7 @@ use wayland_protocols::wp::viewporter::client::{
 };
 use wayland_protocols::xdg::shell::client::{
     xdg_popup::XdgPopup,
-    xdg_positioner::{Anchor, ConstraintAdjustment, Gravity, XdgPositioner},
+    xdg_positioner::{Anchor, ConstraintAdjustment, Gravity},
     xdg_surface::XdgSurface,
     xdg_wm_base::XdgWmBase,
 };
@@ -59,24 +59,23 @@ const KEY_LEFT: u32 = 105;
 const KEY_RIGHT: u32 = 106;
 
 /// What a click / keypress resolved to. The bar's input handlers apply the
-/// UI-only variants directly to `State.menu`, and queue the tray ones (which
-/// need the D-Bus connection that lives outside `State`).
+/// UI-only variants directly; tray variants are queued (they need the D-Bus
+/// connection that lives outside `State`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Nothing actionable (e.g. clicked a separator or disabled row).
+    /// Nothing actionable (separator / disabled / empty).
     None,
-    /// Dismiss the menu.
+    /// Dismiss the whole menu.
     Close,
-    /// Pop one submenu level.
+    /// Close the deepest open submenu level (keyboard ←).
     NavBack,
-    /// Descend into the submenu with this label (ids churn — see [`crate::tray`]).
+    /// Open the submenu with this label as a child of the active level.
     NavInto(String),
     /// Send a `clicked` event for this dbusmenu id, then dismiss.
     Activate(i32),
 }
 
 enum RowKind {
-    Back,
     Separator,
     Entry {
         id: i32,
@@ -93,50 +92,37 @@ struct Row {
     kind: RowKind,
 }
 
-pub struct Menu {
-    pub surface: WlSurface,
+/// One open menu level: its own popup surface + the rows it shows.
+struct Level {
+    surface: WlSurface,
     xdg_surface: XdgSurface,
     xdg_popup: XdgPopup,
-    /// `xdg_wm_base`, kept so submenu navigation can build a fresh positioner
-    /// for `xdg_popup.reposition`.
-    wm_base: XdgWmBase,
     viewport: Option<WpViewport>,
     buffer: Option<BarBuffer>,
-    /// Size from the compositor's `xdg_popup.configure` (logical). Render
-    /// no-ops until the first configure arrives.
+    /// Size from the compositor's `xdg_popup.configure` (logical).
     size: Option<(u32, u32)>,
-    /// Size we request via the positioner (logical); also the hit-test basis.
+    /// Size requested via the positioner (logical); the hit-test/layout basis.
     want_size: (u32, u32),
-    /// Which tray item (index into `Tray.items`) this menu belongs to.
-    pub tray_idx: usize,
-    /// Entries at the level currently displayed.
-    current: Vec<MenuNode>,
-    /// Saved parent levels, innermost last — restored on "Back".
-    stack: Vec<Vec<MenuNode>>,
-    /// Submenu labels descended into (depth == `stack.len()`); the fetch context
-    /// for re-querying a level with current ids (see [`crate::tray::Tray::fetch_level`]).
-    path: Vec<String>,
-    /// Display rows for the current level, rebuilt on every (re)layout.
     rows: Vec<Row>,
-    /// Currently highlighted row index (into `rows`), if any.
     hover: Option<usize>,
-    /// Anchor rectangle (the clicked icon) in the bar surface's local coords —
-    /// the compositor positions the popup relative to this. Reused on reposition.
-    anchor_rect: (i32, i32, i32, i32),
-    position: Position,
-    /// Monotonic token for `xdg_popup.reposition`.
-    reposition_token: u32,
-    /// Widest level seen; the menu never shrinks below this, so descending into
-    /// a narrower submenu keeps the column under the pointer (preserves hover).
-    min_w: i32,
+    /// Submenu label this level represents (`None` for the root level).
+    label: Option<String>,
+}
+
+pub struct Menu {
+    pub tray_idx: usize,
+    wm_base: XdgWmBase,
+    /// Open levels, root first. `levels[0]` is parented to the bar; each deeper
+    /// level is a child popup anchored to its parent row.
+    levels: Vec<Level>,
+    /// Index of the level the pointer is currently over (for click routing).
+    active: Option<usize>,
 }
 
 impl Menu {
-    /// Create the menu as an `xdg_popup` parented to the bar's layer surface,
-    /// positioned by the compositor relative to `anchor_rect` (the clicked
-    /// icon's rect in bar-local coords). Grabs the popup with `serial` (the
-    /// click's input serial) so the compositor handles click-outside dismissal
-    /// and keyboard/pointer focus. Returns `None` if the seat is unavailable.
+    /// Open the root menu as an `xdg_popup` parented to the bar's layer surface,
+    /// positioned against `anchor_rect` (the clicked icon, in bar-local coords)
+    /// and grabbed with `serial` so the compositor handles dismissal + focus.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         compositor: &WlCompositor,
@@ -156,19 +142,20 @@ impl Menu {
         let surface = compositor.create_surface(qh, ());
         let xdg_surface = wm_base.get_xdg_surface(&surface, qh, ());
 
-        // Compute the level's rows + size before building the positioner.
         let mut min_w = 0;
-        let (rows, want_size) = compute_layout(&entries, false, font, font_size, &mut min_w);
+        let (rows, want_size) = compute_layout(&entries, font, font_size, &mut min_w);
 
-        let positioner = make_positioner(wm_base, qh, want_size, anchor_rect, position);
+        // Root: anchor to the icon, open away from the bar edge.
+        let (anchor, gravity) = match position {
+            Position::Bottom => (Anchor::Top, Gravity::Top),
+            Position::Top => (Anchor::Bottom, Gravity::Bottom),
+        };
+        let positioner = make_positioner(wm_base, qh, want_size, anchor_rect, anchor, gravity);
         let xdg_popup = xdg_surface.get_popup(None, &positioner, qh, ());
         positioner.destroy();
-        // Parent the popup to the bar's layer surface, then grab so the
-        // compositor handles click-outside dismissal + keyboard/pointer focus.
         bar_layer.get_popup(&xdg_popup);
         xdg_popup.grab(seat, serial);
         let viewport = viewporter.map(|vp| vp.get_viewport(&surface, qh, ()));
-        // Initial commit with no buffer: await the first xdg_surface.configure.
         surface.commit();
         tracing::debug!(
             ?anchor_rect,
@@ -179,151 +166,174 @@ impl Menu {
 
         let hover = first_selectable_in(&rows);
         Menu {
+            tray_idx,
+            wm_base: wm_base.clone(),
+            levels: vec![Level {
+                surface,
+                xdg_surface,
+                xdg_popup,
+                viewport,
+                buffer: None,
+                size: None,
+                want_size,
+                rows,
+                hover,
+                label: None,
+            }],
+            active: Some(0),
+        }
+    }
+
+    /// Open `entries` as a child popup anchored to the row labelled `label` in
+    /// level `parent` (which must be the deepest level; callers truncate first).
+    /// The child opens to the side; the root grab covers it (no re-grab).
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_child(
+        &mut self,
+        parent: usize,
+        label: String,
+        entries: Vec<MenuNode>,
+        compositor: &WlCompositor,
+        viewporter: Option<&WpViewporter>,
+        qh: &QueueHandle<State>,
+        font: &Font,
+        font_size: f32,
+    ) {
+        let Some(parent_level) = self.levels.get(parent) else {
+            return;
+        };
+        // Anchor rect = the parent row's band spanning the parent popup's width,
+        // so the child opens off its right edge, top-aligned with the row.
+        let row = parent_level
+            .rows
+            .iter()
+            .find(|r| matches!(&r.kind, RowKind::Entry { label: l, .. } if *l == label));
+        let (ry0, ry1) = row.map(|r| (r.y0, r.y1)).unwrap_or((0, 0));
+        let parent_w = parent_level.want_size.0 as i32;
+        let anchor_rect = (0, ry0, parent_w, (ry1 - ry0).max(1));
+        let parent_xdg = parent_level.xdg_surface.clone();
+
+        let surface = compositor.create_surface(qh, ());
+        let xdg_surface = wm_base_get_xdg_surface(&self.wm_base, &surface, qh);
+        let mut min_w = 0;
+        let (rows, want_size) = compute_layout(&entries, font, font_size, &mut min_w);
+        let positioner = make_positioner(
+            &self.wm_base,
+            qh,
+            want_size,
+            anchor_rect,
+            Anchor::TopRight,
+            Gravity::BottomRight,
+        );
+        let xdg_popup = xdg_surface.get_popup(Some(&parent_xdg), &positioner, qh, ());
+        positioner.destroy();
+        let viewport = viewporter.map(|vp| vp.get_viewport(&surface, qh, ()));
+        surface.commit();
+
+        let hover = first_selectable_in(&rows);
+        self.levels.push(Level {
             surface,
             xdg_surface,
             xdg_popup,
-            wm_base: wm_base.clone(),
             viewport,
             buffer: None,
             size: None,
             want_size,
-            tray_idx,
-            current: entries,
-            stack: Vec::new(),
-            path: Vec::new(),
             rows,
             hover,
-            anchor_rect,
-            position,
-            reposition_token: 0,
-            min_w,
+            label: Some(label),
+        });
+        self.active = Some(self.levels.len() - 1);
+    }
+
+    /// The submenu label path down to (and including) level `parent` — the
+    /// fetch context for the child of `parent` (see `Tray::fetch_level`).
+    pub fn path_to(&self, parent: usize) -> Vec<String> {
+        self.levels[1..=parent.min(self.levels.len().saturating_sub(1))]
+            .iter()
+            .filter_map(|l| l.label.clone())
+            .collect()
+    }
+
+    /// Destroy every level deeper than `keep` (closing child popups).
+    pub fn truncate_to(&mut self, keep: usize) {
+        while self.levels.len() > keep + 1 {
+            if let Some(l) = self.levels.pop() {
+                l.destroy();
+            }
+        }
+        if self.active.is_some_and(|a| a >= self.levels.len()) {
+            self.active = Some(self.levels.len() - 1);
         }
     }
 
-    /// True if `s` is this menu's surface (for routing pointer/keyboard events).
-    pub fn owns(&self, s: &WlSurface) -> bool {
-        &self.surface == s
-    }
-
-    /// Record the compositor's acked size. Returns whether it changed (→ redraw).
-    pub fn set_size(&mut self, w: u32, h: u32) -> bool {
-        let new = Some((w.max(1), h.max(1)));
-        if self.size != new {
-            self.size = new;
+    /// Close the deepest submenu level (keyboard ←). Returns false at the root.
+    pub fn pop_child(&mut self) -> bool {
+        if self.levels.len() > 1 {
+            if let Some(l) = self.levels.pop() {
+                l.destroy();
+            }
+            self.active = Some(self.levels.len() - 1);
             true
         } else {
             false
         }
     }
 
-    /// Rebuild `rows`/`want_size`/`hover` for the current nav level.
-    fn relayout(&mut self, font: &Font, font_size: f32) {
-        let (rows, want_size) = compute_layout(
-            &self.current,
-            !self.stack.is_empty(),
-            font,
-            font_size,
-            &mut self.min_w,
-        );
-        self.want_size = want_size;
-        self.rows = rows;
-        self.hover = first_selectable_in(&self.rows);
+    pub fn active(&self) -> Option<usize> {
+        self.active
     }
 
-    /// Apply a navigation change (into/back): re-lay out and ask the compositor
-    /// to reposition the popup to the new size via `xdg_popup.reposition`.
-    pub fn renavigate(&mut self, font: &Font, font_size: f32, qh: &QueueHandle<State>) {
-        self.relayout(font, font_size);
-        let positioner = make_positioner(
-            &self.wm_base,
-            qh,
-            self.want_size,
-            self.anchor_rect,
-            self.position,
-        );
-        self.reposition_token = self.reposition_token.wrapping_add(1);
-        self.xdg_popup
-            .reposition(&positioner, self.reposition_token);
-        positioner.destroy();
+    /// Which level owns `s` (pointer routing); also records it as active.
+    pub fn surface_level(&self, s: &WlSurface) -> Option<usize> {
+        self.levels.iter().position(|l| &l.surface == s)
     }
 
-    /// The submenu label path currently descended into — the fetch context for
-    /// [`crate::tray::Tray::fetch_level`].
-    pub fn path(&self) -> Vec<String> {
-        self.path.clone()
-    }
-
-    /// Descend into a freshly-fetched submenu `label`: save the current level
-    /// and make `children` the new one. (Fetched by the caller via
-    /// `Tray::fetch_level`, since it needs the D-Bus connection.)
-    pub fn push_level(&mut self, label: String, children: Vec<MenuNode>) {
-        let prev = std::mem::take(&mut self.current);
-        self.stack.push(prev);
-        self.path.push(label);
-        self.current = children;
-    }
-
-    /// Pop a level; returns false if already at the root (→ caller closes).
-    pub fn pop_level(&mut self) -> bool {
-        if let Some(prev) = self.stack.pop() {
-            self.current = prev;
-            self.path.pop();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn selectable(&self, idx: usize) -> bool {
-        matches!(
-            self.rows.get(idx).map(|r| &r.kind),
-            Some(RowKind::Back) | Some(RowKind::Entry { enabled: true, .. })
-        )
-    }
-
-    #[allow(dead_code)]
-    fn first_selectable(&self) -> Option<usize> {
-        first_selectable_in(&self.rows)
-    }
-
-    /// Move the highlight by `delta` rows (±1), skipping non-selectable rows
-    /// and wrapping at the ends.
-    pub fn move_hover(&mut self, delta: i32) {
-        let n = self.rows.len();
-        if n == 0 {
-            return;
-        }
-        let start = self.hover.unwrap_or(0);
-        let mut i = start as i32;
-        for _ in 0..n {
-            i = (i + delta).rem_euclid(n as i32);
-            if self.selectable(i as usize) {
-                self.hover = Some(i as usize);
-                return;
+    pub fn set_active(&mut self, idx: Option<usize>) {
+        if let Some(i) = idx {
+            if i < self.levels.len() {
+                self.active = Some(i);
             }
         }
     }
 
-    /// Set the highlight from a surface-local pointer y (logical). Returns
-    /// whether the highlight changed (→ redraw).
-    pub fn hover_at(&mut self, y: f64) -> bool {
+    /// Record the acked size for the popup `p`. Returns true if it changed.
+    pub fn set_popup_size(&mut self, p: &XdgPopup, w: u32, h: u32) -> bool {
+        if let Some(l) = self.levels.iter_mut().find(|l| &l.xdg_popup == p) {
+            let new = Some((w.max(1), h.max(1)));
+            if l.size != new {
+                l.size = new;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Highlight the row under surface-local `y` in level `idx`. Returns whether
+    /// the highlight changed (→ redraw).
+    pub fn hover_at(&mut self, idx: usize, y: f64) -> bool {
+        let Some(l) = self.levels.get_mut(idx) else {
+            return false;
+        };
         let yi = y.round() as i32;
-        let hit = self
+        let hit = l
             .rows
             .iter()
             .position(|r| yi >= r.y0 && yi < r.y1 && row_selectable(&r.kind));
-        if hit != self.hover && hit.is_some() {
-            self.hover = hit;
+        if hit.is_some() && hit != l.hover {
+            l.hover = hit;
             true
         } else {
             false
         }
     }
 
-    /// Resolve the currently highlighted row to an [`Action`] (Enter / click).
-    pub fn activate_hover(&self) -> Action {
-        match self.hover.and_then(|i| self.rows.get(i)).map(|r| &r.kind) {
-            Some(RowKind::Back) => Action::NavBack,
+    /// Resolve the hovered row in the active level to an [`Action`].
+    pub fn activate_active(&self) -> Action {
+        let Some(l) = self.active.and_then(|i| self.levels.get(i)) else {
+            return Action::None;
+        };
+        match l.hover.and_then(|i| l.rows.get(i)).map(|r| &r.kind) {
             Some(RowKind::Entry {
                 id,
                 label,
@@ -341,39 +351,78 @@ impl Menu {
         }
     }
 
-    /// Map a raw evdev keycode to an [`Action`]. Hover-moving keys mutate state
-    /// and return `None` (the caller always redraws after input).
+    /// Map a raw evdev keycode to an [`Action`], operating on the deepest level.
     pub fn key(&mut self, code: u32) -> Action {
+        let deepest = self.levels.len() - 1;
+        self.active = Some(deepest);
         match code {
-            KEY_ESC => {
-                if self.stack.is_empty() {
-                    Action::Close
-                } else {
-                    Action::NavBack
-                }
-            }
+            KEY_ESC => Action::Close,
             KEY_LEFT => {
-                if self.stack.is_empty() {
-                    Action::None
-                } else {
+                if self.levels.len() > 1 {
                     Action::NavBack
+                } else {
+                    Action::None
                 }
             }
             KEY_UP => {
-                self.move_hover(-1);
+                self.move_hover(deepest, -1);
                 Action::None
             }
             KEY_DOWN => {
-                self.move_hover(1);
+                self.move_hover(deepest, 1);
                 Action::None
             }
-            KEY_ENTER | KEY_KPENTER | KEY_RIGHT => self.activate_hover(),
+            KEY_ENTER | KEY_KPENTER | KEY_RIGHT => self.activate_active(),
             _ => Action::None,
         }
     }
 
-    /// Compose the menu into its buffer and attach. No-op until configured.
+    fn move_hover(&mut self, idx: usize, delta: i32) {
+        let Some(l) = self.levels.get_mut(idx) else {
+            return;
+        };
+        let n = l.rows.len();
+        if n == 0 {
+            return;
+        }
+        let mut i = l.hover.unwrap_or(0) as i32;
+        for _ in 0..n {
+            i = (i + delta).rem_euclid(n as i32);
+            if row_selectable(&l.rows[i as usize].kind) {
+                l.hover = Some(i as usize);
+                return;
+            }
+        }
+    }
+
+    /// Render every configured level into its buffer.
     pub fn render(
+        &mut self,
+        qh: &QueueHandle<State>,
+        shm: &WlShm,
+        font: &Font,
+        scale: f64,
+        font_size: f32,
+        bg: u32,
+        fg: u32,
+    ) {
+        for l in self.levels.iter_mut() {
+            if let Err(e) = l.render(qh, shm, font, scale, font_size, bg, fg) {
+                tracing::warn!(error = ?e, "tray menu level render failed");
+            }
+        }
+    }
+
+    /// Tear down all levels (deepest first).
+    pub fn destroy(mut self) {
+        while let Some(l) = self.levels.pop() {
+            l.destroy();
+        }
+    }
+}
+
+impl Level {
+    fn render(
         &mut self,
         qh: &QueueHandle<State>,
         shm: &WlShm,
@@ -386,12 +435,6 @@ impl Menu {
         let Some((w, h)) = self.size else {
             return Ok(());
         };
-        tracing::debug!(
-            size_w = w,
-            size_h = h,
-            rows = self.rows.len(),
-            "menu render"
-        );
         let pw = ((w as f64) * scale).round().max(1.0) as u32;
         let ph = ((h as f64) * scale).round().max(1.0) as u32;
         let s = |v: i32| ((v as f64) * scale).round() as i32;
@@ -440,33 +483,6 @@ impl Menu {
                         DIM,
                     );
                 }
-                RowKind::Back => {
-                    let hovered = self.hover == Some(i);
-                    if hovered {
-                        fill_rect(
-                            &mut mmap,
-                            pw,
-                            ph,
-                            s(2),
-                            s(row.y0),
-                            pw as i32 - s(4),
-                            s(row.y1 - row.y0),
-                            ACCENT,
-                        );
-                    }
-                    draw_row_text(
-                        &mut mmap,
-                        pw,
-                        ph,
-                        font,
-                        font_px,
-                        s(PAD_X),
-                        s(row.y0),
-                        s(row.y1),
-                        "‹ Back",
-                        fg,
-                    );
-                }
                 RowKind::Entry {
                     label,
                     enabled,
@@ -474,8 +490,7 @@ impl Menu {
                     toggle,
                     ..
                 } => {
-                    let hovered = self.hover == Some(i);
-                    if hovered {
+                    if self.hover == Some(i) {
                         fill_rect(
                             &mut mmap,
                             pw,
@@ -500,7 +515,6 @@ impl Menu {
                         label,
                         color,
                     );
-                    // Right gutter: submenu arrow, else check for a toggled item.
                     let marker = if *submenu {
                         "›"
                     } else if *toggle == Some(true) {
@@ -539,9 +553,8 @@ impl Menu {
         Ok(())
     }
 
-    /// Tear down the popup (called on dismiss / popup_done). Destroy in the
-    /// xdg-shell order: popup, then xdg_surface, then the wl_surface.
-    pub fn destroy(self) {
+    /// Destroy in xdg-shell order: popup, xdg_surface, wl_surface.
+    fn destroy(self) {
         if let Some(b) = self.buffer {
             b.buffer.destroy();
         }
@@ -554,47 +567,52 @@ impl Menu {
     }
 }
 
-/// Build an `xdg_positioner` for `want_size`, anchored to `anchor_rect` (the
-/// icon, in bar-local coords) and opening away from the bar edge.
+/// Helper so `push_child` can create the xdg_surface without re-borrowing self
+/// for the whole expression (keeps the borrow checker happy alongside `levels`).
+fn wm_base_get_xdg_surface(
+    wm_base: &XdgWmBase,
+    surface: &WlSurface,
+    qh: &QueueHandle<State>,
+) -> XdgSurface {
+    wm_base.get_xdg_surface(surface, qh, ())
+}
+
+/// Build an `xdg_positioner` for `want_size` against `anchor_rect`.
 fn make_positioner(
     wm_base: &XdgWmBase,
     qh: &QueueHandle<State>,
     want_size: (u32, u32),
     anchor_rect: (i32, i32, i32, i32),
-    position: Position,
-) -> XdgPositioner {
+    anchor: Anchor,
+    gravity: Gravity,
+) -> wayland_protocols::xdg::shell::client::xdg_positioner::XdgPositioner {
     let p = wm_base.create_positioner(qh, ());
     p.set_size(want_size.0.max(1) as i32, want_size.1.max(1) as i32);
     let (ax, ay, aw, ah) = anchor_rect;
     p.set_anchor_rect(ax, ay, aw.max(1), ah.max(1));
-    match position {
-        Position::Bottom => {
-            p.set_anchor(Anchor::Top);
-            p.set_gravity(Gravity::Top);
-        }
-        Position::Top => {
-            p.set_anchor(Anchor::Bottom);
-            p.set_gravity(Gravity::Bottom);
-        }
-    }
+    p.set_anchor(anchor);
+    p.set_gravity(gravity);
     p.set_constraint_adjustment(
-        ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX | ConstraintAdjustment::ResizeY,
+        ConstraintAdjustment::FlipX
+            | ConstraintAdjustment::FlipY
+            | ConstraintAdjustment::SlideX
+            | ConstraintAdjustment::SlideY
+            | ConstraintAdjustment::ResizeY,
     );
     p
 }
 
-/// First selectable (Back or enabled Entry) row index, if any.
+fn row_selectable(kind: &RowKind) -> bool {
+    matches!(kind, RowKind::Entry { enabled: true, .. })
+}
+
 fn first_selectable_in(rows: &[Row]) -> Option<usize> {
     (0..rows.len()).find(|&i| row_selectable(&rows[i].kind))
 }
 
-/// Compute display `rows` + logical `want_size` for `current` (plus a leading
-/// "‹ Back" row when `has_back`). `min_w` is the widest level seen so far and is
-/// bumped (never shrinks) so descending into a narrower submenu keeps the column
-/// under the pointer.
+/// Compute display `rows` + logical `want_size` for `nodes`.
 fn compute_layout(
-    current: &[MenuNode],
-    has_back: bool,
+    nodes: &[MenuNode],
     font: &Font,
     font_size: f32,
     min_w: &mut i32,
@@ -602,17 +620,9 @@ fn compute_layout(
     let row_h = (font_size + 10.0).round() as i32;
     let mut rows: Vec<Row> = Vec::new();
     let mut y = VPAD;
-    let mut max_label = measure_text(font, font_size, "‹ Back");
+    let mut max_label = 0;
 
-    if has_back {
-        rows.push(Row {
-            y0: y,
-            y1: y + row_h,
-            kind: RowKind::Back,
-        });
-        y += row_h;
-    }
-    for n in current {
+    for n in nodes {
         if !n.visible {
             continue;
         }
@@ -643,18 +653,11 @@ fn compute_layout(
 
     let cw = (PAD_X * 2 + GUTTER + max_label).clamp(MIN_W, MAX_W);
     *min_w = (*min_w).max(cw);
-    let w = *min_w;
     let h = y.max(row_h + VPAD * 2);
-    (rows, (w as u32, h as u32))
+    (rows, (*min_w as u32, h as u32))
 }
 
-fn row_selectable(kind: &RowKind) -> bool {
-    matches!(kind, RowKind::Back | RowKind::Entry { enabled: true, .. })
-}
-
-/// Draw a row's text, vertically centered within the band `[py0, py1)`
-/// (physical px). Mirrors the bar's `draw_text` baseline math but centers on
-/// the row rather than the whole buffer, blitting through `blit_alpha`.
+/// Draw a row's text vertically centered within `[py0, py1)` (physical px).
 #[allow(clippy::too_many_arguments)]
 fn draw_row_text(
     mmap: &mut MmapMut,

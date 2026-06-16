@@ -250,9 +250,10 @@ struct State {
     pending_open_menu: Option<usize>,
     /// dbusmenu id the loop should send a `clicked` event for, then dismiss.
     pending_menu_click: Option<i32>,
-    /// Submenu label the loop should fetch and descend into — submenu children
-    /// are populated lazily (and ids churn), so we re-query by label.
-    pending_menu_nav: Option<String>,
+    /// `(parent level index, submenu label)` the loop should fetch and open as
+    /// a child popup — submenu children are populated lazily (and ids churn),
+    /// so we re-query by label path.
+    pending_menu_nav: Option<(usize, String)>,
     /// Auto-detected battery source. `None` on systems with no
     /// recognised battery — the indicator is hidden entirely in that
     /// case so the bar layout doesn't reserve dead space.
@@ -815,17 +816,33 @@ fn event_loop(
                 m.destroy();
             }
         }
-        if let Some(label) = state.pending_menu_nav.take() {
-            let ctx = state.menu.as_ref().map(|m| (m.tray_idx, m.path()));
-            if let (Some(t), Some((ti, mut path))) = (tray.as_mut(), ctx) {
+        if let Some((parent, label)) = state.pending_menu_nav.take() {
+            // Close any deeper levels, then fetch this submenu by its label path
+            // and open it as a child popup of `parent`.
+            if let Some(m) = state.menu.as_mut() {
+                m.truncate_to(parent);
+            }
+            let ctx = state.menu.as_ref().map(|m| {
+                let mut path = m.path_to(parent);
                 path.push(label.clone());
+                (m.tray_idx, path)
+            });
+            if let (Some(t), Some((ti, path))) = (tray.as_mut(), ctx) {
                 match t.fetch_level(ti, &path) {
                     Some(entries) => {
                         tracing::debug!(%label, count = entries.len(), "tray submenu fetched");
                         let fs = state.cfg.font_size;
                         if let Some(m) = state.menu.as_mut() {
-                            m.push_level(label, entries);
-                            m.renavigate(&state.font, fs, qh);
+                            m.push_child(
+                                parent,
+                                label,
+                                entries,
+                                &state.compositor,
+                                state.viewporter.as_ref(),
+                                qh,
+                                &state.font,
+                                fs,
+                            );
                         }
                         state.menu_dirty = true;
                     }
@@ -1765,7 +1782,7 @@ impl Dispatch<XdgSurface, ()> for State {
 impl Dispatch<XdgPopup, ()> for State {
     fn event(
         state: &mut Self,
-        _popup: &XdgPopup,
+        popup: &XdgPopup,
         event: <XdgPopup as Proxy>::Event,
         _: &(),
         _: &Connection,
@@ -1775,7 +1792,7 @@ impl Dispatch<XdgPopup, ()> for State {
             xdg_popup::Event::Configure { width, height, .. } => {
                 if width > 0 && height > 0 {
                     if let Some(m) = state.menu.as_mut() {
-                        m.set_size(width as u32, height as u32);
+                        m.set_popup_size(popup, width as u32, height as u32);
                     }
                 }
                 state.menu_dirty = true;
@@ -1871,12 +1888,13 @@ impl Dispatch<WlPointer, ()> for State {
             } => {
                 state.pointer_x = Some(surface_x);
                 state.pointer_y = Some(surface_y);
-                state.pointer_on_menu = state.menu.as_ref().is_some_and(|m| m.owns(&surface));
-                if state.pointer_on_menu {
-                    if let Some(m) = state.menu.as_mut() {
-                        if m.hover_at(surface_y) {
-                            state.menu_dirty = true;
-                        }
+                // Which menu level (if any) did we enter? Make it active.
+                let lvl = state.menu.as_ref().and_then(|m| m.surface_level(&surface));
+                state.pointer_on_menu = lvl.is_some();
+                if let (Some(m), Some(i)) = (state.menu.as_mut(), lvl) {
+                    m.set_active(Some(i));
+                    if m.hover_at(i, surface_y) {
+                        state.menu_dirty = true;
                     }
                 }
             }
@@ -1888,8 +1906,11 @@ impl Dispatch<WlPointer, ()> for State {
                 state.pointer_x = Some(surface_x);
                 state.pointer_y = Some(surface_y);
                 if state.pointer_on_menu {
-                    if let Some(m) = state.menu.as_mut() {
-                        if m.hover_at(surface_y) {
+                    if let Some((m, i)) = state.menu.as_mut().and_then(|m| {
+                        let i = m.active()?;
+                        Some((m, i))
+                    }) {
+                        if m.hover_at(i, surface_y) {
                             state.menu_dirty = true;
                         }
                     }
@@ -1917,7 +1938,7 @@ impl Dispatch<WlPointer, ()> for State {
 
                 // Click inside the open tray menu: resolve the hovered row.
                 if state.pointer_on_menu {
-                    let action = state.menu.as_ref().map(|m| m.activate_hover());
+                    let action = state.menu.as_ref().map(|m| m.activate_active());
                     if let Some(action) = action {
                         apply_menu_action(state, action, qh);
                     }
@@ -2008,26 +2029,20 @@ fn apply_menu_action(state: &mut State, action: menu::Action, qh: &QueueHandle<S
         menu::Action::NavInto(label) => {
             // Deferred: descending fetches the submenu (lazy population), which
             // needs the D-Bus connection that lives in the loop, not here.
-            state.pending_menu_nav = Some(label);
+            // Open it as a child of the level the pointer/keyboard is on.
+            if let Some(level) = state.menu.as_ref().and_then(|m| m.active()) {
+                state.pending_menu_nav = Some((level, label));
+            }
         }
         menu::Action::NavBack => {
-            let fs = state.cfg.font_size;
-            let mut close = false;
+            // Close the deepest submenu level (keyboard ←).
             if let Some(m) = state.menu.as_mut() {
-                if m.pop_level() {
-                    m.renavigate(&state.font, fs, qh);
-                } else {
-                    close = true;
-                }
-            }
-            if close {
-                if let Some(m) = state.menu.take() {
-                    m.destroy();
-                }
+                m.pop_child();
             }
             state.menu_dirty = true;
         }
     }
+    let _ = qh;
 }
 
 /// Render the open tray menu into its buffer. Split-borrow over `State`:
@@ -2039,9 +2054,7 @@ fn render_menu(state: &mut State, qh: &QueueHandle<State>) {
     let fg = state.cfg.foreground;
     let shm = state.shm.clone();
     if let Some(menu) = state.menu.as_mut() {
-        if let Err(e) = menu.render(qh, &shm, &state.font, scale, font_size, bg, fg) {
-            tracing::warn!(error = ?e, "tray menu render failed");
-        }
+        menu.render(qh, &shm, &state.font, scale, font_size, bg, fg);
     }
 }
 
