@@ -201,11 +201,12 @@ pub fn process_pending<R>(
         drop(framebuffer);
         match result {
             Ok(()) => {
-                // Same YInvert as the shm path: we render through a GL FBO
-                // (here over the dmabuf's EGLImage), whose bottom-left origin
-                // leaves the buffer rows bottom-to-top. Matches wlroots' GL
-                // screencopy behaviour.
-                finish_frame(&frame);
+                // dmabuf is Y-inverted: we render through a GL FBO over the
+                // dmabuf's EGLImage, whose bottom-left origin leaves the buffer
+                // rows bottom-to-top (matches wlroots). The shm path is NOT
+                // inverted — `copy_framebuffer`'s readback lands rows top-to-
+                // bottom — so only the dmabuf path flags YInvert.
+                finish_frame(&frame, true);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: dmabuf render failed");
@@ -308,7 +309,9 @@ pub fn process_pending<R>(
 
             match copy_region(renderer, &framebuffer, region, format, stride, &buffer) {
                 Ok(()) => {
-                    finish_frame(&frame);
+                    // shm readback (copy_framebuffer) lands rows top-to-bottom;
+                    // no YInvert (see the dmabuf path comment above).
+                    finish_frame(&frame, false);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "screencopy: copy_region failed");
@@ -320,14 +323,22 @@ pub fn process_pending<R>(
     }
 }
 
-/// Complete a successfully captured frame: send `flags`, then a `damage`
-/// event if the client used `copy_with_damage`, then `ready` — in that order,
-/// matching wlroots. The damage box covers the whole capture region because
-/// each capture repaints the full output (no incremental damage tracking
-/// against prior captures). Reads `with_damage`/`region` from the frame's own
-/// user data so both the dmabuf and shm paths share one code path.
-fn finish_frame(frame: &ZwlrScreencopyFrameV1) {
-    frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
+/// Complete a successfully captured frame: send `flags` (only when the buffer
+/// is Y-inverted), then a `damage` event if the client used `copy_with_damage`,
+/// then `ready` — in that order, matching wlroots. The damage box covers the
+/// whole capture region because each capture repaints the full output (no
+/// incremental damage tracking against prior captures). Reads
+/// `with_damage`/`region` from the frame's own user data so both the dmabuf and
+/// shm paths share one code path.
+///
+/// `y_invert` differs per path: the dmabuf path renders into an EGLImage FBO
+/// (bottom-left origin → rows bottom-to-top → invert), while the shm path's
+/// `copy_framebuffer` readback already lands rows top-to-bottom. Tagging shm as
+/// inverted is what flipped `shoestring-screenshot` PNGs and portal frames.
+fn finish_frame(frame: &ZwlrScreencopyFrameV1, y_invert: bool) {
+    if y_invert {
+        frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
+    }
     if let Some(user) = frame.data::<ScreencopyFrameData>() {
         let (with_damage, region) = {
             let inner = user.inner.lock().unwrap();
