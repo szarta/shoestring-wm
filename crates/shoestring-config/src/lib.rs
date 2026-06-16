@@ -410,6 +410,18 @@ pub struct General {
     /// `screenshot` request (separately behind the automation gate).
     #[serde(default)]
     pub screen_capture_enabled: bool,
+    /// Capture-buffer policy for `zwlr_screencopy_v1`. When `false` (default)
+    /// we advertise a dmabuf format for full-output captures, so the
+    /// screencast consumer (via xdg-desktop-portal-wlr) gets zero-copy GPU
+    /// buffers — fast, and what browsers/OBS prefer. Some consumers can't
+    /// import a dmabuf, though (notably Zoom's bundled Mesa: the share starts
+    /// then drops with `MESA-LOADER: failed to retrieve device information`).
+    /// Set `true` to advertise **shm only**, forcing the portal onto
+    /// shared-memory frames those consumers can read. This is a global escape
+    /// hatch (every consumer then takes the slower CPU-copy path); the real
+    /// fix is per-consumer buffer negotiation in a native screencast portal.
+    #[serde(default)]
+    pub screencast_prefer_shm: bool,
     /// Advertise the `ext_idle_notify_v1` global so clients (idle daemons,
     /// screen-dimmers, auto-lockers) can ask to be told after N ms of no
     /// input. Off by default: on a desktop that never travels, idle
@@ -476,6 +488,7 @@ impl Default for General {
             autostart: default_autostart(),
             automation_enabled: false,
             screen_capture_enabled: false,
+            screencast_prefer_shm: false,
             idle_notifications_enabled: false,
             xkb_layout: String::new(),
             xkb_variant: String::new(),
