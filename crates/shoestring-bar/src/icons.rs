@@ -421,6 +421,26 @@ fn file_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Active GTK icon theme from `~/.config/gtk-3.0/settings.ini`
+/// (`gtk-icon-theme-name`). Cheap and dependency-free; good enough without
+/// pulling in gsettings.
+fn detect_gtk_theme() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let cfg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let text = std::fs::read_to_string(cfg.join("gtk-3.0/settings.ini")).ok()?;
+    for line in text.lines() {
+        if let Some(v) = line.trim().strip_prefix("gtk-icon-theme-name") {
+            let v = v.trim_start_matches([' ', '=']).trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,8 +472,7 @@ mod tests {
             enc.set_color(png::ColorType::Rgba);
             enc.set_depth(png::BitDepth::Eight);
             let mut writer = enc.write_header().unwrap();
-            let data: Vec<u8> = std::iter::repeat([0u8, 0, 255, 255])
-                .take((w * h) as usize)
+            let data: Vec<u8> = std::iter::repeat_n([0u8, 0, 255, 255], (w * h) as usize)
                 .flatten()
                 .collect();
             writer.write_image_data(&data).unwrap();
@@ -483,24 +502,4 @@ mod tests {
         assert_eq!(fixed(24).size_distance(24), 0);
         assert!(fixed(48).size_distance(24) > fixed(22).size_distance(24));
     }
-}
-
-/// Active GTK icon theme from `~/.config/gtk-3.0/settings.ini`
-/// (`gtk-icon-theme-name`). Cheap and dependency-free; good enough without
-/// pulling in gsettings.
-fn detect_gtk_theme() -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let cfg = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    let text = std::fs::read_to_string(cfg.join("gtk-3.0/settings.ini")).ok()?;
-    for line in text.lines() {
-        if let Some(v) = line.trim().strip_prefix("gtk-icon-theme-name") {
-            let v = v.trim_start_matches([' ', '=']).trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
 }
