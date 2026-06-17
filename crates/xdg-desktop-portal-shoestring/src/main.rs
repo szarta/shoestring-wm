@@ -51,6 +51,10 @@ fn main() -> Result<()> {
                     env!("CARGO_PKG_VERSION")
                 )
             }
+            CliAction::SelftestDmabuf(path) => {
+                capture::selftest_dmabuf(None, std::path::Path::new(&path))?;
+                println!("{path}");
+            }
         }
         return Ok(());
     }
@@ -221,6 +225,8 @@ fn init_logging() {
 enum CliAction {
     Help,
     Version,
+    /// Hidden developer aid: capture the screen into a dmabuf and write a PNG.
+    SelftestDmabuf(String),
 }
 
 /// Hand-parse argv; staying lean is a project goal (notify/bar do the same).
@@ -231,6 +237,13 @@ fn parse_cli() -> Result<Option<CliAction>> {
         None => Ok(None),
         Some("-h" | "--help") => Ok(Some(CliAction::Help)),
         Some("-V" | "--version") => Ok(Some(CliAction::Version)),
+        Some("--selftest-dmabuf") => {
+            let path = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("--selftest-dmabuf needs a PNG output path"))?;
+            Ok(Some(CliAction::SelftestDmabuf(path)))
+        }
         Some(other) => anyhow::bail!("unknown argument: {other:?} (try --help)"),
     }
 }

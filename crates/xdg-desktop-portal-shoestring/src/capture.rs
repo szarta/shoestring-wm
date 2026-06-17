@@ -27,12 +27,20 @@ use wayland_client::{
     },
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+    zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
+};
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, Flags, ZwlrScreencopyFrameV1},
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use std::os::fd::AsFd;
+use drm_fourcc::{DrmFourcc, DrmModifier};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::os::fd::{AsFd, OwnedFd};
+use std::path::PathBuf;
 
 /// Geometry + pixel layout of a captured frame.
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +66,28 @@ pub struct Capture {
     output: WlOutput,
     state: CaptureState,
     buf: Option<Buf>,
+    /// `zwp_linux_dmabuf_v1` (if the WM advertises it), for wrapping gbm buffers
+    /// as wl_buffers. `None` ⇒ no dmabuf path, shm only.
+    dmabuf: Option<ZwpLinuxDmabufV1>,
+    /// gbm device on the render node, opened lazily on first dmabuf allocation.
+    gbm: Option<gbm::Device<File>>,
+}
+
+/// A GPU buffer that backs one PipeWire dmabuf buffer: the gbm allocation (whose
+/// `OwnedFd` keeps the dmabuf alive), the screencopy target `wl_buffer` wrapping
+/// it, and the single-plane layout PipeWire needs. Single-plane only (our
+/// XRGB/ARGB formats); multi-plane allocations are rejected back to shm.
+pub struct DmabufSlot {
+    _bo: gbm::BufferObject<()>,
+    wl_buffer: WlBuffer,
+    /// Owned dmabuf fd (plane 0). Borrowed by PipeWire's `spa_data`; stays alive
+    /// as long as the slot does.
+    pub fd: OwnedFd,
+    pub width: u32,
+    pub height: u32,
+    pub modifier: u64,
+    pub offset: u32,
+    pub stride: u32,
 }
 
 /// Reused shm buffer the WM copies into. Dropped/recreated only if the output
@@ -88,6 +118,15 @@ impl Capture {
              (run `shoestring-ctl screen-capture on`)",
         )?;
 
+        // zwp_linux_dmabuf_v1 is optional. Bind v3 so the global emits its
+        // `format`/`modifier` events during the roundtrip below; we collect them
+        // to allocate gbm buffers with a modifier the WM can import. Absent ⇒
+        // the dmabuf path is simply never offered.
+        let dmabuf: Option<ZwpLinuxDmabufV1> = globals.bind(&qh, 1..=3, ()).ok();
+        if dmabuf.is_none() {
+            tracing::info!("zwp_linux_dmabuf_v1 absent — screencast will be shm-only");
+        }
+
         let outputs: Vec<WlOutput> = globals.contents().with_list(|list| {
             list.iter()
                 .filter(|g| g.interface == "wl_output")
@@ -108,6 +147,7 @@ impl Capture {
                 })
                 .collect(),
             frame: FrameState::Initial,
+            dmabuf_formats: HashMap::new(),
         };
         // Resolve output names (wl_output.name, v4+) before matching.
         queue
@@ -125,6 +165,8 @@ impl Capture {
             output,
             state,
             buf: None,
+            dmabuf,
+            gbm: None,
         })
     }
 
@@ -194,6 +236,161 @@ impl Capture {
             .ok_or_else(|| anyhow!("no frame captured"))
     }
 
+    /// Whether the dmabuf path can be offered for `fourcc`: the WM bound
+    /// `zwp_linux_dmabuf_v1` and advertised at least one modifier for it.
+    pub fn dmabuf_supported(&self, fourcc: u32) -> bool {
+        self.dmabuf.is_some() && self.state.dmabuf_formats.contains_key(&fourcc)
+    }
+
+    /// Allocate a gbm buffer for `(width, height, fourcc)` and wrap it as a
+    /// `wl_buffer` the WM can render into via screencopy. The returned slot owns
+    /// the gbm bo (keeping the dmabuf fd alive) and the wl_buffer.
+    pub fn alloc_dmabuf(&mut self, width: u32, height: u32, fourcc: u32) -> Result<DmabufSlot> {
+        let dmabuf = self
+            .dmabuf
+            .clone()
+            .ok_or_else(|| anyhow!("zwp_linux_dmabuf_v1 unavailable"))?;
+        let format =
+            DrmFourcc::try_from(fourcc).map_err(|_| anyhow!("unknown DRM fourcc {fourcc:#x}"))?;
+
+        // Always allocate LINEAR: it's single-plane, CPU-mappable, and every
+        // driver can import + sample it — exactly what we need for a screencast
+        // buffer a foreign consumer (Chrome's bundled Mesa, OBS, …) must read.
+        // Letting gbm pick freely tends to choose a compressed/tiled vendor
+        // modifier with auxiliary planes that arbitrary consumers can't import.
+        // Prefer an explicit LINEAR allocation when the WM advertised that
+        // modifier (so we know it'll accept the buffer); otherwise force linear
+        // via the usage flag.
+        let linear = u64::from(DrmModifier::Linear);
+        let wm_advertises_linear = self
+            .state
+            .dmabuf_formats
+            .get(&fourcc)
+            .is_some_and(|mods| mods.contains(&linear));
+
+        self.ensure_gbm()?;
+        let dev = self.gbm.as_ref().expect("gbm device opened");
+        let bo: gbm::BufferObject<()> = if wm_advertises_linear {
+            dev.create_buffer_object_with_modifiers::<()>(
+                width,
+                height,
+                format,
+                std::iter::once(DrmModifier::Linear),
+            )
+            .context("gbm_bo_create_with_modifiers(LINEAR)")?
+        } else {
+            dev.create_buffer_object::<()>(
+                width,
+                height,
+                format,
+                gbm::BufferObjectFlags::RENDERING | gbm::BufferObjectFlags::LINEAR,
+            )
+            .context("gbm_bo_create(LINEAR)")?
+        };
+
+        if bo.plane_count() != 1 {
+            anyhow::bail!(
+                "dmabuf has {} planes; only single-plane formats supported",
+                bo.plane_count()
+            );
+        }
+        let fd = bo.fd().context("export dmabuf fd")?;
+        let stride = bo.stride();
+        let offset = bo.offset(0);
+        let modifier = u64::from(bo.modifier());
+
+        // Wrap the dmabuf as a wl_buffer. create_immed returns it synchronously;
+        // a bad import would arrive later as a `failed` event on the params (rare
+        // — we allocate with a modifier the WM advertised).
+        let params = dmabuf.create_params(&self.qh, ());
+        params.add(
+            fd.as_fd(),
+            0,
+            offset,
+            stride,
+            (modifier >> 32) as u32,
+            (modifier & 0xffff_ffff) as u32,
+        );
+        let wl_buffer = params.create_immed(
+            width as i32,
+            height as i32,
+            fourcc,
+            zwp_linux_buffer_params_v1::Flags::empty(),
+            &self.qh,
+            (),
+        );
+        params.destroy();
+        self.queue.flush().ok();
+
+        tracing::debug!(width, height, fourcc, modifier, "allocated dmabuf slot");
+        Ok(DmabufSlot {
+            _bo: bo,
+            wl_buffer,
+            fd,
+            width,
+            height,
+            modifier,
+            offset,
+            stride,
+        })
+    }
+
+    /// Capture the output straight into a dmabuf slot's wl_buffer (zero-copy: the
+    /// WM renders into the same dmabuf PipeWire will read). Returns the YInvert
+    /// flag — the WM's dmabuf path renders bottom-up, so this is normally true and
+    /// the caller must signal a vertical flip to the consumer.
+    pub fn capture_into_dmabuf(&mut self, slot: &DmabufSlot) -> Result<bool> {
+        self.state.frame = FrameState::Initial;
+        let frame = self.manager.capture_output(1, &self.output, &self.qh, ());
+
+        // Wait until the WM has advertised buffer params (it sends the shm
+        // `buffer` event alongside `linux_dmabuf`); that's the cue it'll accept a
+        // copy. We then attach our dmabuf buffer rather than the shm one.
+        loop {
+            self.queue.blocking_dispatch(&mut self.state)?;
+            match &self.state.frame {
+                FrameState::BufferParams { .. } => break,
+                FrameState::Failed(e) => {
+                    frame.destroy();
+                    return Err(anyhow!("capture failed: {e}"));
+                }
+                _ => continue,
+            }
+        }
+
+        frame.copy(&slot.wl_buffer);
+        let yinvert = loop {
+            self.queue.blocking_dispatch(&mut self.state)?;
+            match &self.state.frame {
+                FrameState::Ready { flags, .. } => break flags.contains(Flags::YInvert),
+                FrameState::Failed(e) => {
+                    frame.destroy();
+                    return Err(anyhow!("capture failed: {e}"));
+                }
+                _ => continue,
+            }
+        };
+        frame.destroy();
+        Ok(yinvert)
+    }
+
+    /// Open the render node's gbm device, once.
+    fn ensure_gbm(&mut self) -> Result<()> {
+        if self.gbm.is_some() {
+            return Ok(());
+        }
+        let path = render_node_path()?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open render node {}", path.display()))?;
+        let dev = gbm::Device::new(file).context("gbm_create_device")?;
+        tracing::info!(node = %path.display(), "opened gbm device for dmabuf screencast");
+        self.gbm = Some(dev);
+        Ok(())
+    }
+
     /// (Re)allocate the shm buffer if missing or if the geometry changed.
     fn ensure_buf(&mut self, format: wl_shm::Format, width: u32, height: u32, stride: u32) {
         let matches = self.buf.as_ref().is_some_and(|b| {
@@ -256,6 +453,109 @@ impl Capture {
     }
 }
 
+/// Developer self-test for the dmabuf capture path (not used in normal
+/// operation): allocate a dmabuf, have the WM render the output into it, CPU-map
+/// it via gbm, and write a PNG so the result can be eyeballed. Proves the
+/// modifier negotiation + WM dmabuf import + render work before the PipeWire
+/// stream depends on them. Reached via the hidden `--selftest-dmabuf` flag.
+pub fn selftest_dmabuf(output: Option<&str>, png_path: &std::path::Path) -> Result<()> {
+    let mut cap = Capture::new(output)?;
+    let info = cap.dimensions()?;
+    let fourcc = DrmFourcc::Xrgb8888 as u32;
+    if !cap.dmabuf_supported(fourcc) {
+        anyhow::bail!("WM does not advertise dmabuf for XRGB8888 (shm-only)");
+    }
+    let slot = cap
+        .alloc_dmabuf(info.width, info.height, fourcc)
+        .context("alloc dmabuf")?;
+    let yinvert = cap
+        .capture_into_dmabuf(&slot)
+        .context("capture into dmabuf")?;
+    tracing::info!(
+        modifier = slot.modifier,
+        wm_yinvert_flag = yinvert,
+        "dmabuf capture succeeded; mapping for readback"
+    );
+
+    // CPU-map the bo (LINEAR ⇒ mappable). The WM's dmabuf YInvert flag is
+    // unreliable — empirically the buffer is top-down/upright — so we read it
+    // straight (no flip), which is what the screencast consumer does too.
+    let png = slot
+        ._bo
+        .map(0, 0, slot.width, slot.height, |m| {
+            encode_bgrx_png(m.buffer(), slot.width, slot.height, m.stride(), false)
+        })
+        .context("gbm_bo_map (modifier may not be CPU-mappable)")??;
+    if let Some(parent) = png_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(png_path, &png).with_context(|| format!("write {}", png_path.display()))?;
+    Ok(())
+}
+
+/// Minimal BGRx→RGBA PNG encoder for the self-test (the portal's real PNG path
+/// lives in `screenshot.rs`; kept separate to avoid a cross-module dependency).
+fn encode_bgrx_png(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    yinvert: bool,
+) -> Result<Vec<u8>> {
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    let row = w * 4;
+    if s < row {
+        anyhow::bail!("stride {s} < row {row}");
+    }
+    let mut rgba = vec![0u8; row * h];
+    for y in 0..h {
+        let sy = if yinvert { h - 1 - y } else { y };
+        let so = sy * s;
+        let doff = y * row;
+        for x in 0..w {
+            let p = so + x * 4;
+            if p + 3 >= src.len() {
+                break;
+            }
+            rgba[doff + x * 4] = src[p + 2];
+            rgba[doff + x * 4 + 1] = src[p + 1];
+            rgba[doff + x * 4 + 2] = src[p];
+            rgba[doff + x * 4 + 3] = 0xFF;
+        }
+    }
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()?.write_image_data(&rgba)?;
+    }
+    Ok(buf)
+}
+
+/// The DRM render node to allocate dmabufs from. `$SHOESTRING_RENDER_NODE`
+/// overrides; otherwise the lowest-numbered `/dev/dri/renderD*`.
+fn render_node_path() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("SHOESTRING_RENDER_NODE") {
+        return Ok(PathBuf::from(p));
+    }
+    let mut nodes: Vec<PathBuf> = std::fs::read_dir("/dev/dri")
+        .context("read /dev/dri")?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("renderD"))
+        })
+        .collect();
+    nodes.sort();
+    nodes
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no renderD* node in /dev/dri"))
+}
+
 fn pick_output(outputs: &[OutputEntry], wanted: Option<&str>) -> Result<WlOutput> {
     if let Some(name) = wanted {
         outputs
@@ -302,6 +602,9 @@ enum FrameState {
 struct CaptureState {
     outputs: Vec<OutputEntry>,
     frame: FrameState,
+    /// DRM fourcc → modifiers the WM's `zwp_linux_dmabuf_v1` advertised. Filled
+    /// from the global's `format`/`modifier` events during the setup roundtrip.
+    dmabuf_formats: HashMap<u32, Vec<u64>>,
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for CaptureState {
@@ -351,7 +654,50 @@ macro_rules! ignore_events {
         }
     )+};
 }
-ignore_events!(WlShm, WlShmPool, WlBuffer, ZwlrScreencopyManagerV1);
+ignore_events!(
+    WlShm,
+    WlShmPool,
+    WlBuffer,
+    ZwlrScreencopyManagerV1,
+    ZwpLinuxBufferParamsV1
+);
+
+impl Dispatch<ZwpLinuxDmabufV1, ()> for CaptureState {
+    fn event(
+        state: &mut Self,
+        _: &ZwpLinuxDmabufV1,
+        event: <ZwpLinuxDmabufV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwp_linux_dmabuf_v1::Event;
+        match event {
+            // v1 (deprecated): format only ⇒ implicit modifier.
+            Event::Format { format } => {
+                state
+                    .dmabuf_formats
+                    .entry(format)
+                    .or_default()
+                    .push(u64::from(DrmModifier::Invalid));
+            }
+            // v3: explicit (format, modifier) pairs the WM can import.
+            Event::Modifier {
+                format,
+                modifier_hi,
+                modifier_lo,
+            } => {
+                let modifier = ((modifier_hi as u64) << 32) | modifier_lo as u64;
+                state
+                    .dmabuf_formats
+                    .entry(format)
+                    .or_default()
+                    .push(modifier);
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ZwlrScreencopyFrameV1, ()> for CaptureState {
     fn event(

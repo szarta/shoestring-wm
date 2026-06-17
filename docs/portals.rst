@@ -129,8 +129,8 @@ Prerequisites
    Screenshot backends are complete: with the screen-capture gate on,
    browsers and Zoom both share the whole screen, and the Screenshot portal
    captures via the same backend — so the session no longer depends on
-   xdg-desktop-portal-wlr. The ScreenCast capture is currently shm-only on
-   the PipeWire side (every consumer gets shm — correct, just more CPU than
-   dmabuf); per-consumer dmabuf negotiation (so browsers/OBS regain
-   zero-copy while Zoom keeps shm) is the next step. ``PickColor`` (the
+   xdg-desktop-portal-wlr. ScreenCast offers each consumer **both dmabuf and
+   shm** and lets it choose: dmabuf-capable consumers (browsers, OBS) get
+   zero-copy GPU buffers the compositor renders straight into, while pickier
+   ones (Zoom) take shm — per-consumer, no global toggle. ``PickColor`` (the
    eyedropper) is not yet implemented.

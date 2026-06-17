@@ -27,6 +27,15 @@ libspa = "0.10"
 # shared.
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# zwp_linux_dmabuf_v1: wrap a gbm buffer as a wl_buffer so screencopy can render
+# straight into the dmabuf we also hand to PipeWire (zero-copy for fast consumers).
+wayland-protocols = { version = "0.32", features = ["client"] }
+
+# GPU buffer allocation for the dmabuf screencast path. Both crates are already
+# in the resolved tree via smithay (the WM depends on them), so this adds no new
+# external crates; libgbm dev headers come with the GPU stack the WM needs anyway.
+gbm = "0.18"
+drm-fourcc = "2"
 
 # wl_shm capture buffer: mmap a tempfile, hand the fd to the WM, read pixels back.
 memmap2 = "0.9"
