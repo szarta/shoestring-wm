@@ -47,7 +47,35 @@ For Screenshot it captures a frame and writes a PNG, returning its
 default output; an ``interactive`` request shells out to
 ``shoestring-screenshot --region`` so the user can rubber-band a rectangle
 with the ``shoestring-region`` picker. ``PickColor`` (the eyedropper) is
-not yet implemented and reports failure so the app falls back to its own.
+served too: the user clicks the pixel via the ``shoestring-region`` overlay
+and the backend returns its RGB. (Under fractional output scaling the sampled
+pixel can be off by the fractional/integer scale ratio, which is harmless for
+picking a color from a roughly-uniform region.)
+
+Choosing what to share
+----------------------
+
+When a screencast starts and more than one output is connected, the backend
+has to pick which one to share. It looks, in order, at:
+
+1. a **pin** — ``[portal] screencast_output`` in ``config.toml`` (or the
+   ``$SHOESTRING_SCREENCAST_OUTPUT`` override) naming a connector; deterministic,
+   no prompt;
+2. the **only** connected output, if there is just one;
+3. the **chooser** — ``[portal] screencast_chooser`` (or
+   ``$SHOESTRING_SCREENCAST_CHOOSER``): ``region`` (the default) pops the
+   ``shoestring-region`` overlay and you click the monitor to share; ``none``
+   silently shares the first output; anything else is run as a dmenu-style
+   command (connector names on its stdin, the chosen line on its stdout).
+
+Only an explicit cancel (Escape in the overlay, or a non-zero exit / empty
+selection from a command chooser) aborts the share; a misconfigured chooser
+degrades to the first output with a warning. See :doc:`configuration`.
+
+The backend advertises the HIDDEN and EMBEDDED cursor modes: an app that asks
+to **hide** the cursor gets frames captured with ``overlay_cursor`` off;
+otherwise the cursor is composited into the frame (EMBEDDED). The METADATA
+cursor mode (a separate cursor-position channel) is not offered.
 
 Both interfaces capture frames from the compositor over the same
 ``zwlr_screencopy_v1`` protocol used by ``shoestring-screenshot``, so the
@@ -132,5 +160,7 @@ Prerequisites
    xdg-desktop-portal-wlr. ScreenCast offers each consumer **both dmabuf and
    shm** and lets it choose: dmabuf-capable consumers (browsers, OBS) get
    zero-copy GPU buffers the compositor renders straight into, while pickier
-   ones (Zoom) take shm — per-consumer, no global toggle. ``PickColor`` (the
-   eyedropper) is not yet implemented.
+   ones (Zoom) take shm — per-consumer, no global toggle. Multi-monitor
+   sessions pick the shared output by config pin or the ``shoestring-region``
+   chooser; the Screenshot ``PickColor`` eyedropper is served too. The only
+   ScreenCast feature not yet implemented is the METADATA cursor mode.

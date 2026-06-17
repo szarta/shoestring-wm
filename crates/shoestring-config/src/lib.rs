@@ -57,6 +57,49 @@ pub struct Config {
     pub diagnostics: Diagnostics,
     #[serde(default)]
     pub input: Input,
+    #[serde(default)]
+    pub portal: Portal,
+}
+
+/// `[portal]` — settings for the `xdg-desktop-portal-shoestring` screen-sharing
+/// backend. That backend is a *separate process* from the WM; it reads this
+/// same `config.toml` so the screencast output choice lives in one place.
+///
+/// Both fields are optional. With no `[portal]` section the backend shares the
+/// output you pick from the [`screencast_chooser`](Self::screencast_chooser)
+/// when more than one is connected.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Portal {
+    /// Pin screencast to one output by connector name (e.g. `"DP-2"`). When set,
+    /// the chooser is skipped and this output is always shared. Unset (default)
+    /// ⇒ the chooser runs whenever more than one output is connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screencast_output: Option<String>,
+    /// How to choose the output when none is pinned and more than one is
+    /// connected:
+    /// - `"region"` (default) — pop the `shoestring-region` overlay so you
+    ///   click/drag the monitor to share;
+    /// - `"none"` — silently share the first output (a warning names it and how
+    ///   to pin one);
+    /// - anything else — run as a dmenu-style command: the connector names are
+    ///   written to its stdin, one per line, and the line it prints on stdout is
+    ///   taken as the chosen output.
+    #[serde(default = "default_screencast_chooser")]
+    pub screencast_chooser: String,
+}
+
+fn default_screencast_chooser() -> String {
+    "region".to_string()
+}
+
+impl Default for Portal {
+    fn default() -> Self {
+        Self {
+            screencast_output: None,
+            screencast_chooser: default_screencast_chooser(),
+        }
+    }
 }
 
 /// `[diagnostics]` — the metrics/observability subsystem. When `enabled`
@@ -866,6 +909,7 @@ impl Config {
             outputs: BTreeMap::new(),
             diagnostics: Diagnostics::default(),
             input: Input::default(),
+            portal: Portal::default(),
         }
     }
 }
@@ -1130,6 +1174,23 @@ actions = {}
     fn screen_capture_enabled_user_override() {
         let cfg: Config = toml::from_str("[general]\nscreen_capture_enabled = true\n").unwrap();
         assert!(cfg.general.screen_capture_enabled);
+    }
+
+    #[test]
+    fn portal_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.portal.screencast_output.is_none());
+        assert_eq!(cfg.portal.screencast_chooser, "region");
+    }
+
+    #[test]
+    fn portal_user_override() {
+        let cfg: Config = toml::from_str(
+            "[portal]\nscreencast_output = \"DP-2\"\nscreencast_chooser = \"none\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.portal.screencast_output.as_deref(), Some("DP-2"));
+        assert_eq!(cfg.portal.screencast_chooser, "none");
     }
 
     #[test]

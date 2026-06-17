@@ -21,6 +21,52 @@ use anyhow::{anyhow, Context, Result};
 use wayland_client::protocol::wl_shm;
 
 use crate::capture::{Capture, FrameInfo};
+use crate::chooser;
+
+/// Pick a single screen pixel's color for the Screenshot portal's `PickColor`.
+///
+/// The user clicks the point via the `shoestring-region` overlay (a click is a
+/// zero-size drag); region reports the output and the point in that output's
+/// logical coordinates. We capture that output and read the pixel, mapping the
+/// logical point to a physical one by the output's integer scale. Returns RGB
+/// components in `0.0..=1.0`.
+///
+/// Caveat: the logical→physical mapping uses the `wl_output` integer scale, so
+/// under fractional scaling the sampled pixel can be off by the
+/// fractional/integer ratio — acceptable for an eyedropper, which samples
+/// roughly-uniform regions.
+pub fn pick_color() -> Result<(f64, f64, f64)> {
+    let sel = chooser::run_region()
+        .context("run region picker")?
+        .ok_or_else(|| anyhow!("color pick cancelled"))?;
+    let mut cap = Capture::new(Some(&sel.output))
+        .context("start capture (is the screen-capture gate on?)")?;
+    cap.capture().context("capture frame")?;
+    let scale = cap.current_scale().max(1);
+    let (info, pixels) = cap
+        .frame()
+        .ok_or_else(|| anyhow!("capture produced no frame"))?;
+
+    let (w, h, stride) = (info.width as i32, info.height as i32, info.stride as usize);
+    let px = (sel.x.max(0) * scale).clamp(0, w - 1) as usize;
+    let py_top = (sel.y.max(0) * scale).clamp(0, h - 1) as usize;
+    // Honor YInvert: shm rows may be stored bottom-to-top.
+    let py = if info.yinvert {
+        info.height as usize - 1 - py_top
+    } else {
+        py_top
+    };
+    let off = py * stride + px * 4;
+    if off + 2 >= pixels.len() {
+        anyhow::bail!("pick coordinate out of buffer bounds");
+    }
+    // XRGB8888 little-endian == bytes [B, G, R, X].
+    let r = pixels[off + 2] as f64 / 255.0;
+    let g = pixels[off + 1] as f64 / 255.0;
+    let b = pixels[off] as f64 / 255.0;
+    tracing::info!(output = %sel.output, px, py, r, g, b, "PickColor sampled");
+    Ok((r, g, b))
+}
 
 /// Capture a screenshot and return its `file://` URI.
 pub fn capture_to_uri(interactive: bool) -> Result<String> {

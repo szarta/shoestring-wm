@@ -3676,6 +3676,7 @@ dependencies = [
  "pipewire",
  "png",
  "rustbus",
+ "shoestring-config",
  "tempfile",
  "tracing",
  "tracing-subscriber",

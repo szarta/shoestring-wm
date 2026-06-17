@@ -21,6 +21,7 @@
 
 mod capture;
 mod cast;
+mod chooser;
 mod portal;
 mod screenshot;
 mod state;

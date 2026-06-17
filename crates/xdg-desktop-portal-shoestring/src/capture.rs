@@ -66,11 +66,22 @@ pub struct Capture {
     output: WlOutput,
     state: CaptureState,
     buf: Option<Buf>,
+    /// Whether to composite the cursor into captured frames (the screencopy
+    /// `overlay_cursor` arg). True ⇒ EMBEDDED cursor mode; false ⇒ HIDDEN.
+    overlay_cursor: bool,
     /// `zwp_linux_dmabuf_v1` (if the WM advertises it), for wrapping gbm buffers
     /// as wl_buffers. `None` ⇒ no dmabuf path, shm only.
     dmabuf: Option<ZwpLinuxDmabufV1>,
     /// gbm device on the render node, opened lazily on first dmabuf allocation.
     gbm: Option<gbm::Device<File>>,
+}
+
+/// A connected output, for the screencast chooser. Just the connector name for
+/// now (the chooser selects by name); per-output scale for color-pick mapping
+/// is read separately via [`Capture::current_scale`].
+#[derive(Debug, Clone)]
+pub struct OutputInfo {
+    pub name: String,
 }
 
 /// A GPU buffer that backs one PipeWire dmabuf buffer: the gbm allocation (whose
@@ -143,13 +154,15 @@ impl Capture {
                 .into_iter()
                 .map(|o| OutputEntry {
                     name: None,
+                    scale: 1,
                     output: o,
                 })
                 .collect(),
             frame: FrameState::Initial,
             dmabuf_formats: HashMap::new(),
         };
-        // Resolve output names (wl_output.name, v4+) before matching.
+        // Resolve output names + geometry (wl_output.name/mode/scale) before
+        // matching.
         queue
             .roundtrip(&mut state)
             .context("output info roundtrip")?;
@@ -165,16 +178,64 @@ impl Capture {
             output,
             state,
             buf: None,
+            overlay_cursor: true,
             dmabuf,
             gbm: None,
         })
+    }
+
+    /// The connected outputs (those whose `wl_output.name` resolved), for the
+    /// screencast chooser.
+    pub fn outputs(&self) -> Vec<OutputInfo> {
+        self.state
+            .outputs
+            .iter()
+            .filter_map(|o| {
+                o.name
+                    .as_ref()
+                    .map(|name| OutputInfo { name: name.clone() })
+            })
+            .collect()
+    }
+
+    /// Switch the capture target to the output named `name`. Drops any cached
+    /// buffer (the new output may differ in size). Errors if no such output.
+    pub fn set_output(&mut self, name: &str) -> Result<()> {
+        let output = pick_output(&self.state.outputs, Some(name))?;
+        self.output = output;
+        if let Some(old) = self.buf.take() {
+            old.buffer.destroy();
+            old.pool.destroy();
+        }
+        Ok(())
+    }
+
+    /// Integer scale of the current capture target (1 if unknown). Used to map a
+    /// logical pick coordinate to a physical pixel in the captured buffer.
+    pub fn current_scale(&self) -> i32 {
+        let id = self.output.id();
+        self.state
+            .outputs
+            .iter()
+            .find(|o| o.output.id() == id)
+            .map(|o| o.scale.max(1))
+            .unwrap_or(1)
+    }
+
+    /// Set whether captured frames composite the cursor (screencopy
+    /// `overlay_cursor`). EMBEDDED cursor mode ⇒ true; HIDDEN ⇒ false.
+    pub fn set_overlay_cursor(&mut self, on: bool) {
+        self.overlay_cursor = on;
     }
 
     /// Capture one frame into the reusable buffer, blocking until the WM
     /// reports `ready`. Afterwards [`Self::frame`] returns the pixels.
     pub fn capture(&mut self) -> Result<()> {
         self.state.frame = FrameState::Initial;
-        let frame = self.manager.capture_output(1, &self.output, &self.qh, ());
+        let overlay = self.overlay_cursor as i32;
+        let frame = self
+            .manager
+            .capture_output(overlay, &self.output, &self.qh, ());
 
         // Wait for the buffer-format advertisement (or failure).
         let (format, width, height, stride) = loop {
@@ -341,7 +402,10 @@ impl Capture {
     /// the caller must signal a vertical flip to the consumer.
     pub fn capture_into_dmabuf(&mut self, slot: &DmabufSlot) -> Result<bool> {
         self.state.frame = FrameState::Initial;
-        let frame = self.manager.capture_output(1, &self.output, &self.qh, ());
+        let overlay = self.overlay_cursor as i32;
+        let frame = self
+            .manager
+            .capture_output(overlay, &self.output, &self.qh, ());
 
         // Wait until the WM has advertised buffer params (it sends the shm
         // `buffer` event alongside `linux_dmabuf`); that's the cue it'll accept a
@@ -578,6 +642,9 @@ fn pick_output(outputs: &[OutputEntry], wanted: Option<&str>) -> Result<WlOutput
 
 struct OutputEntry {
     name: Option<String>,
+    /// Integer scale factor (from `wl_output.scale`); 1 until reported. Used to
+    /// map a logical color-pick coordinate to a physical pixel.
+    scale: i32,
     output: WlOutput,
 }
 
@@ -628,13 +695,17 @@ impl Dispatch<WlOutput, ()> for CaptureState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Name { name } = event {
-            for entry in state.outputs.iter_mut() {
-                if entry.output.id() == proxy.id() {
-                    entry.name = Some(name);
-                    break;
-                }
-            }
+        let Some(entry) = state
+            .outputs
+            .iter_mut()
+            .find(|e| e.output.id() == proxy.id())
+        else {
+            return;
+        };
+        match event {
+            wl_output::Event::Name { name } => entry.name = Some(name),
+            wl_output::Event::Scale { factor } => entry.scale = factor.max(1),
+            _ => {}
         }
     }
 }

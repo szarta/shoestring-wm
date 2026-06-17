@@ -39,6 +39,7 @@ use rustbus::{standard_messages, RpcConn};
 
 use crate::capture::Capture;
 use crate::cast;
+use crate::chooser;
 use crate::screenshot;
 use crate::state::{Session, State};
 
@@ -54,14 +55,15 @@ const INTROSPECTABLE_IFACE: &str = "org.freedesktop.DBus.Introspectable";
 
 /// Portal method response codes (the leading `u` in `(ua{sv})`).
 const RESPONSE_SUCCESS: u32 = 0;
-#[allow(dead_code)]
 const RESPONSE_CANCELLED: u32 = 1;
 const RESPONSE_OTHER: u32 = 2;
 
 /// `AvailableSourceTypes` bit for whole-monitor capture (the only kind we do).
 const SOURCE_TYPE_MONITOR: u32 = 1;
-/// `AvailableCursorModes` bit: cursor composited into the frame. Our
-/// screencopy always includes the cursor, so this is all we offer.
+/// `AvailableCursorModes` bits. HIDDEN omits the cursor (screencopy
+/// `overlay_cursor=0`); EMBEDDED composites it into the frame. We don't offer
+/// METADATA (4) — that needs a separate cursor-position metadata channel.
+const CURSOR_MODE_HIDDEN: u32 = 1;
 const CURSOR_MODE_EMBEDDED: u32 = 2;
 /// Interface version we implement. v2 is enough for source-type + cursor-mode
 /// selection; restore tokens (v3+) are not implemented.
@@ -160,7 +162,9 @@ fn property_value(iface: &str, name: &str) -> Option<PortalValue> {
     match (iface, name) {
         (SCREENCAST_IFACE, "version") => Some(PortalValue::U32(SCREENCAST_VERSION)),
         (SCREENCAST_IFACE, "AvailableSourceTypes") => Some(PortalValue::U32(SOURCE_TYPE_MONITOR)),
-        (SCREENCAST_IFACE, "AvailableCursorModes") => Some(PortalValue::U32(CURSOR_MODE_EMBEDDED)),
+        (SCREENCAST_IFACE, "AvailableCursorModes") => {
+            Some(PortalValue::U32(CURSOR_MODE_HIDDEN | CURSOR_MODE_EMBEDDED))
+        }
         (SCREENSHOT_IFACE, "version") => Some(PortalValue::U32(SCREENSHOT_VERSION)),
         _ => None,
     }
@@ -279,11 +283,12 @@ fn start(call: &MarshalledMessage, state: &mut State) -> MarshalledMessage {
         tracing::warn!(%session, "Start for unknown session");
         return response(call, RESPONSE_OTHER);
     };
+    let cursor_mode = s.cursor_mode;
     tracing::info!(%session, app = %s.app_id, types = s.source_types,
-        cursor_mode = s.cursor_mode, multiple = s.multiple, "Start");
+        cursor_mode, multiple = s.multiple, "Start");
 
-    // Connect to the WM and learn the output geometry. `Capture::new` fails if
-    // the screen-capture gate is off (the screencopy manager global is absent).
+    // Connect to the WM. `Capture::new` fails if the screen-capture gate is off
+    // (the screencopy manager global is absent).
     let capture = match Capture::new(None) {
         Ok(c) => Rc::new(RefCell::new(c)),
         Err(e) => {
@@ -291,6 +296,31 @@ fn start(call: &MarshalledMessage, state: &mut State) -> MarshalledMessage {
             return response(call, RESPONSE_OTHER);
         }
     };
+
+    // Choose which output to share (pin → single → chooser). An explicit user
+    // cancel aborts the share.
+    let cfg = shoestring_config::load_or_default(None)
+        .map(|(c, _)| c.portal)
+        .unwrap_or_default();
+    let outputs = capture.borrow().outputs();
+    match chooser::choose_output(&cfg, &outputs) {
+        chooser::Choice::Output(name) => {
+            if let Err(e) = capture.borrow_mut().set_output(&name) {
+                tracing::warn!(error = %e, "Start: could not select output");
+                return response(call, RESPONSE_OTHER);
+            }
+        }
+        chooser::Choice::Cancelled => {
+            tracing::info!(%session, "Start: output selection cancelled");
+            return response(call, RESPONSE_CANCELLED);
+        }
+    }
+
+    // HIDDEN cursor mode ⇒ don't composite the cursor into the frame.
+    capture
+        .borrow_mut()
+        .set_overlay_cursor(cursor_mode != CURSOR_MODE_HIDDEN);
+
     let info = match capture.borrow_mut().dimensions() {
         Ok(i) => i,
         Err(e) => {
@@ -389,11 +419,60 @@ fn screenshot(call: &MarshalledMessage) -> MarshalledMessage {
     }
 }
 
-/// `PickColor` — an eyedropper needs interactive single-pixel UI we don't have
-/// yet, so report failure cleanly (the app falls back to its own picker).
+/// `PickColor(handle o, app_id s, parent_window s, options a{sv})` →
+/// `(response u, results a{sv})` with `results["color"]` = `(ddd)` RGB in
+/// `0.0..=1.0`. The user clicks the pixel via the `shoestring-region` overlay.
 fn pick_color(call: &MarshalledMessage) -> MarshalledMessage {
-    tracing::info!("PickColor requested — not implemented, returning failure");
-    response(call, RESPONSE_OTHER)
+    tracing::info!("PickColor");
+    match screenshot::pick_color() {
+        Ok(rgb) => color_response(call, rgb),
+        Err(e) => {
+            tracing::warn!(error = %e, "PickColor failed");
+            response(call, RESPONSE_OTHER)
+        }
+    }
+}
+
+/// Build PickColor's `(u, a{sv})` reply with `results["color"]` a `(ddd)`
+/// variant. rustbus has no typed `f64`, so the body is marshalled through the
+/// dynamic param API (doubles as `Base::Double(bits)`).
+// The DictMap key type (`Base`) can hold a UnixFd (interior mutability), but our
+// keys are always `Base::String`, so the lint is a false positive here.
+#[allow(clippy::mutable_key_type)]
+fn color_response(call: &MarshalledMessage, (r, g, b): (f64, f64, f64)) -> MarshalledMessage {
+    use rustbus::params::{Base, Container, Param, Variant};
+    use rustbus::signature;
+
+    let ddd = signature::Type::Container(signature::Container::Struct(
+        signature::StructTypes::new(vec![
+            signature::Type::Base(signature::Base::Double),
+            signature::Type::Base(signature::Base::Double),
+            signature::Type::Base(signature::Base::Double),
+        ])
+        .expect("(ddd) is non-empty"),
+    ));
+    let color = Param::Container(Container::Variant(Box::new(Variant {
+        sig: ddd,
+        value: Param::Container(Container::Struct(vec![
+            Param::Base(Base::Double(r.to_bits())),
+            Param::Base(Base::Double(g.to_bits())),
+            Param::Base(Base::Double(b.to_bits())),
+        ])),
+    })));
+    let mut map = rustbus::params::DictMap::new();
+    map.insert(Base::String("color".into()), color);
+    let results = Param::Container(Container::Dict(rustbus::params::Dict {
+        key_sig: signature::Base::String,
+        value_sig: signature::Type::Container(signature::Container::Variant),
+        map,
+    }));
+
+    let mut reply = call.dynheader.make_response();
+    reply
+        .body
+        .push_old_params(&[Param::Base(Base::Uint32(RESPONSE_SUCCESS)), results])
+        .expect("marshal PickColor reply");
+    reply
 }
 
 // ---- Session / Request lifecycle -----------------------------------------

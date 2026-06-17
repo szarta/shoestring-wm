@@ -37,6 +37,11 @@ wayland-protocols = { version = "0.32", features = ["client"] }
 gbm = "0.18"
 drm-fourcc = "2"
 
+# Shared config schema. We read the [portal] section of the WM's config.toml to
+# learn the screencast output pin + how to choose one. Internal workspace crate;
+# pulls only serde/toml, already in the resolved tree.
+shoestring-config = { path = "../shoestring-config" }
+
 # wl_shm capture buffer: mmap a tempfile, hand the fd to the WM, read pixels back.
 memmap2 = "0.9"
 tempfile = "3"
