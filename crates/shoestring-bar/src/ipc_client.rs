@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use shoestring_ipc::{client_socket_path, Event, Request, Response, WindowSummary};
+use shoestring_ipc::{client_socket_path, Event, MediaState, Request, Response, WindowSummary};
 
 fn connect() -> Result<UnixStream> {
     let path = client_socket_path()
@@ -107,6 +107,22 @@ pub fn query_screen_capture() -> Result<bool> {
     }
 }
 
+/// Send `Request::MediaStatus`, return the current media-privacy snapshot
+/// (sink/mic mute + camera-in-use), or `None` when no `shoestring-mediad`
+/// monitor has reported yet. Used at startup to seed the MUTE/MIC/CAM chips
+/// before the first `media_changed` event would arrive.
+pub fn query_media() -> Result<Option<MediaState>> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::MediaStatus)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse media response")?;
+    match resp {
+        Response::Media { state } => Ok(state),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Send `Request::Windows`, return the summary list. Used at startup to
 /// bootstrap per-window state (currently: workspace assignment) for any
 /// windows that already existed when the bar attached — `window_opened`
@@ -165,6 +181,35 @@ pub fn set_automation(enabled: bool) -> Result<()> {
     let resp: Response = serde_json::from_str(&line).context("parse set_automation response")?;
     match resp {
         Response::Automation { .. } | Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Mute/unmute the default audio output (`Request::SetAudioMute`). The WM
+/// delegates to `shoestring-mediad`; the resulting live state arrives later as
+/// an `Event::MediaChanged`, which the event loop applies to the chips.
+pub fn set_audio_mute(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetAudioMute { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_audio_mute response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Mute/unmute the default microphone (`Request::SetMicMute`). Mic analogue of
+/// [`set_audio_mute`].
+pub fn set_mic_mute(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetMicMute { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_mic_mute response")?;
+    match resp {
+        Response::Ok => Ok(()),
         Response::Error { message } => anyhow::bail!("server error: {message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }

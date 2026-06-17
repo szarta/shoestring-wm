@@ -373,6 +373,59 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
     },
+    /// Read the last media-privacy snapshot the WM holds (default-sink mute,
+    /// default-source/mic mute, camera-in-use). Reply is [`Response::Media`],
+    /// whose `state` is `None` when no monitor (`shoestring-mediad`) has
+    /// reported yet — distinct from "reported, all false". Read-only and not
+    /// gated by automation (pure observation). Used by the bar at startup to
+    /// seed its chips before the first [`Event::MediaChanged`] arrives.
+    MediaStatus,
+    /// Toggle the *default audio sink* mute. The WM does not mute anything
+    /// itself — PipeWire owns that state — so this spawns the
+    /// `shoestring-mediad audio-mute <on|off>` oneshot, which flips the real
+    /// default-sink mute. The live state then flows back as a
+    /// [`Request::ReportMedia`] from the monitor and the WM broadcasts
+    /// [`Event::MediaChanged`]. Reply is [`Response::Ok`] once the helper is
+    /// spawned (not when the mute actually flips). Ungated, like [`Request::Lock`]
+    /// (a benign local-session control surface a bar/keybind drives).
+    SetAudioMute { enabled: bool },
+    /// Toggle the *default audio source* (microphone) mute, the mic analogue of
+    /// [`Request::SetAudioMute`]. Spawns `shoestring-mediad mic-mute <on|off>`.
+    /// Honest caveat: this stream-mutes the source (capturing apps get silence);
+    /// it does **not** prevent a device open — the same guarantee as a hardware
+    /// mic-mute key. Ungated. Reply is [`Response::Ok`].
+    SetMicMute { enabled: bool },
+    /// Push a fresh media-privacy snapshot to the WM. Sent **by the trusted
+    /// `shoestring-mediad` monitor**, not by ordinary clients: it links
+    /// libpipewire, watches the real default sink/source mute and active camera
+    /// nodes, and reports here whenever they change. The WM caches the snapshot
+    /// (answering [`Request::MediaStatus`]) and, if it changed, broadcasts
+    /// [`Event::MediaChanged`] to subscribers. Ungated — the socket is the
+    /// user's own session socket and the payload is cosmetic (it drives privacy
+    /// indicators, not capability). Reply is [`Response::Ok`].
+    ReportMedia {
+        audio_muted: bool,
+        mic_muted: bool,
+        camera_active: bool,
+    },
+}
+
+/// A media-privacy snapshot: the live mute state of the default audio sink and
+/// source, plus whether a camera is actively streaming. Reflects PipeWire's
+/// truth as observed by `shoestring-mediad` — the WM never authors these, it
+/// only caches what the monitor reports (mute can also change via media keys,
+/// `pavucontrol`, `wpctl`, or the apps themselves). `camera_active` is
+/// status-only: there is no compositor-side camera off-switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaState {
+    /// Default audio sink (output) is muted.
+    pub audio_muted: bool,
+    /// Default audio source (microphone) is muted.
+    pub mic_muted: bool,
+    /// A camera node is actively being streamed (detected via PipeWire; raw
+    /// `/dev/video*` opens that bypass PipeWire are not visible here).
+    pub camera_active: bool,
 }
 
 /// One sampled metric. `gauge` is an instantaneous reading that can go up
@@ -488,6 +541,13 @@ pub enum Response {
     Metrics {
         ts_ms: u64,
         metrics: BTreeMap<String, MetricValue>,
+    },
+    /// Media-privacy snapshot for [`Request::MediaStatus`]. `state` is `None`
+    /// when no `shoestring-mediad` monitor has reported yet (so the bar shows
+    /// no media chips), `Some` once a live snapshot exists.
+    Media {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<MediaState>,
     },
     /// Server-side error; the client should print and exit non-zero.
     Error {
@@ -729,6 +789,16 @@ pub enum Event {
         ts_ms: u64,
         metrics: BTreeMap<String, MetricValue>,
     },
+    /// Fired when the media-privacy snapshot changes — the default sink/source
+    /// mute or camera-in-use state moved, as reported by `shoestring-mediad`
+    /// via [`Request::ReportMedia`]. Subscribers (the bar) update their
+    /// MUTE/MIC/CAM indicators without polling. Carries the full snapshot so a
+    /// subscriber needs no follow-up [`Request::MediaStatus`].
+    MediaChanged {
+        audio_muted: bool,
+        mic_muted: bool,
+        camera_active: bool,
+    },
 }
 
 #[cfg(test)]
@@ -921,6 +991,68 @@ mod tests {
             serde_json::to_string(&cap).unwrap(),
             r#"{"type":"screen_captured","output":"eDP-1"}"#
         );
+    }
+
+    #[test]
+    fn media_request_response_event_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Request::MediaStatus).unwrap(),
+            r#"{"type":"media_status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::SetAudioMute { enabled: true }).unwrap(),
+            r#"{"type":"set_audio_mute","enabled":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::SetMicMute { enabled: false }).unwrap(),
+            r#"{"type":"set_mic_mute","enabled":false}"#
+        );
+        let report = Request::ReportMedia {
+            audio_muted: true,
+            mic_muted: false,
+            camera_active: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            r#"{"type":"report_media","audio_muted":true,"mic_muted":false,"camera_active":true}"#
+        );
+
+        // `state: None` is skipped on the wire (no monitor reporting yet).
+        assert_eq!(
+            serde_json::to_string(&Response::Media { state: None }).unwrap(),
+            r#"{"type":"media"}"#
+        );
+        let some = Response::Media {
+            state: Some(MediaState {
+                audio_muted: false,
+                mic_muted: true,
+                camera_active: false,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&some).unwrap(),
+            r#"{"type":"media","state":{"audio_muted":false,"mic_muted":true,"camera_active":false}}"#
+        );
+
+        let ev = Event::MediaChanged {
+            audio_muted: true,
+            mic_muted: true,
+            camera_active: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"media_changed","audio_muted":true,"mic_muted":true,"camera_active":false}"#
+        );
+        // Round-trips back to the same request.
+        let back: Request = serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Request::ReportMedia {
+                audio_muted: true,
+                mic_muted: false,
+                camera_active: true
+            }
+        ));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use shoestring_ipc::{client_socket_path, Event, Request, Response, ScreenshotRegion};
 
 #[derive(Debug, Parser)]
@@ -151,6 +151,14 @@ enum Command {
     ScreenCapture {
         #[command(subcommand)]
         action: ScreenCaptureAction,
+    },
+    /// Read the media-privacy snapshot, or mute/unmute the default audio
+    /// output or microphone. Mute control is delegated to `shoestring-mediad`
+    /// (PipeWire); the WM only reflects live state. Camera is status-only —
+    /// reported in `media status`, with no off-switch.
+    Media {
+        #[command(subcommand)]
+        action: MediaAction,
     },
     /// Run a command under the WM's environment (inherits
     /// WAYLAND_DISPLAY, SHOESTRING_WM_SOCKET, etc.) and print the
@@ -313,6 +321,24 @@ enum ScreenCaptureAction {
     Status,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+#[derive(Debug, Subcommand)]
+enum MediaAction {
+    /// Print the current media-privacy snapshot (sink/mic mute + camera-in-use),
+    /// or `{"type":"media","state":null}` if no monitor has reported yet.
+    Status,
+    /// Mute (`on`) or unmute (`off`) the default audio output.
+    AudioMute { state: OnOff },
+    /// Mute (`on`) or unmute (`off`) the default microphone. Stream-mute only —
+    /// it does not prevent a device open (same as a hardware mic key).
+    MicMute { state: OnOff },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -365,6 +391,15 @@ fn main() -> Result<()> {
             ScreenCaptureAction::On => Request::SetScreenCapture { enabled: true },
             ScreenCaptureAction::Off => Request::SetScreenCapture { enabled: false },
             ScreenCaptureAction::Status => Request::ScreenCaptureStatus,
+        },
+        Command::Media { action } => match action {
+            MediaAction::Status => Request::MediaStatus,
+            MediaAction::AudioMute { state } => Request::SetAudioMute {
+                enabled: matches!(state, OnOff::On),
+            },
+            MediaAction::MicMute { state } => Request::SetMicMute {
+                enabled: matches!(state, OnOff::On),
+            },
         },
         Command::Screenshot { output, region } => {
             let region = region.as_deref().map(parse_region).transpose()?;

@@ -32,6 +32,7 @@ pub struct BarSection {
     pub font_size: Option<f32>,
     pub show_workspaces: Option<bool>,
     pub show_control: Option<bool>,
+    pub show_media: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -73,6 +74,11 @@ pub struct Config {
     /// automation gates, lock, or log out. Set `false` for a pure-keyboard
     /// bar with no mouse-driven control surface.
     pub show_control: bool,
+    /// When `true` (default), the media-privacy chips (MUTE/MIC/CAM) and the
+    /// control-menu media rows are shown whenever `shoestring-mediad` is
+    /// reporting. Set `false` to suppress them entirely (e.g. no PipeWire, or
+    /// you don't want the indicators) regardless of monitor state.
+    pub show_media: bool,
     /// When `false`, the battery indicator is suppressed even if a
     /// battery is detected. Default `true`: auto-detect + show if
     /// present, hide silently otherwise.
@@ -107,6 +113,7 @@ impl Default for Config {
             clock_format: "%a %b %d  %H:%M".to_string(),
             show_workspaces: true,
             show_control: true,
+            show_media: true,
             battery_show: true,
             battery_format: "{pct}%{sign}".to_string(),
             battery_low_threshold: 20,
@@ -176,6 +183,9 @@ impl Config {
         }
         if let Some(b) = raw.bar.show_control {
             cfg.show_control = b;
+        }
+        if let Some(b) = raw.bar.show_media {
+            cfg.show_media = b;
         }
         if let Some(b) = raw.battery.show {
             cfg.battery_show = b;
@@ -278,6 +288,11 @@ show_workspaces = true
 # false for a pure-keyboard bar with no mouse-driven control surface.
 show_control = true
 
+# Media-privacy indicators (MUTE/MIC/CAM chips + control-menu rows), shown
+# whenever the shoestring-mediad monitor is reporting. Set to false to hide
+# them entirely.
+show_media = true
+
 [clock]
 # strftime(3) pattern. The two named aliases below are convenience
 # shortcuts; anything else is passed straight to libc::strftime.
@@ -355,6 +370,7 @@ mod tests {
         assert_eq!(c.clock_format, "%a %b %d  %H:%M");
         assert!(c.show_workspaces);
         assert!(c.show_control);
+        assert!(c.show_media);
         assert!(c.battery_show);
         assert_eq!(c.battery_format, "{pct}%{sign}");
         assert_eq!(c.battery_low_threshold, 20);

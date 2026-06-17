@@ -634,6 +634,15 @@ pub enum Action {
     /// [`General::xkb_layout`], wrapping at the end. A no-op when only one
     /// layout is configured. Bound to Super+Space by default.
     CycleLayout,
+    /// Toggle the default audio sink (output) mute. The WM doesn't mute
+    /// anything itself — it spawns `shoestring-mediad audio-mute toggle`, which
+    /// flips PipeWire's real default-sink mute; the new state returns via the
+    /// monitor's `Request::ReportMedia`. Using `toggle` (not a cached bool)
+    /// keeps us honest when media keys / pavucontrol changed it underneath us.
+    ToggleAudioMute,
+    /// Toggle the default audio source (microphone) mute, the mic analogue of
+    /// [`Action::ToggleAudioMute`]. Spawns `shoestring-mediad mic-mute toggle`.
+    ToggleMicMute,
 }
 
 #[derive(Debug, thiserror::Error)]

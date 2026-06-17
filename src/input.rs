@@ -224,6 +224,8 @@ impl ShoestringWm {
             }
             Action::Lock => self.spawn_lock(),
             Action::CycleLayout => self.cycle_keyboard_layout(),
+            Action::ToggleAudioMute => self.spawn_mediad(&["audio-mute", "toggle"]),
+            Action::ToggleMicMute => self.spawn_mediad(&["mic-mute", "toggle"]),
         }
     }
 
@@ -268,6 +270,26 @@ impl ShoestringWm {
         match cmd.spawn() {
             Ok(child) => tracing::info!(pid = child.id(), %cmd_line, "spawned lock"),
             Err(e) => tracing::warn!(%cmd_line, error = %e, "spawn lock failed"),
+        }
+    }
+
+    /// Spawn the `shoestring-mediad` helper as a fire-and-forget oneshot with
+    /// the given subcommand (`["audio-mute", "on"]`, `["mic-mute", "toggle"]`,
+    /// …). The WM never touches PipeWire itself — this delegates the actual
+    /// mute to the pipewire-linked helper, and the new state flows back via
+    /// `Request::ReportMedia` from the long-running monitor. A missing binary
+    /// (no-PipeWire build) is just a logged warning, never fatal — mirrors the
+    /// systemd-optional / graceful-degradation posture. Inherits the WM env
+    /// (incl. `WAYLAND_DISPLAY`) so the helper finds the same session.
+    pub fn spawn_mediad(&mut self, args: &[&str]) {
+        let mut cmd = std::process::Command::new("shoestring-mediad");
+        cmd.args(args);
+        if let Some(socket) = self.socket_name.to_str() {
+            cmd.env("WAYLAND_DISPLAY", socket);
+        }
+        match cmd.spawn() {
+            Ok(child) => tracing::info!(pid = child.id(), ?args, "spawned mediad"),
+            Err(e) => tracing::warn!(?args, error = %e, "spawn mediad failed"),
         }
     }
 

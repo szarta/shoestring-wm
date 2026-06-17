@@ -30,6 +30,7 @@ use config::{default_config_path, default_config_toml, Config, Position};
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use shoestring_ipc::Event as IpcEvent;
+use shoestring_ipc::MediaState;
 use tracing_subscriber::EnvFilter;
 use wayland_client::{
     backend::ObjectId,
@@ -185,6 +186,12 @@ struct State {
     /// "capturing now" dot that decays a short while after the events stop
     /// (the ~1Hz redraw tick clears it). The strongest privacy signal.
     last_capture: Option<Instant>,
+    /// Last media-privacy snapshot from the WM (default-sink/source mute +
+    /// camera-in-use). Seeded from [`ipc_client::query_media`] at startup and
+    /// updated by `media_changed` events. `None` when no `shoestring-mediad`
+    /// monitor is reporting — the bar then shows no MUTE/MIC/CAM chips and the
+    /// control menu omits the media rows (graceful degrade).
+    media: Option<MediaState>,
     /// 1-based workspace for each window, keyed by ext-FT identifier.
     /// Populated from `window_opened` and updated by
     /// `window_moved_to_workspace`; ext-FT itself does not expose
@@ -465,6 +472,13 @@ fn run_session() -> Result<()> {
         false
     });
 
+    // Seed the media-privacy snapshot. `None` on error (or no monitor yet) →
+    // no media chips until a `media_changed` event arrives.
+    let media = ipc_client::query_media().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc media query failed; no media chips until reported");
+        None
+    });
+
     // Detect the battery source once at startup. If `battery_show` is
     // off, skip detection entirely so we don't even open the sysfs
     // dir on platforms where the user has opted out.
@@ -501,6 +515,7 @@ fn run_session() -> Result<()> {
         automation_enabled,
         screen_capture_enabled,
         last_capture: None,
+        media,
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
@@ -931,6 +946,21 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
             state.last_capture = Some(Instant::now());
             state.dirty = true;
         }
+        IpcEvent::MediaChanged {
+            audio_muted,
+            mic_muted,
+            camera_active,
+        } => {
+            let snapshot = MediaState {
+                audio_muted,
+                mic_muted,
+                camera_active,
+            };
+            if state.media != Some(snapshot) {
+                state.media = Some(snapshot);
+                state.dirty = true;
+            }
+        }
         IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::WindowRestacked { .. }
         | IpcEvent::WindowStickyChanged { .. }
@@ -1156,6 +1186,70 @@ fn redraw(
         None
     };
 
+    // Media-privacy chips (MUTE / MIC / CAM): drawn left of the capture chip
+    // whenever `shoestring-mediad` is reporting (`state.media` is `Some`) and
+    // the flagged condition holds. MUTE = the default output is muted; MIC =
+    // the microphone is *live* (unmuted — "hot"); CAM = a camera is actively
+    // streaming. MIC/CAM use the active (red) color because they're live
+    // privacy risks; MUTE is informational (accent). A shared closure draws
+    // each chip just-left-of `anchor` and returns its left edge so the next
+    // chip and the downstream cluster (battery/tray) anchor to it.
+    let media_gap = s(8);
+    let media = if state.cfg.show_media {
+        state.media
+    } else {
+        None
+    };
+    let draw_media_chip = |mmap: &mut MmapMut, label: &str, color: u32, anchor: i32| -> i32 {
+        let pad = s(4);
+        let chip_w = measure_text(&state.font, font_px, label) + pad * 2;
+        let chip_left = anchor - media_gap - chip_w;
+        fill_rect(
+            mmap,
+            pw,
+            ph,
+            chip_left,
+            s(2),
+            chip_w,
+            ph as i32 - s(4),
+            color,
+        );
+        draw_text(
+            mmap,
+            pw,
+            ph,
+            &state.font,
+            font_px,
+            chip_left + pad,
+            label,
+            fg,
+        );
+        chip_left
+    };
+    let media_base = cap_chip_left
+        .or(auto_chip_left)
+        .or(control_left)
+        .unwrap_or(clock_x);
+    let mute_chip_left = if media.is_some_and(|m| m.audio_muted) {
+        Some(draw_media_chip(&mut mmap, "MUTE", ACCENT, media_base))
+    } else {
+        None
+    };
+    let mic_chip_left = if media.is_some_and(|m| !m.mic_muted) {
+        let anchor = mute_chip_left.unwrap_or(media_base);
+        Some(draw_media_chip(&mut mmap, "MIC", CAPTURE_ACTIVE, anchor))
+    } else {
+        None
+    };
+    let cam_chip_left = if media.is_some_and(|m| m.camera_active) {
+        let anchor = mic_chip_left.or(mute_chip_left).unwrap_or(media_base);
+        Some(draw_media_chip(&mut mmap, "CAM", CAPTURE_ACTIVE, anchor))
+    } else {
+        None
+    };
+    // Leftmost media chip, for the downstream anchor chains (battery/tray/…).
+    let media_chip_left = cam_chip_left.or(mic_chip_left).or(mute_chip_left);
+
     // Battery indicator: drawn immediately left of the capture/AUTO chips (or
     // left of the clock when both are hidden). Skipped when no source
     // was detected or `battery_show = false` (which short-circuits
@@ -1165,7 +1259,8 @@ fn redraw(
             let bat_gap = s(8);
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
-            let right_anchor = cap_chip_left
+            let right_anchor = media_chip_left
+                .or(cap_chip_left)
                 .or(auto_chip_left)
                 .or(control_left)
                 .unwrap_or(clock_x);
@@ -1193,6 +1288,7 @@ fn redraw(
             t.ensure_icons(icon_px);
             let gap = s(6);
             let right_anchor = battery_left
+                .or(media_chip_left)
                 .or(cap_chip_left)
                 .or(auto_chip_left)
                 .or(control_left)
@@ -1282,6 +1378,7 @@ fn redraw(
     // is the supported channel for reading the build version.
     let list_end_x = tray_left
         .or(battery_left)
+        .or(media_chip_left)
         .or(cap_chip_left)
         .or(auto_chip_left)
         .unwrap_or(clock_x)
@@ -2199,6 +2296,9 @@ const CTRL_SCREEN_CAPTURE: i32 = 1;
 const CTRL_AUTOMATION: i32 = 2;
 const CTRL_LOCK: i32 = 3;
 const CTRL_LOGOUT: i32 = 4;
+const CTRL_AUDIO_MUTE: i32 = 5;
+const CTRL_MIC_MUTE: i32 = 6;
+const CTRL_CAMERA: i32 = 7;
 
 /// Build the control-menu rows from the current gate state. Toggles show a
 /// checkmark reflecting the live gate; lock/logout are plain items.
@@ -2213,7 +2313,7 @@ fn control_entries(state: &State) -> Vec<tray::MenuNode> {
         toggle,
         children: Vec::new(),
     };
-    let separator = tray::MenuNode {
+    let separator = || tray::MenuNode {
         id: 0,
         label: String::new(),
         enabled: false,
@@ -2223,7 +2323,7 @@ fn control_entries(state: &State) -> Vec<tray::MenuNode> {
         toggle: None,
         children: Vec::new(),
     };
-    vec![
+    let mut entries = vec![
         item(
             CTRL_SCREEN_CAPTURE,
             "Screen capture",
@@ -2234,10 +2334,33 @@ fn control_entries(state: &State) -> Vec<tray::MenuNode> {
             "Automation",
             Some(state.automation_enabled),
         ),
-        separator,
-        item(CTRL_LOCK, "Lock screen", None),
-        item(CTRL_LOGOUT, "Log out", None),
-    ]
+    ];
+    // Media-privacy rows, only when `shoestring-mediad` is reporting. The mute
+    // checkmarks reflect PipeWire's live state (a checked box = muted). Camera
+    // is a disabled, status-only row — there is no honest software off-switch.
+    if let Some(m) = state.media.filter(|_| state.cfg.show_media) {
+        entries.push(separator());
+        entries.push(item(CTRL_AUDIO_MUTE, "Mute output", Some(m.audio_muted)));
+        entries.push(item(CTRL_MIC_MUTE, "Mute microphone", Some(m.mic_muted)));
+        entries.push(tray::MenuNode {
+            id: CTRL_CAMERA,
+            label: if m.camera_active {
+                "Camera: in use".to_string()
+            } else {
+                "Camera: idle".to_string()
+            },
+            enabled: false,
+            visible: true,
+            separator: false,
+            has_submenu: false,
+            toggle: None,
+            children: Vec::new(),
+        });
+    }
+    entries.push(separator());
+    entries.push(item(CTRL_LOCK, "Lock screen", None));
+    entries.push(item(CTRL_LOGOUT, "Log out", None));
+    entries
 }
 
 /// Open the control menu as an `xdg_popup` anchored to the control applet.
@@ -2284,6 +2407,17 @@ fn apply_control_action(state: &mut State, id: i32) {
         CTRL_AUTOMATION => ipc_client::set_automation(!state.automation_enabled),
         CTRL_LOCK => ipc_client::lock(),
         CTRL_LOGOUT => ipc_client::quit(),
+        // Flip the live mute (not a cached toggle): mediad re-reports the real
+        // state, which updates the chip + checkmark via `media_changed`.
+        CTRL_AUDIO_MUTE => {
+            let cur = state.media.is_some_and(|m| m.audio_muted);
+            ipc_client::set_audio_mute(!cur)
+        }
+        CTRL_MIC_MUTE => {
+            let cur = state.media.is_some_and(|m| m.mic_muted);
+            ipc_client::set_mic_mute(!cur)
+        }
+        // Camera row is status-only (disabled) — never actionable.
         _ => return,
     };
     if let Err(e) = result {

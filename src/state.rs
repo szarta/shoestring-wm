@@ -260,6 +260,12 @@ pub struct ShoestringWm {
     /// `Instant` of the last emitted live-capture event. `None` until the
     /// first capture. Keeps a high-FPS cast from flooding subscribers.
     pub last_screen_capture_event: Option<Instant>,
+    /// Last media-privacy snapshot reported by the `shoestring-mediad` monitor
+    /// (default-sink/source mute + camera-in-use). `None` until the monitor
+    /// first reports — the WM never authors this, it only caches PipeWire's
+    /// truth so the bar can render MUTE/MIC/CAM indicators. Updated via
+    /// `Request::ReportMedia`; mutation is delegated to the helper.
+    pub media: Option<shoestring_ipc::MediaState>,
 
     /// In-flight `Request::Screenshot` subprocesses, keyed by an
     /// opaque counter. Entries are removed once the child has exited
@@ -580,6 +586,7 @@ impl ShoestringWm {
             automation_enabled,
             screen_capture_enabled,
             last_screen_capture_event: None,
+            media: None,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),
@@ -1334,6 +1341,16 @@ impl ShoestringWm {
                 frame.failed();
             }
         }
+    }
+
+    /// Cache a media-privacy snapshot reported by the `shoestring-mediad`
+    /// monitor and return whether it actually changed (so the caller can decide
+    /// to broadcast [`shoestring_ipc::Event::MediaChanged`]). The WM is a pure
+    /// cache here — it never authors mute state, only reflects PipeWire's truth.
+    pub fn set_media(&mut self, snapshot: shoestring_ipc::MediaState) -> bool {
+        let changed = self.media != Some(snapshot);
+        self.media = Some(snapshot);
+        changed
     }
 
     /// Record that a capture frame was just requested and, throttled to a few
