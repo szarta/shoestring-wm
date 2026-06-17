@@ -60,6 +60,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Same dev headers as ci.yml — cargo-deb links the same runtime libs.
+      # libpipewire-0.3-dev + libclang-dev: the screencast portal's bindgen build.
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -69,7 +70,8 @@ jobs:
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
             libseat-dev libdisplay-info-dev \
-            libpam0g-dev
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -140,7 +142,8 @@ jobs:
             libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
             systemd-devel libinput-devel \
             libseat-devel libdisplay-info-devel \
-            pam-devel
+            pam-devel \
+            pipewire-devel clang clang-libs
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2

@@ -21,7 +21,9 @@ jobs:
 
       # System deps mirror the Debian/Ubuntu list in docs/install.rst.
       # libseat-dev + libdisplay-info-dev land in 24.04; older runners
-      # would need an explicit PPA.
+      # would need an explicit PPA. libpipewire-0.3-dev (ships the libspa-0.2
+      # headers too) + libclang-dev are what the screencast portal's
+      # pipewire-sys/libspa-sys bindgen build needs.
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -31,7 +33,8 @@ jobs:
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
             libseat-dev libdisplay-info-dev \
-            libpam0g-dev
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -81,7 +84,8 @@ jobs:
               wayland libxkbcommon \
               libdrm mesa-libs \
               libudev-devd libinput \
-              seatd libdisplay-info
+              seatd libdisplay-info \
+              pipewire
           # pkg installs libs under /usr/local/lib, which base ld(1) does not
           # search — point the linker at it (matches docs/install.rst).
           run: |

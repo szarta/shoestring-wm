@@ -119,10 +119,17 @@ Debian / Ubuntu
         libdrm-dev libgbm-dev libegl-dev \
         libudev-dev libinput-dev \
         libseat-dev libdisplay-info-dev \
-        libpam0g-dev
+        libpam0g-dev \
+        libpipewire-0.3-dev libclang-dev
 
 If your distro's ``libdisplay-info-dev`` is older than 0.1 you may need
 to pull it from backports (Debian) or build it from upstream.
+
+The last line (``libpipewire-0.3-dev`` — which carries the ``libspa-0.2``
+headers — and ``libclang-dev``) is the build dependency of the native
+screencast portal, whose ``pipewire``/``libspa`` ``-sys`` crates generate
+bindings with ``bindgen``. ``cargo build --workspace`` always builds the
+portal, so these are required for a workspace build.
 
 Fedora / RHEL
 ~~~~~~~~~~~~~
@@ -134,9 +141,11 @@ Fedora / RHEL
         libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
         systemd-devel libinput-devel \
         libseat-devel libdisplay-info-devel \
-        pam-devel
+        pam-devel \
+        pipewire-devel clang
 
-(``systemd-devel`` provides ``libudev.pc`` on Fedora.)
+(``systemd-devel`` provides ``libudev.pc`` on Fedora; ``pipewire-devel`` +
+``clang`` build the screencast portal's bindgen bindings.)
 
 Arch / Manjaro
 ~~~~~~~~~~~~~~
@@ -148,7 +157,8 @@ Arch / Manjaro
         libdrm libglvnd mesa \
         systemd libinput \
         seatd libdisplay-info \
-        pam
+        pam \
+        pipewire clang
 
 Alpine
 ~~~~~~
@@ -160,7 +170,8 @@ Alpine
         libdrm-dev mesa-dev \
         eudev-dev libinput-dev \
         seatd-dev libdisplay-info-dev \
-        linux-pam-dev
+        linux-pam-dev \
+        pipewire-dev clang-dev
 
 FreeBSD
 ~~~~~~~
@@ -192,7 +203,12 @@ To **build from source** instead, install the toolchain and libraries::
     pkg install rust pkgconf \
         wayland libxkbcommon \
         drm-kmod mesa-libs \
-        libinput seatd libdisplay-info
+        libinput seatd libdisplay-info \
+        pipewire
+
+(``pipewire`` provides ``libpipewire-0.3``/``libspa-0.2`` for the screencast
+portal; ``clang``/``libclang`` for its bindgen build come from the base
+system. Omit it only if you ``--exclude`` the portal crate from the build.)
 
 For just the winit dev backend (which is the verified-working
 configuration on FreeBSD), only the first line is needed::
