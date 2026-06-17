@@ -139,6 +139,64 @@ pub fn request_focus_window(id: &str) -> Result<()> {
     }
 }
 
+/// Set the runtime screen-capture gate (`Request::SetScreenCapture`). Ungated.
+/// The bar doesn't use the returned state — an `Event::ScreenCaptureChanged`
+/// follows when it actually flips and the event loop updates the indicator.
+pub fn set_screen_capture(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetScreenCapture { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response =
+        serde_json::from_str(&line).context("parse set_screen_capture response")?;
+    match resp {
+        Response::ScreenCapture { .. } | Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Set the runtime automation gate (`Request::SetAutomation`). Ungated.
+/// `Event::AutomationChanged` (and possibly `ScreenCaptureChanged`, since
+/// automation is a capture superset) follows when it flips.
+pub fn set_automation(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetAutomation { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_automation response")?;
+    match resp {
+        Response::Automation { .. } | Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Lock the session (`Request::Lock`). Ungated; spawns the WM's lock binary.
+pub fn lock() -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::Lock)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse lock response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Quit the session (`Request::Quit`). Ungated; pops the WM's confirm dialog,
+/// so this returns once the dialog is shown — the user still has to accept it.
+pub fn quit() -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::Quit)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse quit response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Open a streaming subscription. Sends `Request::EventStream`, reads the
 /// initial `Response::Ok`, then flips the socket to non-blocking so the
 /// caller can poll it.

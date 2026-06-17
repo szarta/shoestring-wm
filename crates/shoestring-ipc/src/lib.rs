@@ -117,6 +117,15 @@ pub enum Request {
     /// `ext-session-lock-v1` handshake. Returns immediately with
     /// [`Response::Ok`] — no wait for the lock to confirm.
     Lock,
+    /// Quit the session — the same path as the `Action::Quit` keybind, so it
+    /// pops the `confirm_action` dialog (`shoestring-confirm`) and only exits
+    /// the WM on the user's *Yes*. Reply is [`Response::Ok`] (the dialog has
+    /// been shown, not that the user accepted). **Ungated** despite being
+    /// destructive: the human confirmation at the dialog is the authorization,
+    /// so a socket client can at worst pop a dialog the user dismisses. Lets a
+    /// mouse-driven UI (the bar control menu) offer log-out without requiring
+    /// the automation gate that `dispatch_action {"type":"quit"}` needs.
+    Quit,
     /// Toggle the runtime automation gate (see
     /// `general.automation_enabled`). Reply is [`Response::Automation`]
     /// with the new state; an [`Event::AutomationChanged`] is broadcast

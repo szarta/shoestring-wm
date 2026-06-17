@@ -364,6 +364,15 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::Quit => {
+                // Ungated: routes through the same confirm_action(Quit) path as
+                // the keybind, so the user must accept the dialog before the WM
+                // exits. We reply Ok once the dialog is up, not on acceptance.
+                tracing::info!("quit requested via ipc; prompting for confirmation");
+                state.dispatch_action(shoestring_config::Action::Quit);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
             Request::SetAutomation { enabled } => {
                 let changed = state.automation_enabled != enabled;
                 // Automation is a superset of screen capture: this also opens

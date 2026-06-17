@@ -241,8 +241,19 @@ struct State {
     /// (x_start, width, tray item index) for each rendered tray icon from
     /// the last redraw, in logical coords. Hit-tested to open a menu.
     tray_icon_rects: Vec<(i32, i32, usize)>,
-    /// The open tray context menu, if any.
+    /// `(x_start, width)` of the control applet from the last redraw, in
+    /// logical coords (or `None` when `show_control = false`). Hit-tested to
+    /// open the control menu.
+    control_rect: Option<(i32, i32)>,
+    /// The open context menu, if any (tray *or* control — see `menu_is_control`).
     menu: Option<menu::Menu>,
+    /// True when [`Self::menu`] is the control menu (gate toggles + lock/logout)
+    /// rather than a tray dbusmenu, so activation routes to IPC calls instead of
+    /// a dbusmenu `clicked` event.
+    menu_is_control: bool,
+    /// Set by the pointer handler when the control applet is clicked; the loop
+    /// opens the control menu.
+    pending_open_control: bool,
     /// Set when the menu needs a repaint (hover/nav/configure change).
     menu_dirty: bool,
     /// Tray item index whose menu the loop should fetch + open (set by the
@@ -504,7 +515,10 @@ fn run_session() -> Result<()> {
         pointer_y: None,
         pointer_on_menu: false,
         tray_icon_rects: Vec::new(),
+        control_rect: None,
         menu: None,
+        menu_is_control: false,
+        pending_open_control: false,
         menu_dirty: false,
         pending_open_menu: None,
         pending_menu_click: None,
@@ -516,10 +530,17 @@ fn run_session() -> Result<()> {
     };
 
     let surface = state.compositor.create_surface(&qh, ());
+    // Top layer (not Bottom): the bar carries drop-down menus (tray dbusmenus
+    // and the control menu) as popups, and a layer surface's popups render in
+    // its own layer's z-band. On Bottom they were occluded by ordinary windows
+    // (e.g. a maximized terminal) — only visible over the bare desktop. Top
+    // keeps the bar + its popups above windows; the exclusive zone below still
+    // keeps windows out of the bar's strip, and fullscreen windows still hide
+    // all layer surfaces (see the WM's fullscreen layer-hiding).
     let layer_surface = state.layer_shell.get_layer_surface(
         &surface,
         None,
-        Layer::Bottom,
+        Layer::Top,
         "shoestring-bar".to_string(),
         &qh,
         (),
@@ -807,6 +828,9 @@ fn event_loop(
         if let Some(idx) = state.pending_open_menu.take() {
             open_tray_menu(state, qh, tray.as_mut(), idx);
         }
+        if std::mem::take(&mut state.pending_open_control) {
+            open_control_menu(state, qh);
+        }
         if let Some(id) = state.pending_menu_click.take() {
             if let (Some(t), Some(m)) = (tray.as_mut(), state.menu.as_ref()) {
                 let ti = m.tray_idx;
@@ -1025,6 +1049,32 @@ fn redraw(
     let clock_x = pw as i32 - s(PADDING_X) - clock_w;
     draw_text(&mut mmap, pw, ph, &state.font, font_px, clock_x, &clock, fg);
 
+    // Control applet: a small clickable "hamburger" (three stacked bars) drawn
+    // immediately left of the clock. Clicking it opens the control menu (gate
+    // toggles + lock/logout). When shown it anchors the indicator cluster to
+    // its left; hidden (show_control = false) the chips hug the clock as before.
+    let control_left = if state.cfg.show_control {
+        let gap = s(8);
+        let cw = s(16);
+        let right = clock_x - gap;
+        let left = right - cw;
+        let bar_w = cw - s(4);
+        let bar_h = s(2).max(1);
+        let bx = left + s(2);
+        let cy = ph as i32 / 2;
+        for dy in [-s(5), 0, s(5)] {
+            fill_rect(&mut mmap, pw, ph, bx, cy + dy - bar_h / 2, bar_w, bar_h, fg);
+        }
+        // Store the logical hit rect for the pointer handler.
+        let lx = ((left as f64) / scale).round() as i32;
+        let lw = ((cw as f64) / scale).round() as i32;
+        state.control_rect = Some((lx, lw));
+        Some(left)
+    } else {
+        state.control_rect = None;
+        None
+    };
+
     // Automation indicator chip: drawn immediately left of the clock when
     // the WM's automation gate is ON. Hidden when off — the user should
     // always be able to tell at a glance that injected input / remote
@@ -1037,7 +1087,7 @@ fn redraw(
         let auto_clock_gap = s(8);
         let label_w = measure_text(&state.font, font_px, AUTO_LABEL);
         let chip_w = label_w + auto_pad * 2;
-        let chip_right = clock_x - auto_clock_gap;
+        let chip_right = control_left.unwrap_or(clock_x) - auto_clock_gap;
         let chip_left = chip_right - chip_w;
         fill_rect(
             &mut mmap,
@@ -1079,7 +1129,7 @@ fn redraw(
             .is_some_and(|t| t.elapsed() < CAPTURE_DOT_TTL);
         let label_w = measure_text(&state.font, font_px, CAP_LABEL);
         let chip_w = label_w + cap_pad * 2;
-        let chip_right = auto_chip_left.unwrap_or(clock_x) - cap_gap;
+        let chip_right = auto_chip_left.or(control_left).unwrap_or(clock_x) - cap_gap;
         let chip_left = chip_right - chip_w;
         fill_rect(
             &mut mmap,
@@ -1115,7 +1165,10 @@ fn redraw(
             let bat_gap = s(8);
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
-            let right_anchor = cap_chip_left.or(auto_chip_left).unwrap_or(clock_x);
+            let right_anchor = cap_chip_left
+                .or(auto_chip_left)
+                .or(control_left)
+                .unwrap_or(clock_x);
             let bat_x = right_anchor - bat_gap - text_w;
             let color = battery::pick_color(
                 &reading,
@@ -1142,6 +1195,7 @@ fn redraw(
             let right_anchor = battery_left
                 .or(cap_chip_left)
                 .or(auto_chip_left)
+                .or(control_left)
                 .unwrap_or(clock_x);
             let tray_items: Vec<(usize, &icons::Icon)> = t.visible_items().collect();
             if tray_items.is_empty() {
@@ -1950,6 +2004,16 @@ impl Dispatch<WlPointer, ()> for State {
                 };
                 let xi = x.floor() as i32;
 
+                // Control applet: a hit opens the control menu (gate toggles +
+                // lock/logout). Checked before the tray since it sits left of
+                // the clock, distinct from the tray icon cluster.
+                if let Some((cx, cw)) = state.control_rect {
+                    if xi >= cx && xi < cx + cw {
+                        state.pending_open_control = true;
+                        return;
+                    }
+                }
+
                 // Tray icons sit on the right; a hit opens that item's menu.
                 if let Some((_, _, idx)) = state
                     .tray_icon_rects
@@ -2024,7 +2088,18 @@ fn apply_menu_action(state: &mut State, action: menu::Action, qh: &QueueHandle<S
             }
         }
         menu::Action::Activate(id) => {
-            state.pending_menu_click = Some(id);
+            if state.menu_is_control {
+                // Control menu: apply the gate/lock/quit action directly (the
+                // ipc_client calls are independent one-shot connections, no
+                // D-Bus/tray scope needed), then dismiss the menu.
+                apply_control_action(state, id);
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+                state.menu_is_control = false;
+            } else {
+                state.pending_menu_click = Some(id);
+            }
         }
         menu::Action::NavInto(label) => {
             // Deferred: descending fetches the submenu (lazy population), which
@@ -2114,7 +2189,106 @@ fn open_tray_menu(
     );
     tracing::debug!(idx, ?anchor_rect, "tray menu opened");
     state.menu = Some(m);
+    state.menu_is_control = false;
     state.menu_dirty = true;
+}
+
+// Control-menu item ids (the synthetic dbusmenu ids the control menu carries;
+// `menu_is_control` distinguishes them from real tray ids). 0 is the separator.
+const CTRL_SCREEN_CAPTURE: i32 = 1;
+const CTRL_AUTOMATION: i32 = 2;
+const CTRL_LOCK: i32 = 3;
+const CTRL_LOGOUT: i32 = 4;
+
+/// Build the control-menu rows from the current gate state. Toggles show a
+/// checkmark reflecting the live gate; lock/logout are plain items.
+fn control_entries(state: &State) -> Vec<tray::MenuNode> {
+    let item = |id: i32, label: &str, toggle: Option<bool>| tray::MenuNode {
+        id,
+        label: label.to_string(),
+        enabled: true,
+        visible: true,
+        separator: false,
+        has_submenu: false,
+        toggle,
+        children: Vec::new(),
+    };
+    let separator = tray::MenuNode {
+        id: 0,
+        label: String::new(),
+        enabled: false,
+        visible: true,
+        separator: true,
+        has_submenu: false,
+        toggle: None,
+        children: Vec::new(),
+    };
+    vec![
+        item(
+            CTRL_SCREEN_CAPTURE,
+            "Screen capture",
+            Some(state.screen_capture_enabled),
+        ),
+        item(
+            CTRL_AUTOMATION,
+            "Automation",
+            Some(state.automation_enabled),
+        ),
+        separator,
+        item(CTRL_LOCK, "Lock screen", None),
+        item(CTRL_LOGOUT, "Log out", None),
+    ]
+}
+
+/// Open the control menu as an `xdg_popup` anchored to the control applet.
+/// Mirrors [`open_tray_menu`] but uses synthetic entries and needs no tray.
+fn open_control_menu(state: &mut State, qh: &QueueHandle<State>) {
+    if let Some(m) = state.menu.take() {
+        m.destroy();
+    }
+    let Some((x, w)) = state.control_rect else {
+        return;
+    };
+    let bar_h = state.size.map(|(_, h)| h).unwrap_or(state.cfg.height) as i32;
+    let anchor_rect = (x, 0, w, bar_h);
+    let (Some(seat), Some(bar_layer)) = (state.seat.as_ref(), state.layer_surface.as_ref()) else {
+        return;
+    };
+    let m = menu::Menu::open(
+        &state.compositor,
+        &state.xdg_wm_base,
+        bar_layer,
+        state.viewporter.as_ref(),
+        qh,
+        control_entries(state),
+        usize::MAX, // sentinel tray_idx; control activation bypasses tray routing
+        anchor_rect,
+        state.cfg.position,
+        seat,
+        state.last_pointer_serial,
+        &state.font,
+        state.cfg.font_size,
+    );
+    tracing::debug!(?anchor_rect, "control menu opened");
+    state.menu = Some(m);
+    state.menu_is_control = true;
+    state.menu_dirty = true;
+}
+
+/// Apply a control-menu selection. The gate toggles flip the *current* state;
+/// the resulting `*_changed` IPC event updates our cached state + indicators.
+/// Errors are logged, not surfaced (the menu is already dismissing).
+fn apply_control_action(state: &mut State, id: i32) {
+    let result = match id {
+        CTRL_SCREEN_CAPTURE => ipc_client::set_screen_capture(!state.screen_capture_enabled),
+        CTRL_AUTOMATION => ipc_client::set_automation(!state.automation_enabled),
+        CTRL_LOCK => ipc_client::lock(),
+        CTRL_LOGOUT => ipc_client::quit(),
+        _ => return,
+    };
+    if let Err(e) = result {
+        tracing::warn!(id, error = ?e, "control menu action failed");
+    }
 }
 
 #[cfg(test)]
