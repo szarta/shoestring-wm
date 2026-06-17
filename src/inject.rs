@@ -176,15 +176,23 @@ impl ShoestringWm {
         }
 
         // Mirror the WM's normal click-to-focus behavior — without this,
-        // an injected click only delivers the button event to whatever
-        // surface had pointer focus last, and doesn't update keyboard
-        // focus the way a real click does. The Super+drag carve-out is
-        // omitted intentionally: an injected click has no modifier state.
+        // an injected click doesn't update keyboard focus the way a real
+        // click does. This must match the real-input path (see `crate::input`)
+        // for layer-shell surfaces: focus a window only when no Top/Overlay
+        // layer covers the point, and never clear focus when *any* surface
+        // (a bar, tray menu, or picker) is under the pointer — clearing it
+        // would yank that layer surface's own keyboard focus and make a menu
+        // dismiss on its own click. The Super+drag carve-out is omitted
+        // intentionally: an injected click has no modifier state.
         let pos = self.seat.get_pointer().unwrap().current_location();
-        let target = self.space.element_under(pos).map(|(w, _)| w.clone());
-        match target {
-            Some(window) => self.focus_window(&window),
-            None => self.clear_focus(),
+        match self.space.element_under(pos).map(|(w, _)| w.clone()) {
+            Some(window) if !self.overlay_layer_under(pos) => self.focus_window(&window),
+            Some(_) => {}
+            None => {
+                if self.surface_under(pos).is_none() {
+                    self.clear_focus();
+                }
+            }
         }
 
         let press_serial = SERIAL_COUNTER.next_serial();

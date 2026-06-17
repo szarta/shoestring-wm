@@ -31,9 +31,7 @@ use smithay::{
     desktop::Space,
     output::Output,
     reexports::{
-        wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::{
-            self, ZwlrScreencopyFrameV1,
-        },
+        wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         wayland_server::{backend::GlobalId, protocol::wl_buffer::WlBuffer, Resource},
     },
     utils::{Buffer as BufferCoord, Rectangle},
@@ -201,12 +199,14 @@ pub fn process_pending<R>(
         drop(framebuffer);
         match result {
             Ok(()) => {
-                // dmabuf is Y-inverted: we render through a GL FBO over the
-                // dmabuf's EGLImage, whose bottom-left origin leaves the buffer
-                // rows bottom-to-top (matches wlroots). The shm path is NOT
-                // inverted — `copy_framebuffer`'s readback lands rows top-to-
-                // bottom — so only the dmabuf path flags YInvert.
-                finish_frame(&frame, true);
+                // The rendered dmabuf is upright (rows top-to-bottom), same as
+                // the shm path — verified empirically via the portal's
+                // `--selftest-dmabuf` (reading the gbm-mapped buffer straight
+                // yields an upright image; honoring YInvert yields upside-down).
+                // The earlier assumption that the EGLImage FBO's bottom-left
+                // origin left the buffer bottom-to-top was wrong, so we flag no
+                // YInvert on either path. (task 158)
+                finish_frame(&frame);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: dmabuf render failed");
@@ -310,8 +310,8 @@ pub fn process_pending<R>(
             match copy_region(renderer, &framebuffer, region, format, stride, &buffer) {
                 Ok(()) => {
                     // shm readback (copy_framebuffer) lands rows top-to-bottom;
-                    // no YInvert (see the dmabuf path comment above).
-                    finish_frame(&frame, false);
+                    // no YInvert (same as the dmabuf path).
+                    finish_frame(&frame);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "screencopy: copy_region failed");
@@ -323,22 +323,19 @@ pub fn process_pending<R>(
     }
 }
 
-/// Complete a successfully captured frame: send `flags` (only when the buffer
-/// is Y-inverted), then a `damage` event if the client used `copy_with_damage`,
-/// then `ready` — in that order, matching wlroots. The damage box covers the
-/// whole capture region because each capture repaints the full output (no
-/// incremental damage tracking against prior captures). Reads
+/// Complete a successfully captured frame: a `damage` event if the client used
+/// `copy_with_damage`, then `ready` — in that order, matching wlroots. The
+/// damage box covers the whole capture region because each capture repaints the
+/// full output (no incremental damage tracking against prior captures). Reads
 /// `with_damage`/`region` from the frame's own user data so both the dmabuf and
 /// shm paths share one code path.
 ///
-/// `y_invert` differs per path: the dmabuf path renders into an EGLImage FBO
-/// (bottom-left origin → rows bottom-to-top → invert), while the shm path's
-/// `copy_framebuffer` readback already lands rows top-to-bottom. Tagging shm as
-/// inverted is what flipped `shoestring-screenshot` PNGs and portal frames.
-fn finish_frame(frame: &ZwlrScreencopyFrameV1, y_invert: bool) {
-    if y_invert {
-        frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
-    }
+/// We never send the `YInvert` flag: both render paths land rows top-to-bottom
+/// (upright). The dmabuf path was previously assumed bottom-up because it
+/// renders through an EGLImage FBO, but that was wrong — verified via the
+/// portal's `--selftest-dmabuf` (task 158). Tagging a buffer inverted is what
+/// once flipped `shoestring-screenshot` PNGs, portal frames, and `grim`.
+fn finish_frame(frame: &ZwlrScreencopyFrameV1) {
     if let Some(user) = frame.data::<ScreencopyFrameData>() {
         let (with_damage, region) = {
             let inner = user.inner.lock().unwrap();
