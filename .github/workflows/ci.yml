@@ -58,6 +58,43 @@ jobs:
       - name: cargo build (release)
         run: cargo build --workspace --release
 
+  # Runs the WM's #[ignore]'d integration tests against a real, headless
+  # shoestring-wm instance. The protocol suites (output-management,
+  # pointer-constraints/gestures, tablet, idle-inhibit, virtual-pointer,
+  # foreign-toplevel-management) connect to a live compositor over
+  # $WAYLAND_DISPLAY, so the plain `cargo test` above only compiles them. Here
+  # the winit backend runs nested in Xvfb with Mesa's llvmpipe software
+  # renderer — no GPU needed. See scripts/headless-integration-tests.sh.
+  integration:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same build deps as `check`, plus Xvfb (the X server the winit backend
+      # nests in) and the Mesa DRI drivers (llvmpipe, for software EGL/GLES).
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev \
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev \
+            xvfb libgl1-mesa-dri
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Integration tests (headless WM)
+        run: xvfb-run -a -s "-screen 0 1280x800x24" scripts/headless-integration-tests.sh
+
   # The same fmt/clippy/test/build sequence on FreeBSD, inside a VM action
   # (GitHub has no native FreeBSD runner). Catches OpenPAM/libudev-devd
   # portability regressions — notably the vendored pam-client2 fork that
