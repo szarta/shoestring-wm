@@ -2291,6 +2291,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoestring-mediad"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "libspa",
+ "pipewire",
+ "serde_json",
+ "shoestring-ipc",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "shoestring-menu"
 version = "0.2.0"
 dependencies = [

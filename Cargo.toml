@@ -13,6 +13,7 @@ members = [
     "crates/shoestring-region",
     "crates/shoestring-screenshot",
     "crates/xdg-desktop-portal-shoestring",
+    "crates/shoestring-mediad",
 ]
 
 [workspace.package]
