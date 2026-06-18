@@ -46,12 +46,22 @@ struct AudioNode {
     _listener: pw::node::NodeListener,
 }
 
+/// One tracked camera source (`media.class = Video/Source`). `running` is true
+/// while the node is actively streaming to a consumer — the "camera in use"
+/// signal. Status only; we never mute/stop it.
+struct CameraNode {
+    running: bool,
+    _proxy: pw::node::Node,
+    _listener: pw::node::NodeListener,
+}
+
 /// Shared registry/metadata/node state. Mutated from PipeWire callbacks (all on
 /// the single loop thread, so a `RefCell` is enough) and read to compute the
 /// snapshot.
 #[derive(Default)]
 struct Inner {
     nodes: HashMap<u32, AudioNode>,
+    cameras: HashMap<u32, CameraNode>,
     default_sink: Option<String>,
     default_source: Option<String>,
     last_snapshot: Option<Snapshot>,
@@ -70,7 +80,20 @@ impl Inner {
         Snapshot {
             audio_muted: mute_of(&self.default_sink, true),
             mic_muted: mute_of(&self.default_source, false),
-            camera_active: false,
+            camera_active: self.cameras.values().any(|c| c.running),
+        }
+    }
+
+    /// Recompute the snapshot and, if it differs from the last reported one,
+    /// record + return it (so the caller emits one `on_change`). Centralises the
+    /// dedup shared by every callback.
+    fn changed_snapshot(&mut self) -> Option<Snapshot> {
+        let snap = self.snapshot();
+        if self.last_snapshot != Some(snap) {
+            self.last_snapshot = Some(snap);
+            Some(snap)
+        } else {
+            None
         }
     }
 
@@ -153,14 +176,9 @@ impl Pw {
                 metas_for_remove.borrow_mut().remove(&id);
                 let report = {
                     let mut g = inner_for_remove.borrow_mut();
-                    if g.nodes.remove(&id).is_some() {
-                        let snap = g.snapshot();
-                        if g.last_snapshot != Some(snap) {
-                            g.last_snapshot = Some(snap);
-                            Some(snap)
-                        } else {
-                            None
-                        }
+                    let removed = g.nodes.remove(&id).is_some() | g.cameras.remove(&id).is_some();
+                    if removed {
+                        g.changed_snapshot()
                     } else {
                         None
                     }
@@ -260,6 +278,11 @@ fn bind_node(
     let class = props.get("media.class").unwrap_or("");
     let is_sink = class == "Audio/Sink";
     let is_source = class == "Audio/Source";
+    let is_camera = class == "Video/Source";
+    if is_camera {
+        bind_camera(registry, global, inner, on_change);
+        return;
+    }
     if !is_sink && !is_source {
         return;
     }
@@ -292,13 +315,7 @@ fn bind_node(
                     return;
                 }
                 n.mute = Some(mute);
-                let snap = g.snapshot();
-                if g.last_snapshot != Some(snap) {
-                    g.last_snapshot = Some(snap);
-                    Some(snap)
-                } else {
-                    None
-                }
+                g.changed_snapshot()
             };
             if let Some(snap) = report {
                 on_change_cb(snap);
@@ -312,6 +329,66 @@ fn bind_node(
             name,
             is_sink,
             mute: None,
+            _proxy: node,
+            _listener: listener,
+        },
+    );
+}
+
+/// Bind a `Video/Source` camera node and watch its `state` via the node `info`
+/// event — `Running` means a consumer is actively pulling frames, i.e. the
+/// camera is in use. Status only: we never stop it. Note this sees cameras that
+/// go through PipeWire (the portal, browsers/Electron); a raw `/dev/video*`
+/// open that bypasses PipeWire is not visible here.
+fn bind_camera(
+    registry: &pw::registry::RegistryRc,
+    global: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
+    inner: &Rc<RefCell<Inner>>,
+    on_change: &Rc<dyn Fn(Snapshot)>,
+) {
+    let name = global
+        .props
+        .and_then(|p| p.get("node.name"))
+        .unwrap_or_default()
+        .to_string();
+    tracing::debug!(id = global.id, %name, "tracking camera node");
+
+    let node: pw::node::Node = match registry.bind(global) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(id = global.id, error = %e, "bind camera failed");
+            return;
+        }
+    };
+
+    let id = global.id;
+    let inner_cb = inner.clone();
+    let on_change_cb = on_change.clone();
+    let listener = node
+        .add_listener_local()
+        .info(move |info| {
+            let running = matches!(info.state(), pw::node::NodeState::Running);
+            let report = {
+                let mut g = inner_cb.borrow_mut();
+                let Some(c) = g.cameras.get_mut(&id) else {
+                    return;
+                };
+                if c.running == running {
+                    return;
+                }
+                c.running = running;
+                g.changed_snapshot()
+            };
+            if let Some(snap) = report {
+                on_change_cb(snap);
+            }
+        })
+        .register();
+
+    inner.borrow_mut().cameras.insert(
+        id,
+        CameraNode {
+            running: false,
             _proxy: node,
             _listener: listener,
         },
@@ -359,13 +436,7 @@ fn bind_metadata(
                     } else {
                         g.default_source = name;
                     }
-                    let snap = g.snapshot();
-                    if g.last_snapshot != Some(snap) {
-                        g.last_snapshot = Some(snap);
-                        Some(snap)
-                    } else {
-                        None
-                    }
+                    g.changed_snapshot()
                 };
                 if let Some(snap) = report {
                     on_change_cb(snap);
