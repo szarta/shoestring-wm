@@ -121,6 +121,11 @@ Implemented today:
   touch-aware apps work directly. A touch-down focuses the window under
   the finger like a click. The ``wl_touch`` capability is advertised on
   the seat only once a touchscreen appears via libinput (TTY) hotplug.
+- Touchpad gestures (``zwp_pointer_gestures_v1``): three- and four-finger
+  swipe, pinch and hold gestures recognised by libinput are forwarded to
+  the focused client through the pointer, so apps (browsers, image
+  viewers) can act on them. Always advertised; gesture events arrive only
+  from the libinput (TTY) backend.
 - Accurate frame-presentation timing (``wp_presentation``): clients that
   request feedback get the precise on-screen timestamp for each buffer, so
   video players sync audio/video and animations pace correctly. On the

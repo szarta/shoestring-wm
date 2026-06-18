@@ -204,6 +204,13 @@ pub struct ShoestringWm {
     /// Held only to keep the global registered for the session's lifetime.
     #[allow(dead_code)]
     pub tablet_manager: smithay::wayland::tablet_manager::TabletManagerState,
+    /// `zwp_pointer_gestures_v1`: forwards libinput touchpad swipe/pinch/hold
+    /// gestures to clients via the seat's pointer. Always advertised; real
+    /// gesture events arrive only from the libinput (TTY) backend and are
+    /// routed in [`crate::input`]'s `Gesture*` handling. Held only to keep the
+    /// global registered for the session's lifetime.
+    #[allow(dead_code)]
+    pub pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
     /// `wp_presentation` global. Clients use it to request precise on-screen
     /// timestamps for the buffers they commit (video A/V sync, animation
     /// pacing). The udev/DRM backend fulfils them from hardware vblank
@@ -501,6 +508,11 @@ impl ShoestringWm {
         // unlike idle-inhibit); real tool events arrive only from the libinput
         // backend, but advertising costs nothing on winit.
         let tablet_manager = smithay::wayland::tablet_manager::TabletManagerState::new::<Self>(&dh);
+        // Touchpad multi-finger gestures (swipe/pinch/hold). Always-on global
+        // like the tablet/constraint managers; gesture events are emitted only
+        // by the libinput backend and forwarded to the pointer in input.rs.
+        let pointer_gestures =
+            smithay::wayland::pointer_gestures::PointerGesturesState::new::<Self>(&dh);
 
         let automation_enabled = config.general.automation_enabled;
 
@@ -576,6 +588,7 @@ impl ShoestringWm {
             pointer_constraints,
             relative_pointer,
             tablet_manager,
+            pointer_gestures,
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
             ipc: None,

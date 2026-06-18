@@ -4,16 +4,20 @@ use shoestring_config::Action;
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
-        InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
-        PointerMotionEvent, ProximityState, TabletToolButtonEvent, TabletToolEvent,
-        TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState, TouchEvent,
+        GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _,
+        GestureSwipeUpdateEvent as _, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
+        PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, ProximityState,
+        TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
+        TabletToolTipState, TouchEvent,
     },
     desktop::Window,
     input::{
         keyboard::FilterResult,
         pointer::{
-            AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData, MotionEvent,
-            RelativeMotionEvent,
+            AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
+            GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+            GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
+            GrabStartData as PointerGrabStartData, MotionEvent, RelativeMotionEvent,
         },
         touch::{DownEvent, UpEvent},
     },
@@ -1062,6 +1066,21 @@ impl ShoestringWm {
             }
             InputEvent::TabletToolTip { event, .. } => self.on_tablet_tool_tip::<I>(&event),
             InputEvent::TabletToolButton { event, .. } => self.on_tablet_tool_button::<I>(&event),
+            // Touchpad multi-finger gestures (zwp_pointer_gestures_v1). Forwarded
+            // verbatim to the focused client via the pointer; libinput recognises
+            // the gesture, we don't interpret it (no WM gesture binds yet).
+            InputEvent::GestureSwipeBegin { event, .. } => self.on_gesture_swipe_begin::<I>(&event),
+            InputEvent::GestureSwipeUpdate { event, .. } => {
+                self.on_gesture_swipe_update::<I>(&event)
+            }
+            InputEvent::GestureSwipeEnd { event, .. } => self.on_gesture_swipe_end::<I>(&event),
+            InputEvent::GesturePinchBegin { event, .. } => self.on_gesture_pinch_begin::<I>(&event),
+            InputEvent::GesturePinchUpdate { event, .. } => {
+                self.on_gesture_pinch_update::<I>(&event)
+            }
+            InputEvent::GesturePinchEnd { event, .. } => self.on_gesture_pinch_end::<I>(&event),
+            InputEvent::GestureHoldBegin { event, .. } => self.on_gesture_hold_begin::<I>(&event),
+            InputEvent::GestureHoldEnd { event, .. } => self.on_gesture_hold_end::<I>(&event),
             _ => {}
         }
     }
@@ -1166,6 +1185,113 @@ impl ShoestringWm {
         if let Some(touch) = self.seat.get_touch() {
             touch.cancel(self);
         }
+    }
+
+    // ── Touchpad gestures (zwp_pointer_gestures_v1) ─────────────────────────
+    // Each handler clones the pointer (a cheap Arc) and forwards the libinput
+    // event to the focused client. begin/end carry a fresh serial; updates
+    // don't. Smithay maps these onto the client's bound gesture objects.
+
+    fn on_gesture_swipe_begin<I: InputBackend>(&mut self, evt: &I::GestureSwipeBeginEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_swipe_begin(
+            self,
+            &GestureSwipeBeginEvent {
+                serial,
+                time: evt.time_msec(),
+                fingers: evt.fingers(),
+            },
+        );
+    }
+
+    fn on_gesture_swipe_update<I: InputBackend>(&mut self, evt: &I::GestureSwipeUpdateEvent) {
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_swipe_update(
+            self,
+            &GestureSwipeUpdateEvent {
+                time: evt.time_msec(),
+                delta: evt.delta(),
+            },
+        );
+    }
+
+    fn on_gesture_swipe_end<I: InputBackend>(&mut self, evt: &I::GestureSwipeEndEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_swipe_end(
+            self,
+            &GestureSwipeEndEvent {
+                serial,
+                time: evt.time_msec(),
+                cancelled: evt.cancelled(),
+            },
+        );
+    }
+
+    fn on_gesture_pinch_begin<I: InputBackend>(&mut self, evt: &I::GesturePinchBeginEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_pinch_begin(
+            self,
+            &GesturePinchBeginEvent {
+                serial,
+                time: evt.time_msec(),
+                fingers: evt.fingers(),
+            },
+        );
+    }
+
+    fn on_gesture_pinch_update<I: InputBackend>(&mut self, evt: &I::GesturePinchUpdateEvent) {
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_pinch_update(
+            self,
+            &GesturePinchUpdateEvent {
+                time: evt.time_msec(),
+                delta: evt.delta(),
+                scale: evt.scale(),
+                rotation: evt.rotation(),
+            },
+        );
+    }
+
+    fn on_gesture_pinch_end<I: InputBackend>(&mut self, evt: &I::GesturePinchEndEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_pinch_end(
+            self,
+            &GesturePinchEndEvent {
+                serial,
+                time: evt.time_msec(),
+                cancelled: evt.cancelled(),
+            },
+        );
+    }
+
+    fn on_gesture_hold_begin<I: InputBackend>(&mut self, evt: &I::GestureHoldBeginEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_hold_begin(
+            self,
+            &GestureHoldBeginEvent {
+                serial,
+                time: evt.time_msec(),
+                fingers: evt.fingers(),
+            },
+        );
+    }
+
+    fn on_gesture_hold_end<I: InputBackend>(&mut self, evt: &I::GestureHoldEndEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.gesture_hold_end(
+            self,
+            &GestureHoldEndEvent {
+                serial,
+                time: evt.time_msec(),
+                cancelled: evt.cancelled(),
+            },
+        );
     }
 
     /// Map a tablet tool's absolute position onto the desktop. Tablets report
