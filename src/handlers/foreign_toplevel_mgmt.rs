@@ -15,7 +15,6 @@ use smithay::{
 
 use crate::{
     foreign_toplevel_mgmt::{ForeignToplevelHandleData, ForeignToplevelManagerData},
-    layout::{self, LayoutState},
     state::ShoestringWm,
 };
 
@@ -98,30 +97,10 @@ impl Dispatch2<ZwlrForeignToplevelHandleV1, ShoestringWm> for ForeignToplevelHan
             Request::Close => crate::window_ext::send_close(&window),
             Request::SetMinimized => state.minimize_window(&window),
             Request::UnsetMinimized => state.unminimize_window(&window),
-            // set_layout toggles, so guard on the current state: only act when a
-            // real change is needed (already-correct requests fall through).
-            Request::SetMaximized
-                if state.layout.layout_state(&window) != LayoutState::Maximized =>
-            {
-                layout::set_layout(
-                    &mut state.space,
-                    &mut state.layout,
-                    &window,
-                    LayoutState::Maximized,
-                );
-                crate::foreign_toplevel_mgmt::sync_wlr_toplevel(state, &window);
-            }
-            Request::UnsetMaximized
-                if state.layout.layout_state(&window) == LayoutState::Maximized =>
-            {
-                layout::set_layout(
-                    &mut state.space,
-                    &mut state.layout,
-                    &window,
-                    LayoutState::Maximized,
-                );
-                crate::foreign_toplevel_mgmt::sync_wlr_toplevel(state, &window);
-            }
+            // Shared (idempotent) maximize path with the xdg `set_maximized`
+            // handler — already-correct requests just re-ack a configure.
+            Request::SetMaximized => state.maximize_window(&window),
+            Request::UnsetMaximized => state.unmaximize_window(&window),
             Request::SetFullscreen { output } => state.fullscreen_window(&window, output),
             Request::UnsetFullscreen => state.unfullscreen_window(&window),
             // A minimize-animation hint the WM doesn't use; reject only an

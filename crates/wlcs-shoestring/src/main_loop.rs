@@ -239,19 +239,23 @@ fn handle_event(event: WlcsEvent, state: &mut ShoestringWm) {
                     .space
                     .element_under(ptr.current_location())
                     .map(|(w, _)| w.clone());
-                if let Some(window) = under.as_ref() {
-                    state.space.raise_element(window, true);
+                // Drive the same click-to-focus path the real WM uses on a
+                // button press (src/input.rs): `focus_window` raises, moves
+                // keyboard focus, AND updates the xdg `activated` state +
+                // configure on every window. Setting only the keyboard focus
+                // here (as this harness used to) left the activated bit stale,
+                // so XdgToplevelConfigurationTest.activated_state_follows_pointer
+                // never saw the clicked window become activated.
+                match under.as_ref() {
+                    Some(window) => state.focus_window(window),
+                    None => {
+                        state
+                            .seat
+                            .get_keyboard()
+                            .unwrap()
+                            .set_focus(state, None, serial);
+                    }
                 }
-                // shoestring-wm's keyboard focus target is the WlSurface, not the
-                // window (see SeatHandler::KeyboardFocus), so resolve it here.
-                let focus = under
-                    .as_ref()
-                    .and_then(shoestring_wm::window_ext::focus_surface);
-                state
-                    .seat
-                    .get_keyboard()
-                    .unwrap()
-                    .set_focus(state, focus, serial);
             }
             let time = state.start_time.elapsed().as_millis() as u32;
             ptr.button(

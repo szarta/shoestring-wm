@@ -349,6 +349,45 @@ impl ShoestringWm {
         crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
     }
 
+    /// Maximize `window` (fill the work area), idempotently. Shared by the xdg
+    /// `set_maximized` request and the foreign-toplevel-management
+    /// `set_maximized`. Unlike the [`LayoutState::Maximized`] keybind, this is
+    /// not a toggle: a second request on an already-maximized window just
+    /// re-acks with a configure rather than restoring the floating rect.
+    pub fn maximize_window(&mut self, window: &Window) {
+        if self.layout.layout_state(window) == LayoutState::Maximized {
+            // Already maximized — the client is still owed a configure in reply.
+            crate::window_ext::send_pending_configure(window);
+            return;
+        }
+        layout::set_layout(
+            &mut self.space,
+            &mut self.layout,
+            window,
+            LayoutState::Maximized,
+        );
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+    }
+
+    /// Leave maximized state, restoring the saved floating rect. The counterpart
+    /// of [`Self::maximize_window`]; a no-op (bar a re-ack configure) when the
+    /// window isn't maximized.
+    pub fn unmaximize_window(&mut self, window: &Window) {
+        if self.layout.layout_state(window) != LayoutState::Maximized {
+            crate::window_ext::send_pending_configure(window);
+            return;
+        }
+        // `set_layout` toggles: targeting Maximized while already maximized
+        // restores the saved floating rect and clears the state bit.
+        layout::set_layout(
+            &mut self.space,
+            &mut self.layout,
+            window,
+            LayoutState::Maximized,
+        );
+        crate::foreign_toplevel_mgmt::sync_wlr_toplevel(self, window);
+    }
+
     fn minimize_focused(&mut self) {
         let Some(window) = self.focused_window() else {
             tracing::debug!("minimize: no focused window");

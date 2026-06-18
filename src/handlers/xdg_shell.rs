@@ -143,6 +143,22 @@ impl XdgShellHandler for ShoestringWm {
         }
     }
 
+    // App-driven maximize (the titlebar "maximize" button, or a client that
+    // wants to fill the work area). Without these, smithay's default no-op
+    // reply leaves the toplevel un-maximized and the client waiting on a
+    // configure that never carries the maximized state + size.
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.find_window(&surface) {
+            self.maximize_window(&window);
+        }
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.find_window(&surface) {
+            self.unmaximize_window(&window);
+        }
+    }
+
     // move/resize requests are wired up in M3 (Super+drag pointer grabs).
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
     }
