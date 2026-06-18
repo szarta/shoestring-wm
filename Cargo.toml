@@ -113,9 +113,11 @@ depends = "$auto, libpam-modules"
 # xdg-desktop-portal (the frontend) + pipewire enable screen sharing and
 # screenshots via our own ScreenCast + Screenshot backend; we no longer need
 # xdg-desktop-portal-wlr (both portal interfaces are served natively). The
-# libpipewire/libspa shared libs the portal binary links are pinned
-# automatically by $auto.
-recommends = "xwayland, xdg-desktop-portal, pipewire"
+# libpipewire/libspa shared libs the portal + shoestring-mediad binaries link
+# are pinned automatically by $auto. wireplumber supplies `wpctl`, which
+# shoestring-mediad prefers for authoritative mute control (it falls back to a
+# native PipeWire set when absent).
+recommends = "xwayland, xdg-desktop-portal, pipewire, wireplumber"
 extended-description = """\
 A lightweight Rust Wayland window manager built on Smithay, shipped with \
 its companion tools: a status bar, dmenu-style launcher, notification \
@@ -132,6 +134,7 @@ assets = [
     ["target/release/shoestring-confirm",    "usr/bin/", "755"],
     ["target/release/shoestring-menu",       "usr/bin/", "755"],
     ["target/release/shoestring-region",     "usr/bin/", "755"],
+    ["target/release/shoestring-mediad",     "usr/bin/", "755"],
     # Screencast portal backend. The helper goes in libexec (a backend, not a
     # user command). Its *.portal descriptor MUST live in a system data dir:
     # xdg-desktop-portal scans XDG_DATA_DIRS (/usr/share, ...), NOT
@@ -189,6 +192,7 @@ assets = [
     { source = "target/release/shoestring-confirm",    dest = "/usr/bin/shoestring-confirm",    mode = "0755" },
     { source = "target/release/shoestring-menu",       dest = "/usr/bin/shoestring-menu",       mode = "0755" },
     { source = "target/release/shoestring-region",     dest = "/usr/bin/shoestring-region",     mode = "0755" },
+    { source = "target/release/shoestring-mediad",     dest = "/usr/bin/shoestring-mediad",     mode = "0755" },
     # Screencast portal backend. The *.portal descriptor MUST go in a system
     # data dir (/usr/share/...): xdg-desktop-portal scans XDG_DATA_DIRS, not
     # XDG_DATA_HOME, so a per-user copy is never found. See the deb block.

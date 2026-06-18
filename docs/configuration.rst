@@ -88,11 +88,15 @@ The ``[general]`` section
        just stays unlocked (logged).
    * - ``autostart``
      - array of strings
-     - ``["shoestring-bar"]``
+     - ``["shoestring-bar", "shoestring-mediad"]``
      - Commands spawned once at WM startup, after the wayland socket
        is listening but before user interaction. Each entry is split
        on whitespace like ``lock_command``. Failures log a warning and
-       don't block startup. Set to ``[]`` to disable.
+       don't block startup. Set to ``[]`` to disable. The default starts
+       the status bar and the media-privacy monitor
+       (``shoestring-mediad``, which feeds the bar's MUTE/MIC/CAM
+       indicators); the monitor links PipeWire and is a harmless no-op
+       where PipeWire or the binary is absent.
    * - ``automation_enabled``
      - bool
      - ``false``

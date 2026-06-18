@@ -9,6 +9,7 @@ bin/shoestring-region
 bin/shoestring-screenshot
 bin/shoestring-wm
 bin/shoestring-wm-session
+%%SCREENCAST%%bin/shoestring-mediad
 %%SCREENCAST%%libexec/xdg-desktop-portal-shoestring
 @sample etc/pam.d/shoestring-lock.sample
 %%SCREENCAST%%share/dbus-1/services/org.freedesktop.impl.portal.desktop.shoestring.service

@@ -428,7 +428,11 @@ pub struct General {
     /// listening but before user interaction. Each entry is split on
     /// whitespace (first token = executable, rest = args), same as
     /// `lock_command`. Failures log a warning and don't block startup.
-    /// Default: `["shoestring-bar"]` so a fresh user gets the status bar.
+    /// Default: `["shoestring-bar", "shoestring-mediad"]` so a fresh user gets
+    /// the status bar plus the media-privacy monitor (which feeds the bar's
+    /// MUTE/MIC/CAM indicators). `shoestring-mediad` links PipeWire; where it's
+    /// absent (no-PipeWire build) the spawn just logs a warning and the bar
+    /// shows no media chips — a graceful no-op.
     #[serde(default = "default_autostart")]
     pub autostart: Vec<String>,
     /// Foundational gate for remote-automation IPC methods (key/text/click
@@ -504,7 +508,7 @@ fn default_lock_command() -> String {
     "shoestring-lock".into()
 }
 fn default_autostart() -> Vec<String> {
-    vec!["shoestring-bar".into()]
+    vec!["shoestring-bar".into(), "shoestring-mediad".into()]
 }
 
 impl Default for General {
@@ -1151,7 +1155,13 @@ actions = {}
     #[test]
     fn autostart_defaults_include_bar() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.general.autostart, vec!["shoestring-bar".to_string()]);
+        assert_eq!(
+            cfg.general.autostart,
+            vec![
+                "shoestring-bar".to_string(),
+                "shoestring-mediad".to_string()
+            ]
+        );
     }
 
     #[test]

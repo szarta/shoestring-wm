@@ -60,11 +60,17 @@ XWAYLAND_RUN_DEPENDS=	Xwayland:x11-servers/xwayland
 # required. Disable it for a leaner dependency set with no screen-capture support.
 SCREENCAST_DESC=	Screen sharing + screenshots via xdg-desktop-portal + PipeWire
 SCREENCAST_LIB_DEPENDS=	libpipewire-0.3.so:multimedia/pipewire
-SCREENCAST_RUN_DEPENDS=	xdg-desktop-portal>0:deskutils/xdg-desktop-portal
-# Append the portal crate to what cargo installs (lands in bin; moved to
-# libexec in post-install-SCREENCAST-on). pipewire dev headers come with the
-# pipewire LIB_DEPENDS above; clang/bindgen is in the FreeBSD base.
-SCREENCAST_VARS=	CARGO_INSTALL_PATH+=crates/xdg-desktop-portal-shoestring
+SCREENCAST_RUN_DEPENDS=	xdg-desktop-portal>0:deskutils/xdg-desktop-portal \
+			wireplumber>0:multimedia/wireplumber
+# Append the PipeWire-linked crates to what cargo installs: the portal backend
+# (lands in bin; moved to libexec in post-install-SCREENCAST-on) and
+# shoestring-mediad, the media-privacy monitor that feeds the bar's MUTE/MIC/CAM
+# indicators (stays in bin; the WM autostarts it by bare name). Both link
+# pipewire, so they're gated behind this option; pipewire dev headers come with
+# the LIB_DEPENDS above and clang/bindgen is in the FreeBSD base. wireplumber
+# (run-dep) supplies `wpctl`, which mediad prefers for authoritative mute control.
+SCREENCAST_VARS=	CARGO_INSTALL_PATH+=crates/xdg-desktop-portal-shoestring \
+			CARGO_INSTALL_PATH+=crates/shoestring-mediad
 
 PORTDOCS=	README.md
 
