@@ -6,7 +6,7 @@ use smithay::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
         InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
         PointerMotionEvent, ProximityState, TabletToolButtonEvent, TabletToolEvent,
-        TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
+        TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState, TouchEvent,
     },
     desktop::Window,
     input::{
@@ -15,6 +15,7 @@ use smithay::{
             AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData, MotionEvent,
             RelativeMotionEvent,
         },
+        touch::{DownEvent, UpEvent},
     },
     output::Output,
     reexports::{
@@ -1019,16 +1020,27 @@ impl ShoestringWm {
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
-            // Graphics tablets (Wacom et al.) over libinput. A tablet must be
-            // registered on the seat's tablet-seat before its tool events mean
-            // anything, so add/remove track device hotplug.
-            InputEvent::DeviceAdded { device }
-                if device.has_capability(DeviceCapability::TabletTool) =>
-            {
-                self.seat
-                    .tablet_seat()
-                    .add_tablet::<Self>(&self.display_handle, &TabletDescriptor::from(&device));
+            // Device hotplug. A tablet (Wacom et al.) must be registered on the
+            // seat's tablet-seat before its tool events mean anything; touch
+            // needs the wl_touch capability added once a touchscreen appears. A
+            // single device can report both (some Wacom displays), so check each
+            // capability independently rather than guarding the whole arm.
+            InputEvent::DeviceAdded { device } => {
+                if device.has_capability(DeviceCapability::TabletTool) {
+                    self.seat
+                        .tablet_seat()
+                        .add_tablet::<Self>(&self.display_handle, &TabletDescriptor::from(&device));
+                }
+                if device.has_capability(DeviceCapability::Touch) && self.seat.get_touch().is_none()
+                {
+                    // Lazily advertise wl_touch so the capability isn't claimed
+                    // on a pointer/keyboard-only seat. Smithay has no
+                    // remove_touch, so once added it stays for the session.
+                    self.seat.add_touch();
+                }
             }
+            // Only tablets need teardown — smithay has no remove_touch, so the
+            // wl_touch capability simply persists for the session.
             InputEvent::DeviceRemoved { device }
                 if device.has_capability(DeviceCapability::TabletTool) =>
             {
@@ -1039,6 +1051,11 @@ impl ShoestringWm {
                     tablet_seat.clear_tools();
                 }
             }
+            InputEvent::TouchDown { event, .. } => self.on_touch_down::<I>(&event),
+            InputEvent::TouchMotion { event, .. } => self.on_touch_motion::<I>(&event),
+            InputEvent::TouchUp { event, .. } => self.on_touch_up::<I>(&event),
+            InputEvent::TouchFrame { .. } => self.on_touch_frame(),
+            InputEvent::TouchCancel { .. } => self.on_touch_cancel(),
             InputEvent::TabletToolAxis { event, .. } => self.on_tablet_tool_axis::<I>(&event),
             InputEvent::TabletToolProximity { event, .. } => {
                 self.on_tablet_tool_proximity::<I>(&event)
@@ -1046,6 +1063,108 @@ impl ShoestringWm {
             InputEvent::TabletToolTip { event, .. } => self.on_tablet_tool_tip::<I>(&event),
             InputEvent::TabletToolButton { event, .. } => self.on_tablet_tool_button::<I>(&event),
             _ => {}
+        }
+    }
+
+    /// Project a touch event's normalized position onto the desktop, the same
+    /// way `PointerMotionAbsolute` maps the pointer — touch and the cursor then
+    /// share one logical coordinate space. (No output-transform inversion yet;
+    /// see task 107.)
+    fn touch_location<I: InputBackend, E: AbsolutePositionEvent<I>>(
+        &self,
+        evt: &E,
+    ) -> Option<Point<f64, Logical>> {
+        let output = self.space.outputs().next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        Some(evt.position_transformed(output_geo.size) + output_geo.loc.to_f64())
+    }
+
+    /// A finger touched down. Routes the contact to whatever surface sits under
+    /// it (window or layer surface) and, like click-to-focus, gives a tapped
+    /// window keyboard focus. Focus is left untouched while the session is
+    /// locked (the lock surface owns it) and when an Overlay/Top layer surface
+    /// covers the point (it owns its own focus — mirrors the pointer path).
+    fn on_touch_down<I: InputBackend>(&mut self, evt: &I::TouchDownEvent) {
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        let Some(location) = self.touch_location::<I, _>(evt) else {
+            return;
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        let under = self.surface_under(location);
+
+        // Skip tap-to-focus while touch is grabbed — e.g. an open popup menu
+        // holds a PopupTouchGrab, and a tap outside it must dismiss the menu
+        // (grab → popup_done), not focus a window. Mirrors the pointer button
+        // handler's `!pointer.is_grabbed()` guard.
+        if !touch.is_grabbed() && !self.is_locked() && !self.overlay_layer_under(location) {
+            if let Some(window) = self.space.element_under(location).map(|(w, _)| w.clone()) {
+                self.focus_window(&window);
+            }
+        }
+
+        touch.down(
+            self,
+            under,
+            &DownEvent {
+                slot: evt.slot(),
+                location,
+                serial,
+                time: evt.time_msec(),
+            },
+        );
+    }
+
+    /// A finger moved. Re-resolves the surface under the new position so a
+    /// contact dragged across a boundary is handed to the surface it enters.
+    fn on_touch_motion<I: InputBackend>(&mut self, evt: &I::TouchMotionEvent) {
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        let Some(location) = self.touch_location::<I, _>(evt) else {
+            return;
+        };
+        let under = self.surface_under(location);
+        touch.motion(
+            self,
+            under,
+            &smithay::input::touch::MotionEvent {
+                slot: evt.slot(),
+                location,
+                time: evt.time_msec(),
+            },
+        );
+    }
+
+    /// A finger lifted.
+    fn on_touch_up<I: InputBackend>(&mut self, evt: &I::TouchUpEvent) {
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        touch.up(
+            self,
+            &UpEvent {
+                slot: evt.slot(),
+                serial,
+                time: evt.time_msec(),
+            },
+        );
+    }
+
+    /// End of a touch event sequence — flushes the frame to clients.
+    fn on_touch_frame(&mut self) {
+        if let Some(touch) = self.seat.get_touch() {
+            touch.frame(self);
+        }
+    }
+
+    /// The compositor took over (e.g. a gesture); tell clients to drop all
+    /// in-flight contacts.
+    fn on_touch_cancel(&mut self) {
+        if let Some(touch) = self.seat.get_touch() {
+            touch.cancel(self);
         }
     }
 

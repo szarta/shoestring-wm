@@ -47,6 +47,7 @@ use wayland_client::{
         wl_shm::{Format, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
+        wl_touch::{self, WlTouch},
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
@@ -239,6 +240,11 @@ struct State {
     /// Used only to drive + dismiss the tray menu (the bar itself takes
     /// no keyboard focus).
     keyboard: Option<WlKeyboard>,
+    /// Bar-side touch, bound when the seat advertises the `touch`
+    /// capability (a touchscreen appeared). A touch-down is treated as a
+    /// left click at the contact point, so the window list, control
+    /// applet and tray menus are reachable by finger as well as pointer.
+    touch: Option<WlTouch>,
     /// Surface-local pointer y in pixels; companion to `pointer_x`, needed
     /// for vertical hit-testing inside the tray menu.
     pointer_y: Option<f64>,
@@ -527,6 +533,7 @@ fn run_session() -> Result<()> {
         xdg_wm_base,
         last_pointer_serial: 0,
         keyboard: None,
+        touch: None,
         pointer_y: None,
         pointer_on_menu: false,
         tray_icon_rects: Vec::new(),
@@ -2017,6 +2024,20 @@ impl Dispatch<WlSeat, ()> for State {
                     tracing::debug!("seat dropped keyboard capability");
                 }
             }
+
+            // Touch: bound when a touchscreen appears so a tap acts as a
+            // left click on the bar (window list, control applet, tray).
+            let has_touch = caps.contains(Capability::Touch);
+            if has_touch && state.touch.is_none() {
+                state.touch = Some(seat.get_touch(qh, ()));
+                tracing::debug!("seat advertised touch; bound");
+            } else if !has_touch {
+                if let Some(t) = state.touch.take() {
+                    t.release();
+                    state.pointer_on_menu = false;
+                    tracing::debug!("seat dropped touch capability");
+                }
+            }
         }
     }
 }
@@ -2086,61 +2107,134 @@ impl Dispatch<WlPointer, ()> for State {
                 if button != BTN_LEFT {
                     return;
                 }
+                primary_press(state, qh);
+            }
+            _ => {}
+        }
+    }
+}
 
-                // Click inside the open tray menu: resolve the hovered row.
-                if state.pointer_on_menu {
-                    let action = state.menu.as_ref().map(|m| m.activate_active());
-                    if let Some(action) = action {
-                        apply_menu_action(state, action, qh);
-                    }
-                    return;
-                }
+/// Resolve a left-click / touch-tap against the current bar layout, using the
+/// last-seen `pointer_x`/`pointer_y` and `pointer_on_menu`. Shared by the
+/// pointer button handler and the touch handler so finger and mouse behave
+/// identically.
+fn primary_press(state: &mut State, qh: &QueueHandle<State>) {
+    // Click inside the open tray menu: resolve the hovered row.
+    if state.pointer_on_menu {
+        let action = state.menu.as_ref().map(|m| m.activate_active());
+        if let Some(action) = action {
+            apply_menu_action(state, action, qh);
+        }
+        return;
+    }
 
-                let Some(x) = state.pointer_x else {
-                    return;
-                };
-                let xi = x.floor() as i32;
+    let Some(x) = state.pointer_x else {
+        return;
+    };
+    let xi = x.floor() as i32;
 
-                // Control applet: a hit opens the control menu (gate toggles +
-                // lock/logout). Checked before the tray since it sits left of
-                // the clock, distinct from the tray icon cluster.
-                if let Some((cx, cw)) = state.control_rect {
-                    if xi >= cx && xi < cx + cw {
-                        state.pending_open_control = true;
-                        return;
-                    }
-                }
+    // Control applet: a hit opens the control menu (gate toggles +
+    // lock/logout). Checked before the tray since it sits left of
+    // the clock, distinct from the tray icon cluster.
+    if let Some((cx, cw)) = state.control_rect {
+        if xi >= cx && xi < cx + cw {
+            state.pending_open_control = true;
+            return;
+        }
+    }
 
-                // Tray icons sit on the right; a hit opens that item's menu.
-                if let Some((_, _, idx)) = state
-                    .tray_icon_rects
-                    .iter()
-                    .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
-                    .copied()
-                {
-                    // Clicking the icon whose menu is already open toggles it
-                    // shut; otherwise (re)open for this item.
-                    if state.menu.as_ref().is_some_and(|m| m.tray_idx == idx) {
-                        if let Some(m) = state.menu.take() {
-                            m.destroy();
+    // Tray icons sit on the right; a hit opens that item's menu.
+    if let Some((_, _, idx)) = state
+        .tray_icon_rects
+        .iter()
+        .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+        .copied()
+    {
+        // Clicking the icon whose menu is already open toggles it
+        // shut; otherwise (re)open for this item.
+        if state.menu.as_ref().is_some_and(|m| m.tray_idx == idx) {
+            if let Some(m) = state.menu.take() {
+                m.destroy();
+            }
+        } else {
+            state.pending_open_menu = Some(idx);
+        }
+        return;
+    }
+
+    // Otherwise hit-test the window list (left/middle) → focus.
+    let hit = state
+        .window_entry_rects
+        .iter()
+        .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+        .map(|(_, _, id)| id.clone());
+    if let Some(id) = hit {
+        if let Err(e) = ipc_client::request_focus_window(&id) {
+            tracing::warn!(error = ?e, %id, "focus_window ipc failed");
+        }
+    }
+}
+
+impl Dispatch<WlTouch, ()> for State {
+    fn event(
+        state: &mut Self,
+        _touch: &WlTouch,
+        event: <WlTouch as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_touch::Event::Down {
+                serial,
+                surface,
+                x,
+                y,
+                ..
+            } => {
+                // A touch-down is a left click at the contact point. Touch has
+                // no enter/motion priming, so prime the cached position and —
+                // if the contact landed on the open tray menu — resolve the
+                // menu level + hovered row here, exactly as the pointer Enter
+                // handler does, before running the shared hit-test.
+                state.last_pointer_serial = serial;
+                state.pointer_x = Some(x);
+                state.pointer_y = Some(y);
+                let lvl = state.menu.as_ref().and_then(|m| m.surface_level(&surface));
+                state.pointer_on_menu = lvl.is_some();
+                if let Some(i) = lvl {
+                    if let Some(m) = state.menu.as_mut() {
+                        m.set_active(Some(i));
+                        if m.hover_at(i, y) {
+                            state.menu_dirty = true;
                         }
-                    } else {
-                        state.pending_open_menu = Some(idx);
-                    }
-                    return;
-                }
-
-                // Otherwise hit-test the window list (left/middle) → focus.
-                let hit = state
-                    .window_entry_rects
-                    .iter()
-                    .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
-                    .map(|(_, _, id)| id.clone());
-                if let Some(id) = hit {
-                    if let Err(e) = ipc_client::request_focus_window(&id) {
-                        tracing::warn!(error = ?e, %id, "focus_window ipc failed");
                     }
                 }
+                primary_press(state, qh);
+            }
+            wl_touch::Event::Motion { x, y, .. } => {
+                // A single contact stays with the surface it went down on (wl
+                // semantics), so this only ever updates hover within the menu
+                // the finger pressed — good enough for slide-within-a-level.
+                state.pointer_x = Some(x);
+                state.pointer_y = Some(y);
+                if state.pointer_on_menu {
+                    if let Some((m, i)) = state.menu.as_mut().and_then(|m| {
+                        let i = m.active()?;
+                        Some((m, i))
+                    }) {
+                        if m.hover_at(i, y) {
+                            state.menu_dirty = true;
+                        }
+                    }
+                }
+            }
+            wl_touch::Event::Up { .. } => {
+                // Contact lifted — drop the cached position like a pointer
+                // Leave so a stale coordinate can't drive a later hit-test.
+                state.pointer_x = None;
+                state.pointer_y = None;
+                state.pointer_on_menu = false;
             }
             _ => {}
         }

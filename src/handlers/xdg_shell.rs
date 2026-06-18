@@ -189,6 +189,12 @@ impl XdgShellHandler for ShoestringWm {
             }
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
+        // Smithay has no touch popup grab; ours dismisses the popup on a tap
+        // outside it, so menus close on touch the way they do on a pointer
+        // click. Only meaningful once a touchscreen has appeared.
+        if let Some(touch) = seat.get_touch() {
+            touch.set_grab(self, crate::grabs::PopupTouchGrab::new(&grab), serial);
+        }
     }
 }
 

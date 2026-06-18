@@ -116,6 +116,11 @@ Implemented today:
   see a real tablet tool. The stylus drives the shared pointer cursor; a
   tip-down focuses the window under the pen like a click. Tablets are
   picked up on device hotplug from the libinput (TTY) backend.
+- Touchscreen support (``wl_touch``): per-slot multi-touch down/motion/up,
+  frame and cancel are routed to the surface under each contact, so
+  touch-aware apps work directly. A touch-down focuses the window under
+  the finger like a click. The ``wl_touch`` capability is advertised on
+  the seat only once a touchscreen appears via libinput (TTY) hotplug.
 - Accurate frame-presentation timing (``wp_presentation``): clients that
   request feedback get the precise on-screen timestamp for each buffer, so
   video players sync audio/video and animations pace correctly. On the
