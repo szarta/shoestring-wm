@@ -1604,13 +1604,10 @@ impl ShoestringWm {
         crate::scale::send_preferred_scale(&self.space, &output);
 
         // Send wl_surface.frame callbacks so clients know to draw the next
-        // buffer; otherwise frame-callback-driven clients sit idle.
+        // buffer; otherwise frame-callback-driven clients sit idle. Covers
+        // layer-shell surfaces too, not just toplevels.
         let elapsed = self.start_time.elapsed();
-        self.space.elements().for_each(|w| {
-            w.send_frame(&output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
-        });
+        crate::presentation::send_frames(&self.space, &output, elapsed);
 
         self.popups.cleanup();
         let _ = self.display_handle.flush_clients();

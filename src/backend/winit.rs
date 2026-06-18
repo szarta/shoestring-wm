@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use smithay::{
     backend::{
@@ -247,14 +245,7 @@ pub fn init_winit(
                 // its current scale (no-op when unchanged).
                 crate::scale::send_preferred_scale(&state.space, &output);
 
-                state.space.elements().for_each(|window| {
-                    window.send_frame(
-                        &output,
-                        state.start_time.elapsed(),
-                        Some(Duration::ZERO),
-                        |_, _| Some(output.clone()),
-                    )
-                });
+                crate::presentation::send_frames(&state.space, &output, state.start_time.elapsed());
 
                 state.space.refresh();
                 state.popups.cleanup();
