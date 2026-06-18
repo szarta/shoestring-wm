@@ -48,10 +48,29 @@ CARGO_INSTALL_PATH=	. \
 			crates/shoestring-region \
 			crates/shoestring-screenshot
 
-OPTIONS_DEFINE=		DOCS XWAYLAND
-OPTIONS_DEFAULT=	XWAYLAND
+OPTIONS_DEFINE=		DOCS XWAYLAND SCREENCAST
+OPTIONS_DEFAULT=	XWAYLAND SCREENCAST
+OPTIONS_SUB=		yes
 XWAYLAND_DESC=		Run X11 applications via Xwayland
 XWAYLAND_RUN_DEPENDS=	Xwayland:x11-servers/xwayland
+
+# Screen sharing: builds xdg-desktop-portal-shoestring (our ScreenCast +
+# Screenshot portal backend) and pulls in the PipeWire stack + portal frontend.
+# Both portal interfaces are served natively, so xdg-desktop-portal-wlr is not
+# required. Disable it for a leaner dependency set with no screen-capture support.
+SCREENCAST_DESC=	Screen sharing + screenshots via xdg-desktop-portal + PipeWire
+SCREENCAST_LIB_DEPENDS=	libpipewire-0.3.so:multimedia/pipewire
+SCREENCAST_RUN_DEPENDS=	xdg-desktop-portal>0:deskutils/xdg-desktop-portal \
+			wireplumber>0:multimedia/wireplumber
+# Append the PipeWire-linked crates to what cargo installs: the portal backend
+# (lands in bin; moved to libexec in post-install-SCREENCAST-on) and
+# shoestring-mediad, the media-privacy monitor that feeds the bar's MUTE/MIC/CAM
+# indicators (stays in bin; the WM autostarts it by bare name). Both link
+# pipewire, so they're gated behind this option; pipewire dev headers come with
+# the LIB_DEPENDS above and clang/bindgen is in the FreeBSD base. wireplumber
+# (run-dep) supplies `wpctl`, which mediad prefers for authoritative mute control.
+SCREENCAST_VARS=	CARGO_INSTALL_PATH+=crates/xdg-desktop-portal-shoestring \
+			CARGO_INSTALL_PATH+=crates/shoestring-mediad
 
 PORTDOCS=	README.md
 
@@ -65,6 +84,12 @@ post-patch:
 	@${REINPLACE_CMD} -e '1s,.*,#!/bin/sh,' \
 		-e 's,set -euo pipefail,set -eu,' \
 		${WRKSRC}/resources/shoestring-wm-session
+
+# The shipped D-Bus activation file hard-codes the Linux /usr/libexec path;
+# rewrite it to this prefix's libexec.
+post-patch-SCREENCAST-on:
+	@${REINPLACE_CMD} -e 's,/usr/libexec/,${PREFIX}/libexec/,' \
+		${WRKSRC}/resources/org.freedesktop.impl.portal.desktop.shoestring.service
 
 # Generate the man pages the same way the deb/rpm release CI does.
 post-build:
@@ -93,5 +118,23 @@ post-install:
 post-install-DOCS-on:
 	@${MKDIR} ${STAGEDIR}${DOCSDIR}
 	${INSTALL_DATA} ${WRKSRC}/README.md ${STAGEDIR}${DOCSDIR}/
+
+# Screencast portal backend. cargo installed the helper into bin/; relocate it
+# to libexec (it's a backend, not a user command). The *.portal descriptor MUST
+# live in a system data dir — xdg-desktop-portal scans XDG_DATA_DIRS, never a
+# per-user dir — so it goes under ${PREFIX}/share. The .service is D-Bus
+# activation; the *-portals.conf routes the ScreenCast interface to us.
+post-install-SCREENCAST-on:
+	@${MKDIR} ${STAGEDIR}${PREFIX}/libexec
+	@${MV} ${STAGEDIR}${PREFIX}/bin/xdg-desktop-portal-shoestring \
+		${STAGEDIR}${PREFIX}/libexec/xdg-desktop-portal-shoestring
+	@${MKDIR} ${STAGEDIR}${PREFIX}/share/xdg-desktop-portal/portals
+	${INSTALL_DATA} ${WRKSRC}/resources/shoestring.portal \
+		${STAGEDIR}${PREFIX}/share/xdg-desktop-portal/portals/
+	${INSTALL_DATA} ${WRKSRC}/resources/shoestring-wm-portals.conf \
+		${STAGEDIR}${PREFIX}/share/xdg-desktop-portal/
+	@${MKDIR} ${STAGEDIR}${PREFIX}/share/dbus-1/services
+	${INSTALL_DATA} ${WRKSRC}/resources/org.freedesktop.impl.portal.desktop.shoestring.service \
+		${STAGEDIR}${PREFIX}/share/dbus-1/services/
 
 .include <bsd.port.mk>

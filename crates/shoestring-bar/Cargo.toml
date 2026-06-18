@@ -1,6 +1,6 @@
 [package]
 name = "shoestring-bar"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "A lightweight Wayland status bar for shoestring-wm."
@@ -33,6 +33,21 @@ anyhow = "1"
 # wakeups for clock ticks). Already in our transitive tree via tempfile,
 # so this adds zero new crates.
 libc = "0.2"
+
+# System-tray (StatusNotifierItem) host over the session D-Bus. Small, sync,
+# no reactor — same house D-Bus lib as shoestring-notify, already in our tree
+# (zero new crates). Driven from the bar's existing libc::poll loop.
+rustbus = "0.19"
+
+# Icon rendering (tray icons + a general capability): decode freedesktop
+# theme icons to pixels. PNG (hicolor/legacy) + SVG (Adwaita et al.) are both
+# required because appindicator apps (nm-applet, blueman) hand us icon NAMES,
+# not pixmaps. resvg is the heaviest dep the bar carries — a deliberate,
+# tracked exception to the low-dep goal (see the icon-rendering decision).
+# usvg `text` is dropped (default-features=false): icons don't need a font
+# stack, and it keeps the tree much smaller.
+png = "0.17"
+resvg = { version = "0.45", default-features = false }
 
 # shoestring-wm IPC wire types — for workspace + focus events.
 # Sibling workspace member; in lockstep with the WM by construction.

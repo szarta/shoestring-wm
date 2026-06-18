@@ -99,6 +99,12 @@ Implemented today:
   clients can lock the cursor in place (receiving only relative deltas)
   or confine it to a region of their surface. A lock activates while the
   pointer is over the requesting surface and releases when it leaves.
+- Virtual pointer (``zwlr_virtual_pointer_v1``): clients such as
+  ``wlrctl``, remote-desktop agents and accessibility tools can emulate a
+  physical pointer — relative/absolute motion, buttons and scroll. Events
+  are buffered per device and delivered when the client sends ``frame``,
+  exactly like a real ``wl_pointer``. Unlike the IPC injection path this
+  is a standard client protocol and is *not* behind the automation gate.
 - Idle management (opt-in via ``[general].idle_notifications_enabled``):
   ``ext_idle_notify_v1`` for idle daemons/auto-lockers, paired with
   ``zwp_idle_inhibit_manager_v1`` so video players and browsers can
@@ -110,6 +116,16 @@ Implemented today:
   see a real tablet tool. The stylus drives the shared pointer cursor; a
   tip-down focuses the window under the pen like a click. Tablets are
   picked up on device hotplug from the libinput (TTY) backend.
+- Touchscreen support (``wl_touch``): per-slot multi-touch down/motion/up,
+  frame and cancel are routed to the surface under each contact, so
+  touch-aware apps work directly. A touch-down focuses the window under
+  the finger like a click. The ``wl_touch`` capability is advertised on
+  the seat only once a touchscreen appears via libinput (TTY) hotplug.
+- Touchpad gestures (``zwp_pointer_gestures_v1``): three- and four-finger
+  swipe, pinch and hold gestures recognised by libinput are forwarded to
+  the focused client through the pointer, so apps (browsers, image
+  viewers) can act on them. Always advertised; gesture events arrive only
+  from the libinput (TTY) backend.
 - Accurate frame-presentation timing (``wp_presentation``): clients that
   request feedback get the precise on-screen timestamp for each buffer, so
   video players sync audio/video and animations pace correctly. On the

@@ -147,6 +147,7 @@ fn create_frame(
         stride,
         buffer: None,
         used: false,
+        with_damage: false,
     }));
     let frame = data_init.init(
         new_frame,
@@ -210,7 +211,14 @@ impl Dispatch2<ZwlrScreencopyFrameV1, ShoestringWm> for ScreencopyFrameData {
     ) {
         use zwlr_screencopy_frame_v1::Request;
         match request {
-            Request::Copy { buffer } | Request::CopyWithDamage { buffer } => {
+            req @ (Request::Copy { .. } | Request::CopyWithDamage { .. }) => {
+                // `copy_with_damage` obliges us to emit `damage` before `ready`
+                // (see FrameInner::with_damage); plain `copy` does not.
+                let (buffer, with_damage) = match req {
+                    Request::Copy { buffer } => (buffer, false),
+                    Request::CopyWithDamage { buffer } => (buffer, true),
+                    _ => unreachable!(),
+                };
                 // Re-check the gate: the frame may have been created while
                 // capture was enabled and the gate flipped off since.
                 if !state.screen_capture_enabled {
@@ -241,6 +249,7 @@ impl Dispatch2<ZwlrScreencopyFrameV1, ShoestringWm> for ScreencopyFrameData {
                     }
                     inner.buffer = Some(buffer);
                     inner.used = true;
+                    inner.with_damage = with_damage;
                     (inner.region, inner.stride, inner.output.clone())
                 };
                 let _ = (region, stride); // captured into closure-equivalent state below

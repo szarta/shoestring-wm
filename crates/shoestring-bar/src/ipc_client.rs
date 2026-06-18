@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use shoestring_ipc::{client_socket_path, Event, Request, Response, WindowSummary};
+use shoestring_ipc::{client_socket_path, Event, MediaState, Request, Response, WindowSummary};
 
 fn connect() -> Result<UnixStream> {
     let path = client_socket_path()
@@ -107,6 +107,22 @@ pub fn query_screen_capture() -> Result<bool> {
     }
 }
 
+/// Send `Request::MediaStatus`, return the current media-privacy snapshot
+/// (sink/mic mute + camera-in-use), or `None` when no `shoestring-mediad`
+/// monitor has reported yet. Used at startup to seed the MUTE/MIC/CAM chips
+/// before the first `media_changed` event would arrive.
+pub fn query_media() -> Result<Option<MediaState>> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::MediaStatus)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse media response")?;
+    match resp {
+        Response::Media { state } => Ok(state),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Send `Request::Windows`, return the summary list. Used at startup to
 /// bootstrap per-window state (currently: workspace assignment) for any
 /// windows that already existed when the bar attached — `window_opened`
@@ -132,6 +148,93 @@ pub fn request_focus_window(id: &str) -> Result<()> {
     write_request(&mut stream, &Request::FocusWindow { id: id.into() })?;
     let line = read_line(&mut stream)?.context("server closed before responding")?;
     let resp: Response = serde_json::from_str(&line).context("parse focus_window response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Set the runtime screen-capture gate (`Request::SetScreenCapture`). Ungated.
+/// The bar doesn't use the returned state — an `Event::ScreenCaptureChanged`
+/// follows when it actually flips and the event loop updates the indicator.
+pub fn set_screen_capture(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetScreenCapture { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response =
+        serde_json::from_str(&line).context("parse set_screen_capture response")?;
+    match resp {
+        Response::ScreenCapture { .. } | Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Set the runtime automation gate (`Request::SetAutomation`). Ungated.
+/// `Event::AutomationChanged` (and possibly `ScreenCaptureChanged`, since
+/// automation is a capture superset) follows when it flips.
+pub fn set_automation(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetAutomation { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_automation response")?;
+    match resp {
+        Response::Automation { .. } | Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Mute/unmute the default audio output (`Request::SetAudioMute`). The WM
+/// delegates to `shoestring-mediad`; the resulting live state arrives later as
+/// an `Event::MediaChanged`, which the event loop applies to the chips.
+pub fn set_audio_mute(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetAudioMute { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_audio_mute response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Mute/unmute the default microphone (`Request::SetMicMute`). Mic analogue of
+/// [`set_audio_mute`].
+pub fn set_mic_mute(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetMicMute { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_mic_mute response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Lock the session (`Request::Lock`). Ungated; spawns the WM's lock binary.
+pub fn lock() -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::Lock)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse lock response")?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Quit the session (`Request::Quit`). Ungated; pops the WM's confirm dialog,
+/// so this returns once the dialog is shown — the user still has to accept it.
+pub fn quit() -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::Quit)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse quit response")?;
     match resp {
         Response::Ok => Ok(()),
         Response::Error { message } => anyhow::bail!("server error: {message}"),

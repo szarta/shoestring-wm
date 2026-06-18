@@ -88,11 +88,15 @@ The ``[general]`` section
        just stays unlocked (logged).
    * - ``autostart``
      - array of strings
-     - ``["shoestring-bar"]``
+     - ``["shoestring-bar", "shoestring-mediad"]``
      - Commands spawned once at WM startup, after the wayland socket
        is listening but before user interaction. Each entry is split
        on whitespace like ``lock_command``. Failures log a warning and
-       don't block startup. Set to ``[]`` to disable.
+       don't block startup. Set to ``[]`` to disable. The default starts
+       the status bar and the media-privacy monitor
+       (``shoestring-mediad``, which feeds the bar's MUTE/MIC/CAM
+       indicators); the monitor links PipeWire and is a harmless no-op
+       where PipeWire or the binary is absent.
    * - ``automation_enabled``
      - bool
      - ``false``
@@ -107,8 +111,9 @@ The ``[general]`` section
      - bool
      - ``false``
      - Gate for screen capture via the ``zwlr_screencopy`` protocol — the
-       path tools like OBS, ``grim`` and the ``xdg-desktop-portal-wlr``
-       screencast backend use to read the screen. Off by default: unlike
+       path tools like OBS, ``grim`` and the
+       ``xdg-desktop-portal-shoestring`` screencast/screenshot backend use
+       to read the screen. Off by default: unlike
        X11, Wayland isolates clients, so leaving it off means a stray or
        malicious client simply cannot capture the screen. When ``false``
        the ``zwlr_screencopy_manager_v1`` global is not advertised and any
@@ -580,6 +585,39 @@ rules against already-mapped windows.
       ``tiled-left``, ``tiled-right``, or ``maximized``. Computed against
       whichever output the window ends up on, so combine with ``output``
       to tile on a specific monitor.
+
+Screen-sharing portal
+---------------------
+
+``[portal]`` configures the ``xdg-desktop-portal-shoestring`` screen-sharing
+backend. That backend is a separate process, but it reads this same
+``config.toml`` so the screencast output choice lives in one place. Both keys
+are optional; with no ``[portal]`` section the backend uses the region chooser
+when more than one output is connected. See :doc:`portals`.
+
+::
+
+    [portal]
+    screencast_output = "DP-2"
+    screencast_chooser = "region"
+
+``screencast_output``
+    Pin screencast to one output by connector name (e.g. ``"DP-2"``). When set,
+    the chooser is skipped and this output is always shared. Unset (the default)
+    ⇒ the chooser runs whenever more than one output is connected. The
+    ``$SHOESTRING_SCREENCAST_OUTPUT`` environment variable overrides this.
+
+``screencast_chooser``
+    How to choose the output when none is pinned and more than one is connected.
+    Defaults to ``"region"``. Overridden by ``$SHOESTRING_SCREENCAST_CHOOSER``.
+
+    - ``"region"`` — pop the ``shoestring-region`` overlay so you click/drag the
+      monitor to share.
+    - ``"none"`` — silently share the first output (a warning names it and how
+      to pin one).
+    - anything else — run as a dmenu-style command: the connector names are
+      written to its stdin, one per line, and the line it prints on stdout is
+      taken as the chosen output (e.g. ``"wofi --dmenu"``).
 
 Pointer bindings
 ----------------

@@ -51,6 +51,68 @@ impl CompositorHandler for ShoestringWm {
             let owner = self.client_metrics_name(&client);
             self.metrics.track_surface(surface.id(), owner);
         }
+
+        // Explicit sync (`wp_linux_drm_syncobj_v1`): when a dmabuf commit
+        // carries an *acquire* timeline point, the buffer's GPU work may still
+        // be in flight. Hold the surface transaction on an eventfd that fires
+        // when that point signals, so we never composite a half-rendered
+        // buffer. XWayland 23.2+ / Wine / Proton rely on this; without it they
+        // fall back to implicit sync and tear/stutter. Pre-commit hook so it
+        // runs on every commit; udev-only (the protocol is unadvertised under
+        // winit, so the cached state is always empty there). The matching
+        // release point is signalled by smithay when the buffer is replaced.
+        #[cfg(feature = "tty")]
+        smithay::wayland::compositor::add_pre_commit_hook::<Self, _>(
+            surface,
+            |state, _dh, surface| {
+                use smithay::wayland::{
+                    compositor::{add_blocker, BufferAssignment, SurfaceAttributes},
+                    dmabuf::get_dmabuf,
+                    drm_syncobj::DrmSyncobjCachedState,
+                };
+                let mut acquire_point = None;
+                let maybe_dmabuf = with_states(surface, |states| {
+                    acquire_point.clone_from(
+                        &states
+                            .cached_state
+                            .get::<DrmSyncobjCachedState>()
+                            .pending()
+                            .acquire_point,
+                    );
+                    states
+                        .cached_state
+                        .get::<SurfaceAttributes>()
+                        .pending()
+                        .buffer
+                        .as_ref()
+                        .and_then(|assignment| match assignment {
+                            BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
+                            _ => None,
+                        })
+                });
+                // Sync points only apply to a freshly-attached dmabuf buffer.
+                if maybe_dmabuf.is_none() {
+                    return;
+                }
+                let Some(acquire_point) = acquire_point else {
+                    return;
+                };
+                if let Ok((blocker, source)) = acquire_point.generate_blocker() {
+                    if let Some(client) = surface.client() {
+                        let res = state.loop_handle.insert_source(source, move |_, _, state| {
+                            let dh = state.display_handle.clone();
+                            state
+                                .client_compositor_state(&client)
+                                .blocker_cleared(state, &dh);
+                            Ok(())
+                        });
+                        if res.is_ok() {
+                            add_blocker(surface, blocker);
+                        }
+                    }
+                }
+            },
+        );
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {

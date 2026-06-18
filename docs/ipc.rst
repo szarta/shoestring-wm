@@ -192,6 +192,27 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "screen_capture_status"}``
      - Read the current screen-capture gate state without changing it.
        Reply is ``screen_capture``.
+   * - ``{"type": "media_status"}``
+     - Read the last media-privacy snapshot the WM holds (default-sink
+       mute, microphone mute, camera-in-use). Reply is ``media``, whose
+       ``state`` is ``null`` until the ``shoestring-mediad`` monitor first
+       reports. Read-only, not gated.
+   * - ``{"type": "set_audio_mute", "enabled": true}``
+     - Mute/unmute the default audio output. The WM does not mute anything
+       itself — it spawns ``shoestring-mediad`` to flip PipeWire's real
+       default-sink mute; the new live state then arrives back via
+       ``report_media`` and a ``media_changed`` event. Reply is ``ok``.
+   * - ``{"type": "set_mic_mute", "enabled": true}``
+     - Mute/unmute the default microphone (the mic analogue of
+       ``set_audio_mute``). Honest caveat: this stream-mutes the source —
+       capturing apps get silence — but does **not** prevent a device
+       open, the same guarantee as a hardware mic key. Reply is ``ok``.
+   * - ``{"type": "report_media", "audio_muted": false, "mic_muted": false, "camera_active": false}``
+     - Push a fresh media-privacy snapshot to the WM. Sent by the trusted
+       ``shoestring-mediad`` monitor (which links PipeWire), **not** by
+       ordinary clients: the WM caches it and broadcasts ``media_changed``
+       when it differs. There is no camera off-switch — ``camera_active``
+       is status only. Reply is ``ok``.
    * - ``{"type": "reload_config"}``
      - Re-read the TOML config the WM was launched with and recompile
        the binding table. Broadcasts ``config_reloaded`` on success.
@@ -296,6 +317,12 @@ The server replies with a single JSON object tagged by ``type``:
 ``screen_capture``
     ``{"type": "screen_capture", "enabled": <bool>}``. Returned for both
     ``set_screen_capture`` and ``screen_capture_status``.
+
+``media``
+    ``{"type": "media", "state": {"audio_muted": <bool>, "mic_muted":
+    <bool>, "camera_active": <bool>}}``. Returned for ``media_status``.
+    ``state`` is omitted (``null``) when no ``shoestring-mediad`` monitor
+    has reported yet — distinct from "reported, all false".
 
 ``screenshot``
     ``{"type": "screenshot", "path": "/absolute/path.png"}``.
@@ -543,6 +570,14 @@ Each event is tagged by ``type``.
     being enabled. Rate-limited by the WM (a few per second) so a high-FPS
     cast doesn't flood subscribers; a bar can light a "recording" dot and
     let it decay after the events stop.
+
+``media_changed``
+    ``{"type": "media_changed", "audio_muted": <bool>, "mic_muted":
+    <bool>, "camera_active": <bool>}``. Fired when the media-privacy
+    snapshot changes — the default sink/source mute or camera-in-use state
+    moved, as reported by ``shoestring-mediad``. Carries the full snapshot
+    so a subscriber (the bar's MUTE/MIC/CAM chips) needs no follow-up
+    ``media_status``.
 
 ``config_reloaded``
     ``{"type": "config_reloaded"}``. Fired after a successful config

@@ -9,7 +9,7 @@ Synopsis
 Description
 -----------
 
-Configuration file for **shoestring-wm**\(1). TOML syntax, four
+Configuration file for **shoestring-wm**\(1). TOML syntax; the main
 sections (all optional):
 
 ::
@@ -194,6 +194,23 @@ Example::
     [[window_rules]]
     match = { app_id = "firefox" }
     actions = { workspace = 2 }
+
+[portal] keys
+-------------
+
+Settings for the ``xdg-desktop-portal-shoestring`` screen-sharing backend
+(read from this same file by that separate process).
+
+**screencast_output** (string, unset by default)
+    Pin screencast to one output by connector name (e.g. ``"DP-2"``); skips
+    the chooser. Overridden by ``$SHOESTRING_SCREENCAST_OUTPUT``.
+
+**screencast_chooser** (string, default ``region``)
+    How to choose the shared output when none is pinned and more than one is
+    connected: ``region`` (click the monitor via **shoestring-region**),
+    ``none`` (use the first output), or a dmenu-style command (connector names
+    on stdin, the chosen line on stdout). Overridden by
+    ``$SHOESTRING_SCREENCAST_CHOOSER``.
 
 Examples
 --------

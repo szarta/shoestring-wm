@@ -364,6 +364,15 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::Quit => {
+                // Ungated: routes through the same confirm_action(Quit) path as
+                // the keybind, so the user must accept the dialog before the WM
+                // exits. We reply Ok once the dialog is up, not on acceptance.
+                tracing::info!("quit requested via ipc; prompting for confirmation");
+                state.dispatch_action(shoestring_config::Action::Quit);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
             Request::SetAutomation { enabled } => {
                 let changed = state.automation_enabled != enabled;
                 // Automation is a superset of screen capture: this also opens
@@ -407,6 +416,46 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                         enabled: state.screen_capture_enabled,
                     },
                 );
+                return true;
+            }
+            Request::MediaStatus => {
+                let _ = write_response(client, &Response::Media { state: state.media });
+                return true;
+            }
+            Request::ReportMedia {
+                audio_muted,
+                mic_muted,
+                camera_active,
+            } => {
+                // Pushed by the trusted `shoestring-mediad` monitor: the WM
+                // only caches PipeWire's truth, it never authors mute state.
+                let snapshot = shoestring_ipc::MediaState {
+                    audio_muted,
+                    mic_muted,
+                    camera_active,
+                };
+                let changed = state.set_media(snapshot);
+                let _ = write_response(client, &Response::Ok);
+                if changed {
+                    state.emit_ipc(Event::MediaChanged {
+                        audio_muted,
+                        mic_muted,
+                        camera_active,
+                    });
+                }
+                return true;
+            }
+            Request::SetAudioMute { enabled } => {
+                // We don't mute anything ourselves — spawn the pipewire-linked
+                // helper, which flips the real default-sink mute. The new state
+                // returns via ReportMedia.
+                state.spawn_mediad(&["audio-mute", if enabled { "on" } else { "off" }]);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
+            Request::SetMicMute { enabled } => {
+                state.spawn_mediad(&["mic-mute", if enabled { "on" } else { "off" }]);
+                let _ = write_response(client, &Response::Ok);
                 return true;
             }
             Request::Screenshot { output, region } => {

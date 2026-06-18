@@ -6,6 +6,8 @@
 //! module is the render-path side, shared by the udev (accurate, hardware
 //! vblank) and winit (best-effort, submit-time) backends.
 
+use std::time::Duration;
+
 use smithay::{
     backend::renderer::element::{default_primary_scanout_output_compare, RenderElementStates},
     desktop::{
@@ -18,6 +20,27 @@ use smithay::{
     },
     output::Output,
 };
+
+/// Send `wl_surface.frame` callbacks to every client drawing on `output`:
+/// mapped toplevel windows *and* the output's layer-shell surfaces
+/// (bars/docks/panels). Without this, frame-callback-driven layer clients sit
+/// idle forever — our own shoestring-bar polls on a timer so it never noticed,
+/// but spec-compliant panels (and the WLCS layer-shell suite, which blocks on
+/// `wl_surface.frame` before checking surface position) hang. Called once per
+/// rendered frame by every backend.
+pub fn send_frames(space: &Space<Window>, output: &Output, time: Duration) {
+    for window in space.elements() {
+        window.send_frame(output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
+    let map = layer_map_for_output(output);
+    for layer in map.layers() {
+        layer.send_frame(output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
+}
 
 /// Record, for every surface that contributed to this frame, which output it
 /// primarily scanned out on. Must run before [`take_presentation_feedback`]

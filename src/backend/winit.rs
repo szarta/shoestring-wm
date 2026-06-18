@@ -80,6 +80,12 @@ pub fn init_winit(
             scale: state.config.general.output_scale,
         },
     ));
+    // Register the output with wlr-output-management, exactly as the udev
+    // backend does on connector add. No managers are bound this early, so this
+    // just bumps the serial off zero — without it a fresh winit session would
+    // answer the first manager bind with `done(0)`, which clients (and the
+    // output_management integration test) read as "no done received".
+    crate::output_management::broadcast_head_added(state, &output);
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 
@@ -241,14 +247,7 @@ pub fn init_winit(
                 // its current scale (no-op when unchanged).
                 crate::scale::send_preferred_scale(&state.space, &output);
 
-                state.space.elements().for_each(|window| {
-                    window.send_frame(
-                        &output,
-                        state.start_time.elapsed(),
-                        Some(Duration::ZERO),
-                        |_, _| Some(output.clone()),
-                    )
-                });
+                crate::presentation::send_frames(&state.space, &output, state.start_time.elapsed());
 
                 state.space.refresh();
                 state.popups.cleanup();

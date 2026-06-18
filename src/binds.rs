@@ -128,6 +128,7 @@ mod tests {
             outputs: Default::default(),
             diagnostics: Default::default(),
             input: Default::default(),
+            portal: Default::default(),
         }
     }
 

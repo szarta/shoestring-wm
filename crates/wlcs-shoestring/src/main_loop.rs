@@ -121,15 +121,15 @@ pub fn run(channel: Channel<WlcsEvent>) {
                 [0.1, 0.1, 0.1, 1.0],
             );
 
-        // Send frame callbacks so clients draw their next frame.
-        state.space.elements().for_each(|window| {
-            window.send_frame(
-                &output,
-                state.start_time.elapsed(),
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
-            )
-        });
+        // Send frame callbacks so clients draw their next frame — toplevels
+        // and layer-shell surfaces alike, matching the real backends. The
+        // WLCS layer-shell suite blocks on `wl_surface.frame` before checking
+        // surface position, so a layer surface that never gets one hangs.
+        shoestring_wm::presentation::send_frames(
+            &state.space,
+            &output,
+            state.start_time.elapsed(),
+        );
 
         if event_loop
             .dispatch(Some(Duration::from_millis(16)), &mut state)

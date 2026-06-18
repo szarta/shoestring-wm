@@ -21,7 +21,9 @@ jobs:
 
       # System deps mirror the Debian/Ubuntu list in docs/install.rst.
       # libseat-dev + libdisplay-info-dev land in 24.04; older runners
-      # would need an explicit PPA.
+      # would need an explicit PPA. libpipewire-0.3-dev (ships the libspa-0.2
+      # headers too) + libclang-dev are what the screencast portal's
+      # pipewire-sys/libspa-sys bindgen build needs.
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -31,7 +33,8 @@ jobs:
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
             libseat-dev libdisplay-info-dev \
-            libpam0g-dev
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,12 +58,58 @@ jobs:
       - name: cargo build (release)
         run: cargo build --workspace --release
 
+  # Runs the WM's #[ignore]'d integration tests against a real, headless
+  # shoestring-wm instance. The protocol suites (output-management,
+  # pointer-constraints/gestures, tablet, idle-inhibit, virtual-pointer,
+  # foreign-toplevel-management) connect to a live compositor over
+  # $WAYLAND_DISPLAY, so the plain `cargo test` above only compiles them. Here
+  # the winit backend runs nested in Xvfb with Mesa's llvmpipe software
+  # renderer — no GPU needed. See scripts/headless-integration-tests.sh.
+  integration:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same build deps as `check`, plus Xvfb (the X server the winit backend
+      # nests in) and the Mesa DRI drivers (llvmpipe, for software EGL/GLES).
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev \
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev \
+            xvfb libgl1-mesa-dri
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Integration tests (headless WM)
+        run: xvfb-run -a -s "-screen 0 1280x800x24" scripts/headless-integration-tests.sh
+
   # The same fmt/clippy/test/build sequence on FreeBSD, inside a VM action
   # (GitHub has no native FreeBSD runner). Catches OpenPAM/libudev-devd
   # portability regressions — notably the vendored pam-client2 fork that
   # lets shoestring-lock build there (third_party/pam-client2). Deps mirror
-  # the FreeBSD list in docs/install.rst; the whole workspace (tty backend
-  # + lock) compiles, so nothing is feature-gated out.
+  # the FreeBSD list in docs/install.rst.
+  #
+  # The two PipeWire-linked crates (xdg-desktop-portal-shoestring and
+  # shoestring-mediad) are EXCLUDED here: on FreeBSD they're the optional
+  # SCREENCAST component of the port (packaging/freebsd gates them behind a port
+  # option, not built by default), and FreeBSD isn't on the screen-sharing /
+  # media-privacy critical path. Their pipewire-sys/libspa-sys bindgen also
+  # doesn't resolve cleanly in this bare VM (the pipewire crate can't see
+  # pw_init). The real FreeBSD build of both is validated by the port via
+  # poudriere + manual checks on dev-106, not this gate. Everything else (WM tty
+  # backend + every other helper) compiles, so nothing else is feature-gated out.
   check-freebsd:
     runs-on: ubuntu-24.04
 
@@ -84,11 +133,14 @@ jobs:
               seatd libdisplay-info
           # pkg installs libs under /usr/local/lib, which base ld(1) does not
           # search — point the linker at it (matches docs/install.rst).
+          # --exclude the screencast portal (see the comment on this job):
+          # it's the port's optional SCREENCAST component, built elsewhere.
           run: |
             set -e
             export RUSTFLAGS="-L/usr/local/lib"
             export CARGO_TERM_COLOR=always
+            EXCLUDE="--exclude xdg-desktop-portal-shoestring --exclude shoestring-mediad"
             cargo fmt --all -- --check
-            cargo clippy --workspace --all-targets -- -D warnings
-            cargo test --workspace
-            cargo build --workspace --release
+            cargo clippy --workspace $EXCLUDE --all-targets -- -D warnings
+            cargo test --workspace $EXCLUDE
+            cargo build --workspace $EXCLUDE --release

@@ -31,9 +31,7 @@ use smithay::{
     desktop::Space,
     output::Output,
     reexports::{
-        wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::{
-            self, ZwlrScreencopyFrameV1,
-        },
+        wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         wayland_server::{backend::GlobalId, protocol::wl_buffer::WlBuffer, Resource},
     },
     utils::{Buffer as BufferCoord, Rectangle},
@@ -86,6 +84,13 @@ pub struct FrameInner {
     /// True once `copy`/`copy_with_damage` has been processed. A frame can
     /// only be used once (protocol error otherwise).
     pub used: bool,
+    /// Set when the client used `copy_with_damage` rather than `copy`. The
+    /// protocol requires the compositor to emit `damage` event(s) before
+    /// `ready` in that case; consumers that use the damage variant (e.g.
+    /// xdg-desktop-portal-wlr's screencast loop) rely on it and mismanage
+    /// their per-frame state if it's missing. We always repaint the full
+    /// output, so the damage box is the whole capture region.
+    pub with_damage: bool,
 }
 
 /// Process every pending screencopy frame whose target matches `output`:
@@ -194,12 +199,14 @@ pub fn process_pending<R>(
         drop(framebuffer);
         match result {
             Ok(()) => {
-                // Same YInvert as the shm path: we render through a GL FBO
-                // (here over the dmabuf's EGLImage), whose bottom-left origin
-                // leaves the buffer rows bottom-to-top. Matches wlroots' GL
-                // screencopy behaviour.
-                frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
-                send_ready(&frame);
+                // The rendered dmabuf is upright (rows top-to-bottom), same as
+                // the shm path — verified empirically via the portal's
+                // `--selftest-dmabuf` (reading the gbm-mapped buffer straight
+                // yields an upright image; honoring YInvert yields upside-down).
+                // The earlier assumption that the EGLImage FBO's bottom-left
+                // origin left the buffer bottom-to-top was wrong, so we flag no
+                // YInvert on either path. (task 158)
+                finish_frame(&frame);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: dmabuf render failed");
@@ -302,8 +309,9 @@ pub fn process_pending<R>(
 
             match copy_region(renderer, &framebuffer, region, format, stride, &buffer) {
                 Ok(()) => {
-                    frame.flags(zwlr_screencopy_frame_v1::Flags::YInvert);
-                    send_ready(&frame);
+                    // shm readback (copy_framebuffer) lands rows top-to-bottom;
+                    // no YInvert (same as the dmabuf path).
+                    finish_frame(&frame);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "screencopy: copy_region failed");
@@ -313,6 +321,36 @@ pub fn process_pending<R>(
         }
         drop(framebuffer);
     }
+}
+
+/// Complete a successfully captured frame: a `damage` event if the client used
+/// `copy_with_damage`, then `ready` — in that order, matching wlroots. The
+/// damage box covers the whole capture region because each capture repaints the
+/// full output (no incremental damage tracking against prior captures). Reads
+/// `with_damage`/`region` from the frame's own user data so both the dmabuf and
+/// shm paths share one code path.
+///
+/// We never send the `YInvert` flag: both render paths land rows top-to-bottom
+/// (upright). The dmabuf path was previously assumed bottom-up because it
+/// renders through an EGLImage FBO, but that was wrong — verified via the
+/// portal's `--selftest-dmabuf` (task 158). Tagging a buffer inverted is what
+/// once flipped `shoestring-screenshot` PNGs, portal frames, and `grim`.
+fn finish_frame(frame: &ZwlrScreencopyFrameV1) {
+    if let Some(user) = frame.data::<ScreencopyFrameData>() {
+        let (with_damage, region) = {
+            let inner = user.inner.lock().unwrap();
+            (inner.with_damage, inner.region)
+        };
+        if with_damage {
+            frame.damage(
+                0,
+                0,
+                region.size.w.max(0) as u32,
+                region.size.h.max(0) as u32,
+            );
+        }
+    }
+    send_ready(frame);
 }
 
 /// Send the `ready` event with a wall-clock presentation timestamp split into

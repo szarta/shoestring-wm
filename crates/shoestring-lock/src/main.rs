@@ -842,6 +842,17 @@ impl Dispatch<WlKeyboard, ()> for State {
                 if !matches!(ks, WEnum::Value(KeyState::Pressed)) {
                     return;
                 }
+                // While the prompt is hidden, the first key is a pure wake
+                // trigger: reveal the dialog but don't ingest the key. This
+                // matches the usual "tap any key to wake" reflex — Enter
+                // won't submit an empty password ("bad password"), printable
+                // keys won't silently seed the buffer, and otherwise-inert
+                // keys (arrows, Esc) still bring the prompt up.
+                if !state.prompt_visible {
+                    state.wake_prompt();
+                    redraw_all(state, qh);
+                    return;
+                }
                 // wayland keycode is evdev (offset 8 from xkb keycode).
                 let xkb_code = key + 8;
                 let mut dirty = false;

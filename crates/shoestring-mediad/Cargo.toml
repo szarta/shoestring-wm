@@ -1,0 +1,37 @@
+[package]
+name = "shoestring-mediad"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "PipeWire-linked media-privacy monitor + mute control for shoestring-wm: reports default sink/source mute + camera-in-use to the WM over IPC, and applies mute on request."
+repository = "https://github.com/szarta/shoestring-wm"
+
+[[bin]]
+name = "shoestring-mediad"
+path = "src/main.rs"
+
+[dependencies]
+# PipeWire client: monitor the default sink/source mute + active camera nodes
+# and apply mute. Same versions as the screencast portal so the resolved dep
+# set (and the libpipewire/libspa bindgen build) stays shared. This crate is
+# the *only* component besides the portal that links libpipewire — the
+# compositor never does.
+pipewire = "0.10"
+libspa = "0.10"
+
+# WM IPC: we push `Request::ReportMedia` snapshots to the WM over its
+# newline-JSON unix socket and read back the `Response::Ok` acks.
+shoestring-ipc = { path = "../shoestring-ipc" }
+serde_json = "1"
+
+# `poll(2)` over the PipeWire loop fd + the WM socket fd, plus the
+# reconnect/backoff sleeps. Already in the resolved tree via pipewire.
+libc = "0.2"
+
+# Lightweight error type for `main`.
+anyhow = "1"
+
+# Structured logs (env-filterable). Match the rest of the project so
+# SHOESTRING_MEDIAD_LOG / RUST_LOG behave the same way.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -11,7 +11,10 @@
 
 mod battery;
 mod config;
+mod icons;
 mod ipc_client;
+mod menu;
+mod tray;
 
 use std::{
     collections::HashMap,
@@ -27,6 +30,7 @@ use config::{default_config_path, default_config_toml, Config, Position};
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use shoestring_ipc::Event as IpcEvent;
+use shoestring_ipc::MediaState;
 use tracing_subscriber::EnvFilter;
 use wayland_client::{
     backend::ObjectId,
@@ -35,6 +39,7 @@ use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
+        wl_keyboard::{self, KeyState, WlKeyboard},
         wl_output::WlOutput,
         wl_pointer::{self, ButtonState, WlPointer},
         wl_registry::WlRegistry,
@@ -42,6 +47,7 @@ use wayland_client::{
         wl_shm::{Format, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
+        wl_touch::{self, WlTouch},
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
@@ -56,6 +62,12 @@ use wayland_protocols::wp::{
     },
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup::{self, XdgPopup},
+    xdg_positioner::XdgPositioner,
+    xdg_surface::{self, XdgSurface},
+    xdg_wm_base::{self, XdgWmBase},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
@@ -63,10 +75,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 /// Dim color for inactive workspace boxes and unfocused entry backgrounds.
 /// Not currently user-configurable (the M24 config spec only exposes bg/fg).
-const DIM: u32 = 0xFF_55_55_55;
+pub(crate) const DIM: u32 = 0xFF_55_55_55;
 /// Accent: focused workspace box and focused window's highlight backdrop.
 /// Not currently user-configurable.
-const ACCENT: u32 = 0xFF_55_77_BB;
+pub(crate) const ACCENT: u32 = 0xFF_55_77_BB;
 /// Unfocused window-list entry chip background. Matches DIM so it uses the
 /// same visual grammar as the inactive workspace boxes on the left.
 const ENTRY_BG: u32 = DIM;
@@ -175,6 +187,12 @@ struct State {
     /// "capturing now" dot that decays a short while after the events stop
     /// (the ~1Hz redraw tick clears it). The strongest privacy signal.
     last_capture: Option<Instant>,
+    /// Last media-privacy snapshot from the WM (default-sink/source mute +
+    /// camera-in-use). Seeded from [`ipc_client::query_media`] at startup and
+    /// updated by `media_changed` events. `None` when no `shoestring-mediad`
+    /// monitor is reporting — the bar then shows no MUTE/MIC/CAM chips and the
+    /// control menu omits the media rows (graceful degrade).
+    media: Option<MediaState>,
     /// 1-based workspace for each window, keyed by ext-FT identifier.
     /// Populated from `window_opened` and updated by
     /// `window_moved_to_workspace`; ext-FT itself does not expose
@@ -209,6 +227,57 @@ struct State {
     /// the last [`draw_window_list`] pass. Hit-tested by the pointer
     /// button handler; cleared and rebuilt on every redraw.
     window_entry_rects: Vec<(i32, i32, String)>,
+    /// `wp_viewporter` manager, kept so the tray menu can give its own
+    /// surface a viewport for HiDPI mapping. `None` if unsupported.
+    viewporter: Option<WpViewporter>,
+    /// `xdg_wm_base`, for creating the tray menu's xdg_popup (parented to the
+    /// bar's layer surface) and its positioners.
+    xdg_wm_base: XdgWmBase,
+    /// Serial of the most recent pointer button press — needed as the grab
+    /// serial when opening the menu popup.
+    last_pointer_serial: u32,
+    /// Bar-side keyboard, bound when the seat advertises the capability.
+    /// Used only to drive + dismiss the tray menu (the bar itself takes
+    /// no keyboard focus).
+    keyboard: Option<WlKeyboard>,
+    /// Bar-side touch, bound when the seat advertises the `touch`
+    /// capability (a touchscreen appeared). A touch-down is treated as a
+    /// left click at the contact point, so the window list, control
+    /// applet and tray menus are reachable by finger as well as pointer.
+    touch: Option<WlTouch>,
+    /// Surface-local pointer y in pixels; companion to `pointer_x`, needed
+    /// for vertical hit-testing inside the tray menu.
+    pointer_y: Option<f64>,
+    /// True while the pointer is over the open tray menu (vs the bar), so
+    /// the button handler routes the click correctly.
+    pointer_on_menu: bool,
+    /// (x_start, width, tray item index) for each rendered tray icon from
+    /// the last redraw, in logical coords. Hit-tested to open a menu.
+    tray_icon_rects: Vec<(i32, i32, usize)>,
+    /// `(x_start, width)` of the control applet from the last redraw, in
+    /// logical coords (or `None` when `show_control = false`). Hit-tested to
+    /// open the control menu.
+    control_rect: Option<(i32, i32)>,
+    /// The open context menu, if any (tray *or* control — see `menu_is_control`).
+    menu: Option<menu::Menu>,
+    /// True when [`Self::menu`] is the control menu (gate toggles + lock/logout)
+    /// rather than a tray dbusmenu, so activation routes to IPC calls instead of
+    /// a dbusmenu `clicked` event.
+    menu_is_control: bool,
+    /// Set by the pointer handler when the control applet is clicked; the loop
+    /// opens the control menu.
+    pending_open_control: bool,
+    /// Set when the menu needs a repaint (hover/nav/configure change).
+    menu_dirty: bool,
+    /// Tray item index whose menu the loop should fetch + open (set by the
+    /// pointer handler; consumed in the loop where the D-Bus conn lives).
+    pending_open_menu: Option<usize>,
+    /// dbusmenu id the loop should send a `clicked` event for, then dismiss.
+    pending_menu_click: Option<i32>,
+    /// `(parent level index, submenu label)` the loop should fetch and open as
+    /// a child popup — submenu children are populated lazily (and ids churn),
+    /// so we re-query by label path.
+    pending_menu_nav: Option<(usize, String)>,
     /// Auto-detected battery source. `None` on systems with no
     /// recognised battery — the indicator is hidden entirely in that
     /// case so the bar layout doesn't reserve dead space.
@@ -342,6 +411,11 @@ fn run_session() -> Result<()> {
     let layer_shell: ZwlrLayerShellV1 = globals
         .bind(&qh, 1..=5, ())
         .context("zwlr_layer_shell_v1 missing (compositor doesn't support layer-shell?)")?;
+    // xdg_wm_base: needed to create the tray menu's xdg_popup (parented to the
+    // bar's layer surface via get_popup). Required for the menu to function.
+    let xdg_wm_base: XdgWmBase = globals
+        .bind(&qh, 1..=6, ())
+        .context("xdg_wm_base missing (compositor doesn't support xdg-shell?)")?;
     // Optional HiDPI globals: present under shoestring-wm.
     let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
     let fractional_mgr: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
@@ -404,6 +478,13 @@ fn run_session() -> Result<()> {
         false
     });
 
+    // Seed the media-privacy snapshot. `None` on error (or no monitor yet) →
+    // no media chips until a `media_changed` event arrives.
+    let media = ipc_client::query_media().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc media query failed; no media chips until reported");
+        None
+    });
+
     // Detect the battery source once at startup. If `battery_show` is
     // off, skip detection entirely so we don't even open the sysfs
     // dir on platforms where the user has opted out.
@@ -440,6 +521,7 @@ fn run_session() -> Result<()> {
         automation_enabled,
         screen_capture_enabled,
         last_capture: None,
+        media,
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
@@ -447,6 +529,22 @@ fn run_session() -> Result<()> {
         pointer: None,
         pointer_x: None,
         window_entry_rects: Vec::new(),
+        viewporter,
+        xdg_wm_base,
+        last_pointer_serial: 0,
+        keyboard: None,
+        touch: None,
+        pointer_y: None,
+        pointer_on_menu: false,
+        tray_icon_rects: Vec::new(),
+        control_rect: None,
+        menu: None,
+        menu_is_control: false,
+        pending_open_control: false,
+        menu_dirty: false,
+        pending_open_menu: None,
+        pending_menu_click: None,
+        pending_menu_nav: None,
         battery_source,
         battery_reading,
         last_battery_poll: SystemTime::now(),
@@ -454,10 +552,17 @@ fn run_session() -> Result<()> {
     };
 
     let surface = state.compositor.create_surface(&qh, ());
+    // Top layer (not Bottom): the bar carries drop-down menus (tray dbusmenus
+    // and the control menu) as popups, and a layer surface's popups render in
+    // its own layer's z-band. On Bottom they were occluded by ordinary windows
+    // (e.g. a maximized terminal) — only visible over the bare desktop. Top
+    // keeps the bar + its popups above windows; the exclusive zone below still
+    // keeps windows out of the bar's strip, and fullscreen windows still hide
+    // all layer surfaces (see the WM's fullscreen layer-hiding).
     let layer_surface = state.layer_shell.get_layer_surface(
         &surface,
         None,
-        Layer::Bottom,
+        Layer::Top,
         "shoestring-bar".to_string(),
         &qh,
         (),
@@ -470,7 +575,7 @@ fn run_session() -> Result<()> {
     layer_surface.set_anchor(edge_anchor | Anchor::Left | Anchor::Right);
     layer_surface.set_exclusive_zone(state.cfg.height as i32);
     // Opt into fractional scaling so the bar renders crisp on HiDPI outputs.
-    if let (Some(vp), Some(mgr)) = (&viewporter, &fractional_mgr) {
+    if let (Some(vp), Some(mgr)) = (&state.viewporter, &fractional_mgr) {
         state.viewport = Some(vp.get_viewport(&surface, &qh, ()));
         state.fractional = Some(mgr.get_fractional_scale(&surface, &qh, ()));
     }
@@ -584,6 +689,10 @@ fn event_loop(
     state: &mut State,
     mut event_stream: Option<&mut ipc_client::EventStream>,
 ) -> Result<()> {
+    // System-tray (StatusNotifier) host. `None` if there's no session bus or
+    // another tray already owns the watcher — the bar just runs trayless then.
+    let mut tray = tray::Tray::new();
+
     while state.running {
         // 1. Repaint if the clock string has changed since the last paint.
         //    Comparing the rendered string (rather than a minute counter)
@@ -632,7 +741,7 @@ fn event_loop(
         if state.dirty {
             if let Some((w, h)) = state.size {
                 state.dirty = false;
-                if let Err(e) = redraw(state, qh, w, h) {
+                if let Err(e) = redraw(state, qh, w, h, tray.as_mut()) {
                     tracing::error!(error = ?e, "redraw failed");
                 }
             }
@@ -644,12 +753,14 @@ fn event_loop(
         let wayland_fd = guard.as_ref().map(|g| g.connection_fd().as_raw_fd());
         let ipc_fd = event_stream.as_ref().map(|s| s.as_raw_fd());
 
-        // Build a 1- or 2-entry pollfd array depending on which of
-        // wayland / ipc are present.
-        let mut pfds: [libc::pollfd; 2] = unsafe { std::mem::zeroed() };
+        // Build a pollfd array over whichever of wayland / ipc / dbus-tray
+        // are present this iteration.
+        let tray_fd = tray.as_ref().map(|t| t.fd());
+        let mut pfds: [libc::pollfd; 3] = unsafe { std::mem::zeroed() };
         let mut nfds: libc::nfds_t = 0;
         let mut wayland_idx: Option<usize> = None;
         let mut ipc_idx: Option<usize> = None;
+        let mut tray_idx: Option<usize> = None;
         if let Some(fd) = wayland_fd {
             pfds[nfds as usize] = libc::pollfd {
                 fd,
@@ -666,6 +777,15 @@ fn event_loop(
                 revents: 0,
             };
             ipc_idx = Some(nfds as usize);
+            nfds += 1;
+        }
+        if let Some(fd) = tray_fd {
+            pfds[nfds as usize] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            tray_idx = Some(nfds as usize);
             nfds += 1;
         }
 
@@ -713,9 +833,73 @@ fn event_loop(
             }
         }
 
+        // Drain the D-Bus tray socket on readability (or unconditionally if we
+        // couldn't poll its fd this round). refill_all is nonblocking.
+        if let (Some(idx), Some(t)) = (tray_idx, tray.as_mut()) {
+            if pfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 && t.dispatch() {
+                state.dirty = true;
+            }
+        }
+
         // 3. Dispatch any events we got from `read()` above OR events
         //    that wayland-rs already had buffered (prepare_read returned None).
         queue.dispatch_pending(state)?;
+
+        // 4. Tray-menu commands queued by the input handlers, executed here
+        //    where the D-Bus connection (`tray`) is in scope.
+        if let Some(idx) = state.pending_open_menu.take() {
+            open_tray_menu(state, qh, tray.as_mut(), idx);
+        }
+        if std::mem::take(&mut state.pending_open_control) {
+            open_control_menu(state, qh);
+        }
+        if let Some(id) = state.pending_menu_click.take() {
+            if let (Some(t), Some(m)) = (tray.as_mut(), state.menu.as_ref()) {
+                let ti = m.tray_idx;
+                t.menu_clicked(ti, id);
+            }
+            if let Some(m) = state.menu.take() {
+                m.destroy();
+            }
+        }
+        if let Some((parent, label)) = state.pending_menu_nav.take() {
+            // Close any deeper levels, then fetch this submenu by its label path
+            // and open it as a child popup of `parent`.
+            if let Some(m) = state.menu.as_mut() {
+                m.truncate_to(parent);
+            }
+            let ctx = state.menu.as_ref().map(|m| {
+                let mut path = m.path_to(parent);
+                path.push(label.clone());
+                (m.tray_idx, path)
+            });
+            if let (Some(t), Some((ti, path))) = (tray.as_mut(), ctx) {
+                match t.fetch_level(ti, &path) {
+                    Some(entries) => {
+                        tracing::debug!(%label, count = entries.len(), "tray submenu fetched");
+                        let fs = state.cfg.font_size;
+                        if let Some(m) = state.menu.as_mut() {
+                            m.push_child(
+                                parent,
+                                label,
+                                entries,
+                                &state.compositor,
+                                state.viewporter.as_ref(),
+                                qh,
+                                &state.font,
+                                fs,
+                            );
+                        }
+                        state.menu_dirty = true;
+                    }
+                    None => tracing::warn!(%label, "tray submenu fetch failed"),
+                }
+            }
+        }
+        if state.menu_dirty {
+            state.menu_dirty = false;
+            render_menu(state, qh);
+        }
     }
     Ok(())
 }
@@ -769,6 +953,21 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
             state.last_capture = Some(Instant::now());
             state.dirty = true;
         }
+        IpcEvent::MediaChanged {
+            audio_muted,
+            mic_muted,
+            camera_active,
+        } => {
+            let snapshot = MediaState {
+                audio_muted,
+                mic_muted,
+                camera_active,
+            };
+            if state.media != Some(snapshot) {
+                state.media = Some(snapshot);
+                state.dirty = true;
+            }
+        }
         IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::WindowRestacked { .. }
         | IpcEvent::WindowStickyChanged { .. }
@@ -810,21 +1009,27 @@ fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
 
 /// A reused `wl_shm` buffer: a tempfile-backed pool whose `wl_buffer` we
 /// re-attach every frame. Recreated only when the bar's dimensions change.
-struct BarBuffer {
+pub(crate) struct BarBuffer {
     /// Backing tempfile, mapped afresh each redraw. The compositor holds
     /// its own dup of this fd via the pool, so it stays valid for the
     /// buffer's lifetime.
-    tmp: std::fs::File,
+    pub(crate) tmp: std::fs::File,
     /// The attachable buffer. Destroying it releases the compositor-side
     /// pool mapping; we only do that when reallocating for a new size.
-    buffer: WlBuffer,
+    pub(crate) buffer: WlBuffer,
     /// Pixel dimensions this buffer was allocated for.
-    dims: (u32, u32),
+    pub(crate) dims: (u32, u32),
 }
 
 /// Compose the bar into its reused wl_buffer and attach it.
 /// Re-runs on every configure event and on state changes.
-fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<()> {
+fn redraw(
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    w: u32,
+    h: u32,
+    tray: Option<&mut tray::Tray>,
+) -> Result<()> {
     // `(w, h)` is the logical surface size from the layer-shell configure. The
     // buffer is rendered at physical resolution `(pw, ph)` and mapped back to
     // logical via the viewport, so every layout dimension below is scaled into
@@ -881,6 +1086,32 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     let clock_x = pw as i32 - s(PADDING_X) - clock_w;
     draw_text(&mut mmap, pw, ph, &state.font, font_px, clock_x, &clock, fg);
 
+    // Control applet: a small clickable "hamburger" (three stacked bars) drawn
+    // immediately left of the clock. Clicking it opens the control menu (gate
+    // toggles + lock/logout). When shown it anchors the indicator cluster to
+    // its left; hidden (show_control = false) the chips hug the clock as before.
+    let control_left = if state.cfg.show_control {
+        let gap = s(8);
+        let cw = s(16);
+        let right = clock_x - gap;
+        let left = right - cw;
+        let bar_w = cw - s(4);
+        let bar_h = s(2).max(1);
+        let bx = left + s(2);
+        let cy = ph as i32 / 2;
+        for dy in [-s(5), 0, s(5)] {
+            fill_rect(&mut mmap, pw, ph, bx, cy + dy - bar_h / 2, bar_w, bar_h, fg);
+        }
+        // Store the logical hit rect for the pointer handler.
+        let lx = ((left as f64) / scale).round() as i32;
+        let lw = ((cw as f64) / scale).round() as i32;
+        state.control_rect = Some((lx, lw));
+        Some(left)
+    } else {
+        state.control_rect = None;
+        None
+    };
+
     // Automation indicator chip: drawn immediately left of the clock when
     // the WM's automation gate is ON. Hidden when off — the user should
     // always be able to tell at a glance that injected input / remote
@@ -893,7 +1124,7 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         let auto_clock_gap = s(8);
         let label_w = measure_text(&state.font, font_px, AUTO_LABEL);
         let chip_w = label_w + auto_pad * 2;
-        let chip_right = clock_x - auto_clock_gap;
+        let chip_right = control_left.unwrap_or(clock_x) - auto_clock_gap;
         let chip_left = chip_right - chip_w;
         fill_rect(
             &mut mmap,
@@ -935,7 +1166,7 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
             .is_some_and(|t| t.elapsed() < CAPTURE_DOT_TTL);
         let label_w = measure_text(&state.font, font_px, CAP_LABEL);
         let chip_w = label_w + cap_pad * 2;
-        let chip_right = auto_chip_left.unwrap_or(clock_x) - cap_gap;
+        let chip_right = auto_chip_left.or(control_left).unwrap_or(clock_x) - cap_gap;
         let chip_left = chip_right - chip_w;
         fill_rect(
             &mut mmap,
@@ -962,6 +1193,70 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
         None
     };
 
+    // Media-privacy chips (MUTE / MIC / CAM): drawn left of the capture chip
+    // whenever `shoestring-mediad` is reporting (`state.media` is `Some`) and
+    // the flagged condition holds. MUTE = the default output is muted; MIC =
+    // the microphone is *live* (unmuted — "hot"); CAM = a camera is actively
+    // streaming. MIC/CAM use the active (red) color because they're live
+    // privacy risks; MUTE is informational (accent). A shared closure draws
+    // each chip just-left-of `anchor` and returns its left edge so the next
+    // chip and the downstream cluster (battery/tray) anchor to it.
+    let media_gap = s(8);
+    let media = if state.cfg.show_media {
+        state.media
+    } else {
+        None
+    };
+    let draw_media_chip = |mmap: &mut MmapMut, label: &str, color: u32, anchor: i32| -> i32 {
+        let pad = s(4);
+        let chip_w = measure_text(&state.font, font_px, label) + pad * 2;
+        let chip_left = anchor - media_gap - chip_w;
+        fill_rect(
+            mmap,
+            pw,
+            ph,
+            chip_left,
+            s(2),
+            chip_w,
+            ph as i32 - s(4),
+            color,
+        );
+        draw_text(
+            mmap,
+            pw,
+            ph,
+            &state.font,
+            font_px,
+            chip_left + pad,
+            label,
+            fg,
+        );
+        chip_left
+    };
+    let media_base = cap_chip_left
+        .or(auto_chip_left)
+        .or(control_left)
+        .unwrap_or(clock_x);
+    let mute_chip_left = if media.is_some_and(|m| m.audio_muted) {
+        Some(draw_media_chip(&mut mmap, "MUTE", ACCENT, media_base))
+    } else {
+        None
+    };
+    let mic_chip_left = if media.is_some_and(|m| !m.mic_muted) {
+        let anchor = mute_chip_left.unwrap_or(media_base);
+        Some(draw_media_chip(&mut mmap, "MIC", CAPTURE_ACTIVE, anchor))
+    } else {
+        None
+    };
+    let cam_chip_left = if media.is_some_and(|m| m.camera_active) {
+        let anchor = mic_chip_left.or(mute_chip_left).unwrap_or(media_base);
+        Some(draw_media_chip(&mut mmap, "CAM", CAPTURE_ACTIVE, anchor))
+    } else {
+        None
+    };
+    // Leftmost media chip, for the downstream anchor chains (battery/tray/…).
+    let media_chip_left = cam_chip_left.or(mic_chip_left).or(mute_chip_left);
+
     // Battery indicator: drawn immediately left of the capture/AUTO chips (or
     // left of the clock when both are hidden). Skipped when no source
     // was detected or `battery_show = false` (which short-circuits
@@ -971,7 +1266,11 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
             let bat_gap = s(8);
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
-            let right_anchor = cap_chip_left.or(auto_chip_left).unwrap_or(clock_x);
+            let right_anchor = media_chip_left
+                .or(cap_chip_left)
+                .or(auto_chip_left)
+                .or(control_left)
+                .unwrap_or(clock_x);
             let bat_x = right_anchor - bat_gap - text_w;
             let color = battery::pick_color(
                 &reading,
@@ -985,6 +1284,49 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
             Some(bat_x)
         }
         _ => None,
+    };
+
+    // Tray: StatusNotifier icons, drawn left of the battery/chips cluster and
+    // sized to the bar height. Decode is lazy + cached inside the tray.
+    let tray_left = match tray {
+        Some(t) => {
+            let pad = s(3);
+            let icon_px = (ph as i32 - pad * 2).clamp(8, 64) as u16;
+            t.ensure_icons(icon_px);
+            let gap = s(6);
+            let right_anchor = battery_left
+                .or(media_chip_left)
+                .or(cap_chip_left)
+                .or(auto_chip_left)
+                .or(control_left)
+                .unwrap_or(clock_x);
+            let tray_items: Vec<(usize, &icons::Icon)> = t.visible_items().collect();
+            if tray_items.is_empty() {
+                state.tray_icon_rects.clear();
+                None
+            } else {
+                // Right-to-left so the cluster hugs the battery/clock. Capture
+                // each icon's logical rect + item index so the pointer handler
+                // can open the matching menu on click.
+                let mut rects: Vec<(i32, i32, usize)> = Vec::with_capacity(tray_items.len());
+                let mut x = right_anchor - gap;
+                for (idx, icon) in tray_items.iter().rev() {
+                    x -= icon.width as i32;
+                    let y = (ph as i32 - icon.height as i32) / 2;
+                    blit_icon(&mut mmap, pw, ph, x, y, icon);
+                    let lx = ((x as f64) / scale).round() as i32;
+                    let lw = ((icon.width as f64) / scale).round() as i32;
+                    rects.push((lx, lw, *idx));
+                    x -= gap;
+                }
+                state.tray_icon_rects = rects;
+                Some(x)
+            }
+        }
+        None => {
+            state.tray_icon_rects.clear();
+            None
+        }
     };
 
     // Far left: workspace cluster. Active box in accent color, the rest
@@ -1041,7 +1383,13 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
     // ordered by FT identifier (stable across renders). When no window
     // exists on the active workspace the slot stays empty — `--version`
     // is the supported channel for reading the build version.
-    let list_end_x = battery_left.or(auto_chip_left).unwrap_or(clock_x) - s(PADDING_X);
+    let list_end_x = tray_left
+        .or(battery_left)
+        .or(media_chip_left)
+        .or(cap_chip_left)
+        .or(auto_chip_left)
+        .unwrap_or(clock_x)
+        - s(PADDING_X);
     let list_budget = (list_end_x - list_start_x).max(0);
     // draw_window_list also fills `entry_rects`, which the pointer
     // button handler reads on the next click to hit-test entries.
@@ -1084,7 +1432,7 @@ fn redraw(state: &mut State, qh: &QueueHandle<State>, w: u32, h: u32) -> Result<
 
 /// Total horizontal advance for rendering `text` at `size_px`. Doesn't
 /// account for kerning, but neither does our renderer — values match.
-fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
+pub(crate) fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
     let mut w = 0.0_f32;
     for ch in text.chars() {
         w += font.metrics(ch, size_px).advance_width;
@@ -1232,7 +1580,7 @@ fn draw_window_list(
 }
 
 /// Solid-color rectangle (no alpha blending). Clamped to the buffer.
-fn fill_rect(
+pub(crate) fn fill_rect(
     mmap: &mut MmapMut,
     dst_w: u32,
     dst_h: u32,
@@ -1258,7 +1606,7 @@ fn fill_rect(
     }
 }
 
-fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
+pub(crate) fn fill_bg(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
     let bytes = color.to_ne_bytes();
     let stride = w as usize * 4;
     let row = bytes.repeat(w as usize);
@@ -1317,9 +1665,58 @@ fn draw_text(
     }
 }
 
+/// Blit a premultiplied-BGRA icon onto the buffer, source-over an opaque
+/// background (`out = src + dst*(1 - a)`). Clipped to the buffer.
+fn blit_icon(
+    mmap: &mut MmapMut,
+    dst_w: u32,
+    dst_h: u32,
+    dst_x: i32,
+    dst_y: i32,
+    icon: &icons::Icon,
+) {
+    let (iw, ih) = (icon.width as i32, icon.height as i32);
+    let stride = dst_w as usize * 4;
+    for sy in 0..ih {
+        let dy = dst_y + sy;
+        if dy < 0 || dy >= dst_h as i32 {
+            continue;
+        }
+        for sx in 0..iw {
+            let dx = dst_x + sx;
+            if dx < 0 || dx >= dst_w as i32 {
+                continue;
+            }
+            let si = ((sy * iw + sx) * 4) as usize;
+            let (sb, sg, sr, sa) = (
+                icon.bgra[si],
+                icon.bgra[si + 1],
+                icon.bgra[si + 2],
+                icon.bgra[si + 3],
+            );
+            if sa == 0 {
+                continue;
+            }
+            let off = dy as usize * stride + dx as usize * 4;
+            if sa == 255 {
+                mmap[off] = sb;
+                mmap[off + 1] = sg;
+                mmap[off + 2] = sr;
+                mmap[off + 3] = 255;
+            } else {
+                let inv = 255 - sa as u32;
+                mmap[off] = (sb as u32 + (mmap[off] as u32 * inv + 127) / 255) as u8;
+                mmap[off + 1] = (sg as u32 + (mmap[off + 1] as u32 * inv + 127) / 255) as u8;
+                mmap[off + 2] = (sr as u32 + (mmap[off + 2] as u32 * inv + 127) / 255) as u8;
+                mmap[off + 3] = 255;
+            }
+        }
+    }
+}
+
 /// Blit a single-channel coverage bitmap as `color`, alpha-blending against
 /// whatever ARGB is already in the destination.
-fn blit_alpha(
+pub(crate) fn blit_alpha(
     mmap: &mut MmapMut,
     dst_w: u32,
     dst_h: u32,
@@ -1386,6 +1783,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // Only the bar is a layer surface now (the tray menu is an xdg_popup).
         match event {
             zwlr_layer_surface_v1::Event::Configure {
                 serial,
@@ -1503,7 +1901,70 @@ noop_dispatch!(
     WpViewporter,
     WpViewport,
     WpFractionalScaleManagerV1,
+    // xdg_positioner is request-only.
+    XdgPositioner,
 );
+
+impl Dispatch<XdgWmBase, ()> for State {
+    fn event(
+        _: &mut Self,
+        base: &XdgWmBase,
+        event: <XdgWmBase as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            base.pong(serial);
+        }
+    }
+}
+
+impl Dispatch<XdgSurface, ()> for State {
+    fn event(
+        state: &mut Self,
+        xs: &XdgSurface,
+        event: <XdgSurface as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The tray menu's xdg_surface: ack and (re)paint on the next loop tick.
+        if let xdg_surface::Event::Configure { serial } = event {
+            xs.ack_configure(serial);
+            state.menu_dirty = true;
+        }
+    }
+}
+
+impl Dispatch<XdgPopup, ()> for State {
+    fn event(
+        state: &mut Self,
+        popup: &XdgPopup,
+        event: <XdgPopup as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            xdg_popup::Event::Configure { width, height, .. } => {
+                if width > 0 && height > 0 {
+                    if let Some(m) = state.menu.as_mut() {
+                        m.set_popup_size(popup, width as u32, height as u32);
+                    }
+                }
+                state.menu_dirty = true;
+            }
+            xdg_popup::Event::PopupDone => {
+                // Compositor dismissed the popup (click-outside / grab end).
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<WpFractionalScaleV1, ()> for State {
     fn event(
@@ -1549,6 +2010,34 @@ impl Dispatch<WlSeat, ()> for State {
                     tracing::debug!("seat dropped pointer capability");
                 }
             }
+
+            // Keyboard: bound only so the tray menu can receive key nav and,
+            // crucially, a `Leave` when focus moves away (= click-elsewhere
+            // dismissal). The bar itself never requests keyboard focus.
+            let has_kbd = caps.contains(Capability::Keyboard);
+            if has_kbd && state.keyboard.is_none() {
+                state.keyboard = Some(seat.get_keyboard(qh, ()));
+                tracing::debug!("seat advertised keyboard; bound");
+            } else if !has_kbd {
+                if let Some(k) = state.keyboard.take() {
+                    k.release();
+                    tracing::debug!("seat dropped keyboard capability");
+                }
+            }
+
+            // Touch: bound when a touchscreen appears so a tap acts as a
+            // left click on the bar (window list, control applet, tray).
+            let has_touch = caps.contains(Capability::Touch);
+            if has_touch && state.touch.is_none() {
+                state.touch = Some(seat.get_touch(qh, ()));
+                tracing::debug!("seat advertised touch; bound");
+            } else if !has_touch {
+                if let Some(t) = state.touch.take() {
+                    t.release();
+                    state.pointer_on_menu = false;
+                    tracing::debug!("seat dropped touch capability");
+                }
+            }
         }
     }
 }
@@ -1560,50 +2049,473 @@ impl Dispatch<WlPointer, ()> for State {
         event: <WlPointer as Proxy>::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { surface_x, .. } => {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 state.pointer_x = Some(surface_x);
+                state.pointer_y = Some(surface_y);
+                // Which menu level (if any) did we enter? Make it active.
+                let lvl = state.menu.as_ref().and_then(|m| m.surface_level(&surface));
+                state.pointer_on_menu = lvl.is_some();
+                if let (Some(m), Some(i)) = (state.menu.as_mut(), lvl) {
+                    m.set_active(Some(i));
+                    if m.hover_at(i, surface_y) {
+                        state.menu_dirty = true;
+                    }
+                }
             }
-            wl_pointer::Event::Motion { surface_x, .. } => {
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 state.pointer_x = Some(surface_x);
+                state.pointer_y = Some(surface_y);
+                if state.pointer_on_menu {
+                    if let Some((m, i)) = state.menu.as_mut().and_then(|m| {
+                        let i = m.active()?;
+                        Some((m, i))
+                    }) {
+                        if m.hover_at(i, surface_y) {
+                            state.menu_dirty = true;
+                        }
+                    }
+                }
             }
             wl_pointer::Event::Leave { .. } => {
                 state.pointer_x = None;
+                state.pointer_y = None;
+                state.pointer_on_menu = false;
             }
             wl_pointer::Event::Button {
                 button,
+                serial,
                 state: WEnum::Value(ButtonState::Pressed),
                 ..
             } => {
-                // BTN_LEFT == 0x110 (Linux input event code). Right /
-                // middle clicks are ignored for now — could be wired to
-                // close / move-to-workspace later.
+                // Remember the serial — opening the menu popup needs it for the
+                // xdg_popup grab to be honored.
+                state.last_pointer_serial = serial;
+                // BTN_LEFT == 0x110 (Linux input event code).
                 const BTN_LEFT: u32 = 0x110;
                 if button != BTN_LEFT {
                     return;
                 }
-                let Some(x) = state.pointer_x else {
-                    return;
-                };
-                let xi = x.floor() as i32;
-                // Hit-test against the entry rects captured during the
-                // last redraw. Linear scan — count is small (<20 in
-                // realistic use).
-                let hit = state
-                    .window_entry_rects
-                    .iter()
-                    .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
-                    .map(|(_, _, id)| id.clone());
-                if let Some(id) = hit {
-                    if let Err(e) = ipc_client::request_focus_window(&id) {
-                        tracing::warn!(error = ?e, %id, "focus_window ipc failed");
-                    }
-                }
+                primary_press(state, qh);
             }
             _ => {}
         }
+    }
+}
+
+/// Resolve a left-click / touch-tap against the current bar layout, using the
+/// last-seen `pointer_x`/`pointer_y` and `pointer_on_menu`. Shared by the
+/// pointer button handler and the touch handler so finger and mouse behave
+/// identically.
+fn primary_press(state: &mut State, qh: &QueueHandle<State>) {
+    // Click inside the open tray menu: resolve the hovered row.
+    if state.pointer_on_menu {
+        let action = state.menu.as_ref().map(|m| m.activate_active());
+        if let Some(action) = action {
+            apply_menu_action(state, action, qh);
+        }
+        return;
+    }
+
+    let Some(x) = state.pointer_x else {
+        return;
+    };
+    let xi = x.floor() as i32;
+
+    // Control applet: a hit opens the control menu (gate toggles +
+    // lock/logout). Checked before the tray since it sits left of
+    // the clock, distinct from the tray icon cluster.
+    if let Some((cx, cw)) = state.control_rect {
+        if xi >= cx && xi < cx + cw {
+            state.pending_open_control = true;
+            return;
+        }
+    }
+
+    // Tray icons sit on the right; a hit opens that item's menu.
+    if let Some((_, _, idx)) = state
+        .tray_icon_rects
+        .iter()
+        .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+        .copied()
+    {
+        // Clicking the icon whose menu is already open toggles it
+        // shut; otherwise (re)open for this item.
+        if state.menu.as_ref().is_some_and(|m| m.tray_idx == idx) {
+            if let Some(m) = state.menu.take() {
+                m.destroy();
+            }
+        } else {
+            state.pending_open_menu = Some(idx);
+        }
+        return;
+    }
+
+    // Otherwise hit-test the window list (left/middle) → focus.
+    let hit = state
+        .window_entry_rects
+        .iter()
+        .find(|(rx, rw, _)| xi >= *rx && xi < *rx + *rw)
+        .map(|(_, _, id)| id.clone());
+    if let Some(id) = hit {
+        if let Err(e) = ipc_client::request_focus_window(&id) {
+            tracing::warn!(error = ?e, %id, "focus_window ipc failed");
+        }
+    }
+}
+
+impl Dispatch<WlTouch, ()> for State {
+    fn event(
+        state: &mut Self,
+        _touch: &WlTouch,
+        event: <WlTouch as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_touch::Event::Down {
+                serial,
+                surface,
+                x,
+                y,
+                ..
+            } => {
+                // A touch-down is a left click at the contact point. Touch has
+                // no enter/motion priming, so prime the cached position and —
+                // if the contact landed on the open tray menu — resolve the
+                // menu level + hovered row here, exactly as the pointer Enter
+                // handler does, before running the shared hit-test.
+                state.last_pointer_serial = serial;
+                state.pointer_x = Some(x);
+                state.pointer_y = Some(y);
+                let lvl = state.menu.as_ref().and_then(|m| m.surface_level(&surface));
+                state.pointer_on_menu = lvl.is_some();
+                if let Some(i) = lvl {
+                    if let Some(m) = state.menu.as_mut() {
+                        m.set_active(Some(i));
+                        if m.hover_at(i, y) {
+                            state.menu_dirty = true;
+                        }
+                    }
+                }
+                primary_press(state, qh);
+            }
+            wl_touch::Event::Motion { x, y, .. } => {
+                // A single contact stays with the surface it went down on (wl
+                // semantics), so this only ever updates hover within the menu
+                // the finger pressed — good enough for slide-within-a-level.
+                state.pointer_x = Some(x);
+                state.pointer_y = Some(y);
+                if state.pointer_on_menu {
+                    if let Some((m, i)) = state.menu.as_mut().and_then(|m| {
+                        let i = m.active()?;
+                        Some((m, i))
+                    }) {
+                        if m.hover_at(i, y) {
+                            state.menu_dirty = true;
+                        }
+                    }
+                }
+            }
+            wl_touch::Event::Up { .. } => {
+                // Contact lifted — drop the cached position like a pointer
+                // Leave so a stale coordinate can't drive a later hit-test.
+                state.pointer_x = None;
+                state.pointer_y = None;
+                state.pointer_on_menu = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _kbd: &WlKeyboard,
+        event: <WlKeyboard as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        // Keyboard only drives the open menu (the popup grab gives it focus).
+        // Dismissal is the compositor's job now (xdg_popup popup_done), so we
+        // don't handle Leave here.
+        if let wl_keyboard::Event::Key {
+            key,
+            state: WEnum::Value(KeyState::Pressed),
+            ..
+        } = event
+        {
+            if let Some(action) = state.menu.as_mut().map(|m| m.key(key)) {
+                apply_menu_action(state, action, qh);
+                state.menu_dirty = true;
+            }
+        }
+    }
+}
+
+/// Apply a resolved menu [`Action`]. UI-only variants mutate `State.menu`
+/// directly; `Activate` is deferred to the loop (it needs the D-Bus conn).
+fn apply_menu_action(state: &mut State, action: menu::Action, qh: &QueueHandle<State>) {
+    tracing::debug!(?action, "menu action");
+    match action {
+        menu::Action::None => {}
+        menu::Action::Close => {
+            if let Some(m) = state.menu.take() {
+                m.destroy();
+            }
+        }
+        menu::Action::Activate(id) => {
+            if state.menu_is_control {
+                // Control menu: apply the gate/lock/quit action directly (the
+                // ipc_client calls are independent one-shot connections, no
+                // D-Bus/tray scope needed), then dismiss the menu.
+                apply_control_action(state, id);
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+                state.menu_is_control = false;
+            } else {
+                state.pending_menu_click = Some(id);
+            }
+        }
+        menu::Action::NavInto(label) => {
+            // Deferred: descending fetches the submenu (lazy population), which
+            // needs the D-Bus connection that lives in the loop, not here.
+            // Open it as a child of the level the pointer/keyboard is on.
+            if let Some(level) = state.menu.as_ref().and_then(|m| m.active()) {
+                state.pending_menu_nav = Some((level, label));
+            }
+        }
+        menu::Action::NavBack => {
+            // Close the deepest submenu level (keyboard ←).
+            if let Some(m) = state.menu.as_mut() {
+                m.pop_child();
+            }
+            state.menu_dirty = true;
+        }
+    }
+    let _ = qh;
+}
+
+/// Render the open tray menu into its buffer. Split-borrow over `State`:
+/// `state.menu` (mut) and the read-only draw inputs are disjoint fields.
+fn render_menu(state: &mut State, qh: &QueueHandle<State>) {
+    let scale = state.scale;
+    let font_size = state.cfg.font_size;
+    let bg = state.cfg.background;
+    let fg = state.cfg.foreground;
+    let shm = state.shm.clone();
+    if let Some(menu) = state.menu.as_mut() {
+        menu.render(qh, &shm, &state.font, scale, font_size, bg, fg);
+    }
+}
+
+/// Fetch + open the context menu for tray item `idx` (or fall back to an
+/// `Activate` for menu-less items). Runs in the loop where `tray` is in scope.
+fn open_tray_menu(
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    tray: Option<&mut tray::Tray>,
+    idx: usize,
+) {
+    if let Some(m) = state.menu.take() {
+        m.destroy();
+    }
+    let Some(t) = tray else {
+        return;
+    };
+    // Anchor rect = the clicked icon's rect in the bar's surface-local coords
+    // (full bar height vertically). The compositor positions the popup against it.
+    let (icon_x, icon_w) = state
+        .tray_icon_rects
+        .iter()
+        .find(|(_, _, i)| *i == idx)
+        .map(|(x, w, _)| (*x, *w))
+        .unwrap_or((0, 1));
+    let bar_h = state.size.map(|(_, h)| h).unwrap_or(state.cfg.height) as i32;
+    let anchor_rect = (icon_x, 0, icon_w, bar_h);
+
+    if !t.has_menu(idx) {
+        // No usable dbusmenu — Activate so left-click still does something.
+        t.activate(idx, 0, 0);
+        return;
+    }
+    let Some(entries) = t.fetch_level(idx, &[]) else {
+        return;
+    };
+    let Some(seat) = state.seat.as_ref() else {
+        return;
+    };
+    let Some(bar_layer) = state.layer_surface.as_ref() else {
+        return;
+    };
+    let m = menu::Menu::open(
+        &state.compositor,
+        &state.xdg_wm_base,
+        bar_layer,
+        state.viewporter.as_ref(),
+        qh,
+        entries,
+        idx,
+        anchor_rect,
+        state.cfg.position,
+        seat,
+        state.last_pointer_serial,
+        &state.font,
+        state.cfg.font_size,
+    );
+    tracing::debug!(idx, ?anchor_rect, "tray menu opened");
+    state.menu = Some(m);
+    state.menu_is_control = false;
+    state.menu_dirty = true;
+}
+
+// Control-menu item ids (the synthetic dbusmenu ids the control menu carries;
+// `menu_is_control` distinguishes them from real tray ids). 0 is the separator.
+const CTRL_SCREEN_CAPTURE: i32 = 1;
+const CTRL_AUTOMATION: i32 = 2;
+const CTRL_LOCK: i32 = 3;
+const CTRL_LOGOUT: i32 = 4;
+const CTRL_AUDIO_MUTE: i32 = 5;
+const CTRL_MIC_MUTE: i32 = 6;
+const CTRL_CAMERA: i32 = 7;
+
+/// Build the control-menu rows from the current gate state. Toggles show a
+/// checkmark reflecting the live gate; lock/logout are plain items.
+fn control_entries(state: &State) -> Vec<tray::MenuNode> {
+    let item = |id: i32, label: &str, toggle: Option<bool>| tray::MenuNode {
+        id,
+        label: label.to_string(),
+        enabled: true,
+        visible: true,
+        separator: false,
+        has_submenu: false,
+        toggle,
+        children: Vec::new(),
+    };
+    let separator = || tray::MenuNode {
+        id: 0,
+        label: String::new(),
+        enabled: false,
+        visible: true,
+        separator: true,
+        has_submenu: false,
+        toggle: None,
+        children: Vec::new(),
+    };
+    let mut entries = vec![
+        item(
+            CTRL_SCREEN_CAPTURE,
+            "Screen capture",
+            Some(state.screen_capture_enabled),
+        ),
+        item(
+            CTRL_AUTOMATION,
+            "Automation",
+            Some(state.automation_enabled),
+        ),
+    ];
+    // Media-privacy rows, only when `shoestring-mediad` is reporting. The mute
+    // checkmarks reflect PipeWire's live state (a checked box = muted). Camera
+    // is a disabled, status-only row — there is no honest software off-switch.
+    if let Some(m) = state.media.filter(|_| state.cfg.show_media) {
+        entries.push(separator());
+        entries.push(item(CTRL_AUDIO_MUTE, "Mute output", Some(m.audio_muted)));
+        entries.push(item(CTRL_MIC_MUTE, "Mute microphone", Some(m.mic_muted)));
+        entries.push(tray::MenuNode {
+            id: CTRL_CAMERA,
+            label: if m.camera_active {
+                "Camera: in use".to_string()
+            } else {
+                "Camera: idle".to_string()
+            },
+            enabled: false,
+            visible: true,
+            separator: false,
+            has_submenu: false,
+            toggle: None,
+            children: Vec::new(),
+        });
+    }
+    entries.push(separator());
+    entries.push(item(CTRL_LOCK, "Lock screen", None));
+    entries.push(item(CTRL_LOGOUT, "Log out", None));
+    entries
+}
+
+/// Open the control menu as an `xdg_popup` anchored to the control applet.
+/// Mirrors [`open_tray_menu`] but uses synthetic entries and needs no tray.
+fn open_control_menu(state: &mut State, qh: &QueueHandle<State>) {
+    if let Some(m) = state.menu.take() {
+        m.destroy();
+    }
+    let Some((x, w)) = state.control_rect else {
+        return;
+    };
+    let bar_h = state.size.map(|(_, h)| h).unwrap_or(state.cfg.height) as i32;
+    let anchor_rect = (x, 0, w, bar_h);
+    let (Some(seat), Some(bar_layer)) = (state.seat.as_ref(), state.layer_surface.as_ref()) else {
+        return;
+    };
+    let m = menu::Menu::open(
+        &state.compositor,
+        &state.xdg_wm_base,
+        bar_layer,
+        state.viewporter.as_ref(),
+        qh,
+        control_entries(state),
+        usize::MAX, // sentinel tray_idx; control activation bypasses tray routing
+        anchor_rect,
+        state.cfg.position,
+        seat,
+        state.last_pointer_serial,
+        &state.font,
+        state.cfg.font_size,
+    );
+    tracing::debug!(?anchor_rect, "control menu opened");
+    state.menu = Some(m);
+    state.menu_is_control = true;
+    state.menu_dirty = true;
+}
+
+/// Apply a control-menu selection. The gate toggles flip the *current* state;
+/// the resulting `*_changed` IPC event updates our cached state + indicators.
+/// Errors are logged, not surfaced (the menu is already dismissing).
+fn apply_control_action(state: &mut State, id: i32) {
+    let result = match id {
+        CTRL_SCREEN_CAPTURE => ipc_client::set_screen_capture(!state.screen_capture_enabled),
+        CTRL_AUTOMATION => ipc_client::set_automation(!state.automation_enabled),
+        CTRL_LOCK => ipc_client::lock(),
+        CTRL_LOGOUT => ipc_client::quit(),
+        // Flip the live mute (not a cached toggle): mediad re-reports the real
+        // state, which updates the chip + checkmark via `media_changed`.
+        CTRL_AUDIO_MUTE => {
+            let cur = state.media.is_some_and(|m| m.audio_muted);
+            ipc_client::set_audio_mute(!cur)
+        }
+        CTRL_MIC_MUTE => {
+            let cur = state.media.is_some_and(|m| m.mic_muted);
+            ipc_client::set_mic_mute(!cur)
+        }
+        // Camera row is status-only (disabled) — never actionable.
+        _ => return,
+    };
+    if let Err(e) = result {
+        tracing::warn!(id, error = ?e, "control menu action failed");
     }
 }
 

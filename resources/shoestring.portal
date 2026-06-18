@@ -1,0 +1,15 @@
+# xdg-desktop-portal backend descriptor for shoestring-wm's own ScreenCast
+# implementation. The portal frontend reads *.portal files from
+# /usr/share/xdg-desktop-portal/portals/ and, when shoestring-wm-portals.conf
+# routes an interface to "shoestring" (the basename of this file), activates
+# the DBusName below to service it.
+#
+# Install to: /usr/share/xdg-desktop-portal/portals/shoestring.portal
+#
+# We implement ScreenCast and Screenshot here; everything else stays routed to
+# its existing backend (see shoestring-wm-portals.conf). With both interfaces
+# served natively the session no longer needs xdg-desktop-portal-wlr.
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.shoestring
+Interfaces=org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.Screenshot;
+UseIn=shoestring-wm

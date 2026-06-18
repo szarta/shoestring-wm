@@ -130,6 +130,12 @@ pub struct ShoestringWm {
     pub data_device_state: DataDeviceState,
     pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
+    /// wlr-virtual-pointer manager: lets clients (wlrctl, remote desktop)
+    /// emulate a physical pointer. Always-on and backend-agnostic; the per
+    /// resource event batching lives in [`crate::virtual_pointer`]. Held only
+    /// to keep the manager global registered for the WM's lifetime.
+    #[allow(dead_code)]
+    pub virtual_pointer: crate::virtual_pointer::VirtualPointerState,
     /// `zwp_linux_dmabuf_v1` delegate. The global is stood up lazily once the
     /// first GPU (udev backend) reports its render formats — see
     /// [`crate::backend::udev`]. Unlike the screencopy manager this is *not*
@@ -198,6 +204,13 @@ pub struct ShoestringWm {
     /// Held only to keep the global registered for the session's lifetime.
     #[allow(dead_code)]
     pub tablet_manager: smithay::wayland::tablet_manager::TabletManagerState,
+    /// `zwp_pointer_gestures_v1`: forwards libinput touchpad swipe/pinch/hold
+    /// gestures to clients via the seat's pointer. Always advertised; real
+    /// gesture events arrive only from the libinput (TTY) backend and are
+    /// routed in [`crate::input`]'s `Gesture*` handling. Held only to keep the
+    /// global registered for the session's lifetime.
+    #[allow(dead_code)]
+    pub pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
     /// `wp_presentation` global. Clients use it to request precise on-screen
     /// timestamps for the buffers they commit (video A/V sync, animation
     /// pacing). The udev/DRM backend fulfils them from hardware vblank
@@ -254,6 +267,12 @@ pub struct ShoestringWm {
     /// `Instant` of the last emitted live-capture event. `None` until the
     /// first capture. Keeps a high-FPS cast from flooding subscribers.
     pub last_screen_capture_event: Option<Instant>,
+    /// Last media-privacy snapshot reported by the `shoestring-mediad` monitor
+    /// (default-sink/source mute + camera-in-use). `None` until the monitor
+    /// first reports — the WM never authors this, it only caches PipeWire's
+    /// truth so the bar can render MUTE/MIC/CAM indicators. Updated via
+    /// `Request::ReportMedia`; mutation is delegated to the helper.
+    pub media: Option<shoestring_ipc::MediaState>,
 
     /// In-flight `Request::Screenshot` subprocesses, keyed by an
     /// opaque counter. Entries are removed once the child has exited
@@ -440,6 +459,14 @@ impl ShoestringWm {
             }),
             pending: Vec::new(),
         };
+        // wlr-virtual-pointer: advertise the manager (v2) unconditionally so
+        // pointer-injection clients (wlrctl, remote desktop) work out of the
+        // box, the way wlroots does. Unlike the WM's own IPC inject path, this
+        // is a standard client protocol and isn't behind the automation gate.
+        let virtual_pointer = crate::virtual_pointer::VirtualPointerState {
+            manager_global: dh
+                .create_global::<Self, _, _>(2, crate::virtual_pointer::VirtualPointerManagerData),
+        };
         // wlr-gamma-control: advertise the manager so night-light tools can
         // drive per-output gamma. Honored only for KMS outputs; binding it for
         // a non-udev output fails gracefully (see the handler). Version 1.
@@ -507,6 +534,11 @@ impl ShoestringWm {
         // unlike idle-inhibit); real tool events arrive only from the libinput
         // backend, but advertising costs nothing on winit.
         let tablet_manager = smithay::wayland::tablet_manager::TabletManagerState::new::<Self>(&dh);
+        // Touchpad multi-finger gestures (swipe/pinch/hold). Always-on global
+        // like the tablet/constraint managers; gesture events are emitted only
+        // by the libinput backend and forwarded to the pointer in input.rs.
+        let pointer_gestures =
+            smithay::wayland::pointer_gestures::PointerGesturesState::new::<Self>(&dh);
 
         let automation_enabled = config.general.automation_enabled;
 
@@ -570,6 +602,7 @@ impl ShoestringWm {
             data_device_state,
             output_management,
             screencopy,
+            virtual_pointer,
             dmabuf_state: DmabufState::new(),
             #[cfg(feature = "tty")]
             dmabuf_global: None,
@@ -585,6 +618,7 @@ impl ShoestringWm {
             pointer_constraints,
             relative_pointer,
             tablet_manager,
+            pointer_gestures,
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
             ipc: None,
@@ -595,6 +629,7 @@ impl ShoestringWm {
             automation_enabled,
             screen_capture_enabled,
             last_screen_capture_event: None,
+            media: None,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),
@@ -754,6 +789,36 @@ impl ShoestringWm {
         }
 
         None
+    }
+
+    /// True if an **Overlay**- or **Top**-layer surface sits under `pos`, above
+    /// the window stack. Such a click belongs to that layer surface (a tray
+    /// menu, the region picker), so focusing a window it merely overlaps would
+    /// wrongly steal the layer surface's keyboard focus — see the click-to-focus
+    /// path in [`crate::input`].
+    pub fn overlay_layer_under(&self, pos: Point<f64, Logical>) -> bool {
+        use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
+
+        let Some((output, geo)) = self.space.outputs().find_map(|o| {
+            self.space
+                .output_geometry(o)
+                .filter(|g| g.to_f64().contains(pos))
+                .map(|g| (o.clone(), g))
+        }) else {
+            return false;
+        };
+        let local = pos - geo.loc.to_f64();
+        let map = layer_map_for_output(&output);
+        for layer in [WlrLayer::Overlay, WlrLayer::Top] {
+            if let Some(ls) = map.layer_under(layer, local) {
+                let layer_loc = map.layer_geometry(ls).map(|g| g.loc).unwrap_or_default();
+                let inner = local - layer_loc.to_f64();
+                if ls.surface_under(inner, WindowSurfaceType::ALL).is_some() {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Re-evaluate the surface under the pointer at its *current* location and,
@@ -1343,6 +1408,16 @@ impl ShoestringWm {
                 frame.failed();
             }
         }
+    }
+
+    /// Cache a media-privacy snapshot reported by the `shoestring-mediad`
+    /// monitor and return whether it actually changed (so the caller can decide
+    /// to broadcast [`shoestring_ipc::Event::MediaChanged`]). The WM is a pure
+    /// cache here — it never authors mute state, only reflects PipeWire's truth.
+    pub fn set_media(&mut self, snapshot: shoestring_ipc::MediaState) -> bool {
+        let changed = self.media != Some(snapshot);
+        self.media = Some(snapshot);
+        changed
     }
 
     /// Record that a capture frame was just requested and, throttled to a few

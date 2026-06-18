@@ -143,14 +143,48 @@ Autostart and companion processes
 
 The WM spawns an autostart list once the wayland socket is up and
 before any user interaction. Configure it via ``[general].autostart``
-(see :doc:`configuration`); the default list is ``["shoestring-bar"]``
-so a fresh user gets the bar on first run. Each entry is split on
-whitespace (first token = executable, rest = args). Failures log a
-warning and don't block startup.
+(see :doc:`configuration`); the default list is ``["shoestring-bar",
+"shoestring-mediad"]`` so a fresh user gets the bar plus the
+media-privacy monitor on first run. Each entry is split on whitespace
+(first token = executable, rest = args). Failures log a warning and
+don't block startup.
 
 For one-off launches alongside the WM, ``--command CMD`` still spawns
 a single client once the compositor is ready — handy for ``shoestring-wm
 --command alacritty`` during nested winit development.
+
+Media privacy (``shoestring-mediad``)
+-------------------------------------
+
+``shoestring-mediad`` is the autostarted media-privacy monitor. It links
+PipeWire and reports three things to the WM, which the bar surfaces as
+**MUTE / MIC / CAM** chips (and rows in the control menu):
+
+- **MUTE** — the default audio *output* is muted. Click the control-menu
+  row, bind a key to ``toggle-audio-mute``, or run ``shoestring-ctl media
+  audio-mute on|off`` to toggle it. Real, authoritative control.
+- **MIC** — the microphone is *live* (unmuted). ``toggle-mic-mute`` /
+  ``shoestring-ctl media mic-mute on|off`` mute it. Honest caveat: this
+  stream-mutes the source so capturing apps get silence, but it does
+  **not** prevent a device open — the same guarantee as a hardware
+  mic-mute key.
+- **CAM** — a camera is *actively streaming*. **Status only**: there is no
+  software camera off-switch, by design. It detects cameras opened through
+  PipeWire (the camera portal, browsers/Electron); a raw ``/dev/video*``
+  open that bypasses PipeWire is not visible.
+
+The monitor always *reflects live state* — it reads the same default-sink/
+source mute that ``pavucontrol``, media keys, and ``wpctl`` change, so the
+chips stay accurate no matter who flips the mute. Mute *control* prefers
+``wpctl`` (from WirePlumber) for an authoritative result, falling back to a
+native PipeWire set when ``wpctl`` is absent. Where PipeWire (or the
+``shoestring-mediad`` binary) is missing, the monitor simply doesn't run
+and the bar shows no media chips — a graceful no-op. The whole group can be
+hidden with ``show_media = false`` in the bar config.
+
+These controls are reachable three ways, like the other privacy gates: the
+bar control menu, a keybind (``toggle-audio-mute`` / ``toggle-mic-mute``),
+and IPC (``shoestring-ctl media …``).
 
 Quitting
 --------
