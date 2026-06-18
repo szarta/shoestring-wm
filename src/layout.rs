@@ -11,7 +11,7 @@ use smithay::{
     desktop::{layer_map_for_output, Space, Window},
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
-    utils::{IsAlive, Logical, Rectangle},
+    utils::{IsAlive, Logical, Point, Rectangle},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,25 +108,30 @@ impl LayoutManager {
     }
 }
 
+/// True if `point` lies within `rect`, half-open on the right and bottom edges:
+/// those edges belong to the *next* output. This is what stops a point on the
+/// shared seam between two side-by-side outputs from matching both.
+fn rect_contains(rect: Rectangle<i32, Logical>, point: Point<i32, Logical>) -> bool {
+    point.x >= rect.loc.x
+        && point.x < rect.loc.x + rect.size.w
+        && point.y >= rect.loc.y
+        && point.y < rect.loc.y + rect.size.h
+}
+
 /// The output under the window's center, falling back to the first known
 /// output if the window sits outside every output.
 fn output_under<'a>(space: &'a Space<Window>, window: &Window) -> Option<&'a Output> {
     let center = space.element_location(window).map(|loc| {
         let geo = window.geometry();
-        (loc.x + geo.size.w / 2, loc.y + geo.size.h / 2)
+        Point::from((loc.x + geo.size.w / 2, loc.y + geo.size.h / 2))
     });
 
     center
-        .and_then(|(cx, cy)| {
+        .and_then(|center| {
             space.outputs().find(|o| {
                 space
                     .output_geometry(o)
-                    .map(|geo| {
-                        cx >= geo.loc.x
-                            && cx < geo.loc.x + geo.size.w
-                            && cy >= geo.loc.y
-                            && cy < geo.loc.y + geo.size.h
-                    })
+                    .map(|geo| rect_contains(geo, center))
                     .unwrap_or(false)
             })
         })
@@ -327,6 +332,135 @@ pub fn unset_fullscreen(space: &mut Space<Window>, layout: &mut LayoutManager, w
             let restore = meta.saved_rect.take().unwrap_or(current);
             meta.layout = LayoutState::Floating;
             apply_geometry(space, window, restore, LayoutState::Floating);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        /// A usable rect with non-negative, bounded sizes and a bounded origin,
+        /// so `loc + size` sums can't overflow `i32`. Covers the realistic
+        /// range of output/usable geometry (including degenerate 0-sized rects).
+        fn any_usable()(
+            x in -1_000_000i32..1_000_000,
+            y in -1_000_000i32..1_000_000,
+            w in 0i32..1_000_000,
+            h in 0i32..1_000_000,
+        ) -> Rectangle<i32, Logical> {
+            Rectangle::new((x, y).into(), (w, h).into())
+        }
+    }
+
+    proptest! {
+        /// TiledLeft and TiledRight must split the usable rect cleanly: same
+        /// height/top, contiguous at the seam (no gap, no overlap), and together
+        /// covering the full width edge-to-edge.
+        #[test]
+        fn tiled_left_right_partition_usable(usable in any_usable()) {
+            let left = tiled_rect(usable, LayoutState::TiledLeft).unwrap();
+            let right = tiled_rect(usable, LayoutState::TiledRight).unwrap();
+
+            // Both halves span the usable's full height, anchored at its top.
+            prop_assert_eq!(left.loc.y, usable.loc.y);
+            prop_assert_eq!(right.loc.y, usable.loc.y);
+            prop_assert_eq!(left.size.h, usable.size.h);
+            prop_assert_eq!(right.size.h, usable.size.h);
+
+            // Left starts at the usable's left edge.
+            prop_assert_eq!(left.loc.x, usable.loc.x);
+            // Contiguous: left's right edge is exactly right's left edge.
+            prop_assert_eq!(left.loc.x + left.size.w, right.loc.x);
+            // Right ends exactly at the usable's right edge.
+            prop_assert_eq!(right.loc.x + right.size.w, usable.loc.x + usable.size.w);
+            // Together they cover the whole width — no pixels lost or doubled.
+            prop_assert_eq!(left.size.w + right.size.w, usable.size.w);
+
+            // Neither half is negative-width.
+            prop_assert!(left.size.w >= 0);
+            prop_assert!(right.size.w >= 0);
+
+            // The split is even to within 1px, with the extra column going to
+            // the right half on odd widths (the documented tile-half behavior).
+            let diff = right.size.w - left.size.w;
+            prop_assert!(diff == 0 || diff == 1);
+        }
+
+        /// Maximized fills the usable rect exactly.
+        #[test]
+        fn maximized_equals_usable(usable in any_usable()) {
+            prop_assert_eq!(tiled_rect(usable, LayoutState::Maximized).unwrap(), usable);
+        }
+
+        /// Floating and Fullscreen don't derive from the usable rect.
+        #[test]
+        fn floating_and_fullscreen_have_no_tiled_rect(usable in any_usable()) {
+            prop_assert!(tiled_rect(usable, LayoutState::Floating).is_none());
+            prop_assert!(tiled_rect(usable, LayoutState::Fullscreen).is_none());
+        }
+
+        /// Every tile/maximize target stays inside the usable bounds.
+        #[test]
+        fn tiled_rects_stay_within_usable(usable in any_usable()) {
+            for target in [
+                LayoutState::TiledLeft,
+                LayoutState::TiledRight,
+                LayoutState::Maximized,
+            ] {
+                let r = tiled_rect(usable, target).unwrap();
+                prop_assert!(r.loc.x >= usable.loc.x);
+                prop_assert!(r.loc.y >= usable.loc.y);
+                prop_assert!(r.loc.x + r.size.w <= usable.loc.x + usable.size.w);
+                prop_assert!(r.loc.y + r.size.h <= usable.loc.y + usable.size.h);
+            }
+        }
+
+        /// Multi-output placement: side-by-side outputs that tile a region must
+        /// contain every interior point in exactly one output — `rect_contains`
+        /// being half-open means a point on a shared seam isn't claimed twice or
+        /// dropped (which would send `output_under` to the wrong monitor).
+        #[test]
+        fn tiled_outputs_contain_each_point_exactly_once(
+            widths in proptest::collection::vec(1i32..3000, 1..6),
+            h in 1i32..3000,
+            px_num in 0u32..100_000,
+            py_num in 0u32..100_000,
+        ) {
+            let mut rects = Vec::new();
+            let mut x = 0i32;
+            for w in &widths {
+                rects.push(Rectangle::new((x, 0).into(), (*w, h).into()));
+                x += *w;
+            }
+            let total_w = x;
+            // Map the random numbers into the tiled span [0, total_w) x [0, h).
+            let point: Point<i32, Logical> =
+                ((px_num as i32) % total_w, (py_num as i32) % h).into();
+
+            let count = rects.iter().filter(|r| rect_contains(**r, point)).count();
+            prop_assert_eq!(count, 1);
+        }
+
+        /// A point outside every output's span is contained by none (so
+        /// `output_under` falls back to the first output rather than mis-placing).
+        #[test]
+        fn point_outside_all_outputs_matches_none(
+            widths in proptest::collection::vec(1i32..3000, 1..6),
+            h in 1i32..3000,
+        ) {
+            let mut rects = Vec::new();
+            let mut x = 0i32;
+            for w in &widths {
+                rects.push(Rectangle::new((x, 0).into(), (*w, h).into()));
+                x += *w;
+            }
+            let total_w = x;
+            // Just past the right edge of the last output.
+            let point: Point<i32, Logical> = (total_w, 0).into();
+            prop_assert!(rects.iter().all(|r| !rect_contains(*r, point)));
         }
     }
 }

@@ -224,6 +224,8 @@ assets = [
 pam = "*"
 
 [dev-dependencies]
+# Randomized property tests over the layout tiling math (src/layout.rs tests).
+proptest = "1"
 # Used by tests/output_management.rs: speak the wlr-output-management
 # protocol as a Wayland client without requiring wlr-randr / kanshi installed.
 wayland-client = "0.31"
