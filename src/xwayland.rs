@@ -127,7 +127,11 @@ impl ShoestringWm {
     pub fn refresh_xwayland_cursor(&mut self) {
         let Some(wm) = self.xwm.as_mut() else { return };
         let elapsed = self.start_time.elapsed();
-        let Some(frame) = self.cursor.current_frame(1, elapsed).cloned() else {
+        let Some(frame) = self
+            .cursor
+            .current_frame(smithay::input::pointer::CursorIcon::Default, 1, elapsed)
+            .cloned()
+        else {
             return;
         };
         if let Err(e) = wm.set_cursor(

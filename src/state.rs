@@ -219,6 +219,15 @@ pub struct ShoestringWm {
     /// global registered for the session's lifetime.
     #[allow(dead_code)]
     pub pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
+    /// `wp_cursor_shape_v1`: lets clients name a cursor (a [`CursorIcon`])
+    /// instead of committing their own sprite. smithay translates a
+    /// `set_shape` into `SeatHandler::cursor_image(Named(..))`, which our
+    /// renderer rasterizes from the active xcursor theme — so themed cursors
+    /// stay consistent without client-side xcursor handling. Always-on
+    /// global; held only to keep it registered for the session's lifetime.
+    /// Dispatched through the blanket `delegate_dispatch2!`, not this field.
+    #[allow(dead_code)]
+    pub cursor_shape_manager: smithay::wayland::cursor_shape::CursorShapeManagerState,
     /// `wp_presentation` global. Clients use it to request precise on-screen
     /// timestamps for the buffers they commit (video A/V sync, animation
     /// pacing). The udev/DRM backend fulfils them from hardware vblank
@@ -548,6 +557,12 @@ impl ShoestringWm {
         // by the libinput backend and forwarded to the pointer in input.rs.
         let pointer_gestures =
             smithay::wayland::pointer_gestures::PointerGesturesState::new::<Self>(&dh);
+        // Server-side cursor naming. Pairs with the pointer/tablet seat: a
+        // client's `set_shape` becomes a `Named` cursor we draw from the
+        // theme (see [`crate::cursor`]). Always advertised — costs nothing
+        // when unused and lets toolkits drop client-side xcursor entirely.
+        let cursor_shape_manager =
+            smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Self>(&dh);
 
         let automation_enabled = config.general.automation_enabled;
 
@@ -629,6 +644,7 @@ impl ShoestringWm {
             relative_pointer,
             tablet_manager,
             pointer_gestures,
+            cursor_shape_manager,
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
             ipc: None,
@@ -1305,11 +1321,16 @@ impl ShoestringWm {
     /// nominal logical size — otherwise a 48px frame at output-scale 2 would
     /// render at 96 physical pixels.
     pub fn refresh_cursor_buffer(&mut self, scale: u32) {
-        if self.cursor.is_empty() {
-            return;
-        }
+        // Only the named-cursor path rasterizes a theme sprite. A client
+        // that committed its own cursor surface is drawn from its buffer in
+        // `drawing.rs`, and `Hidden` draws nothing — in both cases there is
+        // no theme frame to upload.
+        let icon = match &self.cursor_status {
+            smithay::input::pointer::CursorImageStatus::Named(icon) => *icon,
+            _ => return,
+        };
         let elapsed = self.start_time.elapsed();
-        let Some(frame) = self.cursor.current_frame(scale, elapsed).cloned() else {
+        let Some(frame) = self.cursor.current_frame(icon, scale, elapsed).cloned() else {
             return;
         };
         let same_as_last = self

@@ -139,7 +139,11 @@ Implemented today:
   TTY/DRM backend the timestamp comes straight from the hardware vblank
   (flagged ``HwClock``/``HwCompletion``); the nested winit backend reports
   it best-effort at submit time against the same monotonic clock.
-- xcursor sprite rendering at the pointer.
+- xcursor sprite rendering at the pointer, with server-side cursor naming
+  (``wp_cursor_shape_v1``): clients (and tablet tools) name a cursor —
+  ``text``, ``pointer``, ``grabbing``, the resize edges — and the WM draws
+  the matching sprite from the active xcursor theme, so the look stays
+  consistent without each app shipping its own cursor pixels.
 - Configurable XKB keyboard layouts (``[general].xkb_layout`` and
   friends), with multiple layouts and a ``cycle-layout`` action
   (``Super+Space`` by default) to switch between them at runtime.
