@@ -208,9 +208,13 @@ pub fn init_winit(
                             .into_iter()
                             .map(crate::drawing::OutputRenderElements::Space),
                     );
+                    let render_start = std::time::Instant::now();
                     let result = damage_tracker
                         .render_output(renderer, &mut framebuffer, 0, &elements, clear)
                         .unwrap();
+                    state
+                        .metrics
+                        .record_frame(render_start.elapsed().as_micros() as u64);
                     result.states
                 };
                 backend.submit(Some(&[damage])).unwrap();

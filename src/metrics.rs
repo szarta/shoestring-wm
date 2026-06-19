@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use shoestring_ipc::MetricValue;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -102,11 +102,24 @@ fn decrement(counts: &mut HashMap<String, u32>, name: &str) {
     }
 }
 
+/// The counters seeded to zero at construction so they appear in every
+/// snapshot from the first sample, even before their event fires. Each is
+/// bumped at its event site via [`Metrics::incr_counter`]; none is touched
+/// by the per-sample gauge refresh, so the accumulated value survives.
+const SEEDED_COUNTERS: &[&str] = &[
+    "render.frames_total",
+    "input.events_total",
+    "ipc.requests_total",
+    "ipc.subscribers_dropped",
+];
+
 /// Registry of the latest sampled metrics plus the leak detector's state.
 #[derive(Debug, Default)]
 pub struct Metrics {
-    /// Latest reading per dotted metric name. Replaced wholesale each
-    /// sample for gauges; counters would accumulate (none in v1).
+    /// Latest reading per dotted metric name. Gauges are replaced wholesale
+    /// each sample; counters live here too but are only ever incremented in
+    /// place (the per-sample refresh leaves non-`client.*` keys untouched),
+    /// so they accumulate monotonically since WM start.
     values: BTreeMap<String, MetricValue>,
     /// Recent `process.open_fds` readings, newest at the back.
     fd_history: VecDeque<u64>,
@@ -118,16 +131,71 @@ pub struct Metrics {
     /// Per-client live `wl_surface` census — the attribution that turns a
     /// process-wide fd-growth warning into "client X holds N surfaces".
     surfaces: ResourceCensus<ObjectId>,
+    /// Wall-clock instant of the previous rendered frame, for deriving the
+    /// instantaneous `render.fps` gauge from the inter-frame interval.
+    last_frame_at: Option<Instant>,
 }
 
 impl Metrics {
     pub fn new() -> Self {
-        Self::default()
+        let mut m = Self::default();
+        for name in SEEDED_COUNTERS {
+            m.values
+                .insert((*name).to_string(), MetricValue::Counter { value: 0 });
+        }
+        m
     }
 
     fn set_gauge(&mut self, name: &str, value: i64) {
         self.values
             .insert(name.to_string(), MetricValue::Gauge { value });
+    }
+
+    /// Add `by` to a monotonic counter, creating it at zero on first touch.
+    /// A name already holding a gauge is left alone (shouldn't happen — the
+    /// gauge/counter split is fixed per name).
+    fn incr_counter(&mut self, name: &str, by: u64) {
+        match self
+            .values
+            .entry(name.to_string())
+            .or_insert(MetricValue::Counter { value: 0 })
+        {
+            MetricValue::Counter { value } => *value = value.saturating_add(by),
+            MetricValue::Gauge { .. } => {}
+        }
+    }
+
+    /// Record one rendered frame: bump `render.frames_total`, set
+    /// `render.last_frame_us` to the render call's wall-clock duration, and
+    /// derive `render.fps` from the interval since the previous frame.
+    /// Called at each backend's render call site (winit + udev).
+    pub fn record_frame(&mut self, render_us: u64) {
+        self.incr_counter("render.frames_total", 1);
+        self.set_gauge("render.last_frame_us", render_us as i64);
+        let now = Instant::now();
+        if let Some(prev) = self.last_frame_at {
+            let dt_us = now.duration_since(prev).as_micros() as u64;
+            if let Some(fps) = 1_000_000u64.checked_div(dt_us) {
+                self.set_gauge("render.fps", fps as i64);
+            }
+        }
+        self.last_frame_at = Some(now);
+    }
+
+    /// Bump `input.events_total` — one libinput/winit event dispatched.
+    pub fn record_input_event(&mut self) {
+        self.incr_counter("input.events_total", 1);
+    }
+
+    /// Bump `ipc.requests_total` — one well-formed IPC request parsed.
+    pub fn record_ipc_request(&mut self) {
+        self.incr_counter("ipc.requests_total", 1);
+    }
+
+    /// Add to `ipc.subscribers_dropped` — stream subscribers we hung up on
+    /// because a write failed (backpressure), as opposed to clean EOF.
+    pub fn record_subscribers_dropped(&mut self, n: u64) {
+        self.incr_counter("ipc.subscribers_dropped", n);
     }
 
     /// Record a client's newly created `wl_surface`. `owner` is the
@@ -599,6 +667,73 @@ mod tests {
         assert_eq!(sanitize_segment("a.b c/d"), "a_b_c_d");
         assert_eq!(sanitize_segment("keep-_09"), "keep-_09");
         assert_eq!(sanitize_segment(""), "_");
+    }
+
+    #[test]
+    fn counters_seed_at_zero_and_survive_gauge_refresh() {
+        let mut m = Metrics::new();
+        // All seeded counters present at zero from construction.
+        for name in SEEDED_COUNTERS {
+            assert_eq!(
+                m.values.get(*name),
+                Some(&MetricValue::Counter { value: 0 })
+            );
+        }
+        // A gauge refresh (clears `client.*`, rewrites named gauges) must not
+        // disturb the counters.
+        m.incr_counter("render.frames_total", 3);
+        m.refresh_client_gauges();
+        assert_eq!(
+            m.values.get("render.frames_total"),
+            Some(&MetricValue::Counter { value: 3 })
+        );
+    }
+
+    #[test]
+    fn incr_counter_accumulates_monotonically() {
+        let mut m = Metrics::new();
+        m.record_input_event();
+        m.record_input_event();
+        m.record_ipc_request();
+        m.record_subscribers_dropped(2);
+        assert_eq!(
+            m.values.get("input.events_total"),
+            Some(&MetricValue::Counter { value: 2 })
+        );
+        assert_eq!(
+            m.values.get("ipc.requests_total"),
+            Some(&MetricValue::Counter { value: 1 })
+        );
+        assert_eq!(
+            m.values.get("ipc.subscribers_dropped"),
+            Some(&MetricValue::Counter { value: 2 })
+        );
+    }
+
+    #[test]
+    fn record_frame_counts_and_sets_last_frame_us() {
+        let mut m = Metrics::new();
+        m.record_frame(1500);
+        assert_eq!(
+            m.values.get("render.frames_total"),
+            Some(&MetricValue::Counter { value: 1 })
+        );
+        assert_eq!(
+            m.values.get("render.last_frame_us"),
+            Some(&MetricValue::Gauge { value: 1500 })
+        );
+        // First frame has no predecessor, so no FPS yet; the second frame
+        // derives one from the interval.
+        assert!(!m.values.contains_key("render.fps"));
+        m.record_frame(1500);
+        assert_eq!(
+            m.values.get("render.frames_total"),
+            Some(&MetricValue::Counter { value: 2 })
+        );
+        assert!(matches!(
+            m.values.get("render.fps"),
+            Some(MetricValue::Gauge { .. })
+        ));
     }
 
     #[test]

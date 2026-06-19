@@ -1526,10 +1526,12 @@ impl ShoestringWm {
         } else {
             [0.1, 0.1, 0.1, 1.0]
         };
+        let render_start = std::time::Instant::now();
         let result =
             surface
                 .drm_output
                 .render_frame(&mut renderer, &elements, clear, FrameFlags::DEFAULT);
+        let frame_us = render_start.elapsed().as_micros() as u64;
 
         let (rendered, render_states) = match result {
             Ok(frame) => (!frame.is_empty, frame.states),
@@ -1597,6 +1599,14 @@ impl ShoestringWm {
                     });
                 }
             }
+        }
+
+        // Count it only when a frame was actually drawn (damage present), so
+        // `render.fps` tracks real presented frames rather than empty polls.
+        // The udev/renderer borrows above have dropped by here, freeing
+        // `&mut self.metrics`.
+        if rendered {
+            self.metrics.record_frame(frame_us);
         }
 
         // Keep wp_fractional_scale clients on this output in sync with its

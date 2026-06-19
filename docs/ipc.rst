@@ -356,7 +356,7 @@ The server replies with a single JSON object tagged by ``type``:
     A self-describing tagged value: ``{"kind": "gauge", "value": <i64>}``
     for an instantaneous reading (open fds, RSS) that can rise or fall, or
     ``{"kind": "counter", "value": <u64>}`` for a monotonic count since WM
-    start. v1 emits these gauges:
+    start. The WM emits these gauges:
 
     .. list-table::
        :header-rows: 1
@@ -392,6 +392,33 @@ The server replies with a single JSON object tagged by ``type``:
            least one surface and vanishes when its last surface is
            destroyed. On platforms without ``/proc`` the name degrades to
            ``pid-<n>``.
+       * - ``render.last_frame_us``
+         - Wall-clock microseconds the most recent frame's render call took
+           (winit ``render_output`` / udev ``render_frame``).
+       * - ``render.fps``
+         - Instantaneous frames per second, derived from the interval
+           between the last two rendered frames. Appears after the second
+           frame.
+
+    …and these counters, monotonic since WM start (all seeded at ``0`` so
+    they appear from the first sample):
+
+    .. list-table::
+       :header-rows: 1
+       :widths: 30 70
+
+       * - Name
+         - Meaning
+       * - ``render.frames_total``
+         - Frames actually rendered (damage present) across all outputs.
+       * - ``input.events_total``
+         - Input events dispatched (keyboard, pointer, touch, tablet,
+           device hotplug).
+       * - ``ipc.requests_total``
+         - Well-formed IPC requests parsed and handled.
+       * - ``ipc.subscribers_dropped``
+         - Stream subscribers hung up on after a failed write
+           (backpressure), as opposed to a clean disconnect.
 
     The WM warns in its log when ``process.open_fds`` crosses
     ``[diagnostics].fd_warn_fraction`` of ``process.fd_limit`` or climbs

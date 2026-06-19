@@ -611,6 +611,7 @@ impl ShoestringWm {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        self.metrics.record_input_event();
         // Any real input is "activity" for idle purposes; device hotplug is
         // not. Mirrors the conventional compositor behaviour (cf. niri).
         if !matches!(

@@ -289,6 +289,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             // Extra request on a connection that already replied. Hang up.
             return true;
         }
+        state.metrics.record_ipc_request();
 
         match request {
             Request::Workspaces => {
@@ -1130,9 +1131,11 @@ impl ShoestringWm {
                 to_drop.push(id);
             }
         }
+        let dropped = to_drop.len() as u64;
         for id in to_drop {
             self.drop_ipc_client(id);
         }
+        self.metrics.record_subscribers_dropped(dropped);
     }
 
     /// Push the current metrics snapshot to every `metrics` subscriber
@@ -1187,9 +1190,11 @@ impl ShoestringWm {
                 sub.last_push = Some(now);
             }
         }
+        let dropped = to_drop.len() as u64;
         for id in to_drop {
             self.drop_ipc_client(id);
         }
+        self.metrics.record_subscribers_dropped(dropped);
     }
 
     pub(crate) fn drop_ipc_client(&mut self, id: ClientId) {
