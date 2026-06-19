@@ -1,37 +1,6 @@
-#![allow(irrefutable_let_patterns)]
-
-mod backend;
-mod binds;
-mod config_watcher;
-mod confirm;
-mod cursor;
-mod drawing;
-mod foreign_toplevel_mgmt;
-#[cfg(feature = "tty")]
-mod gamma_control;
-mod grabs;
-mod handlers;
-mod inject;
-mod input;
-// libinput device tuning — only the udev/TTY backend has real input devices.
-#[cfg(feature = "tty")]
-mod input_config;
-mod ipc;
-mod layout;
-mod metrics;
-mod output_management;
-mod picker;
-mod presentation;
-mod remote_command;
-mod remote_screenshot;
-mod scale;
-mod screencopy;
-mod state;
-mod virtual_pointer;
-mod window_ext;
-mod window_rules;
-mod workspace;
-mod xwayland;
+//! The `shoestring-wm` binary: CLI parsing, tracing/SIGCHLD/systemd glue, and
+//! the backend-selection startup sequence. Everything else lives in the
+//! [`shoestring_wm`] library crate (see `src/lib.rs`).
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -47,7 +16,8 @@ use smithay::reexports::{
 };
 use tracing_subscriber::EnvFilter;
 
-use crate::state::ShoestringWm;
+use shoestring_wm::state::ShoestringWm;
+use shoestring_wm::{backend, binds, import_systemd_env, metrics};
 
 /// Write end of the SIGCHLD self-pipe. The async-signal-safe reaper
 /// handler `write(2)`s one `(pid, raw_status)` record per reaped child
@@ -471,19 +441,6 @@ fn register_reaper_drain(handle: &LoopHandle<'static, ShoestringWm>, read_fd: Ra
         })
         .map_err(|e| anyhow::anyhow!("insert reaper drain source: {e}"))?;
     Ok(())
-}
-
-fn import_systemd_env(vars: &[&str]) {
-    match std::process::Command::new("systemctl")
-        .arg("--user")
-        .arg("import-environment")
-        .args(vars)
-        .status()
-    {
-        Ok(s) if s.success() => {}
-        Ok(s) => tracing::warn!(status = %s, "systemctl import-environment exited non-zero"),
-        Err(e) => tracing::warn!(error = %e, "systemctl import-environment failed"),
-    }
 }
 
 /// Signal readiness to systemd via the `sd_notify` protocol (`READY=1`).

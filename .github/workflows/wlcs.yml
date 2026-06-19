@@ -1,0 +1,70 @@
+name: WLCS
+
+# Wayland Conformance Test Suite. Builds the cdylib WLCS plugin
+# (crates/wlcs-shoestring, excluded from the workspace) and runs the full suite
+# against it, gating on the tracked xfail skip-list (tests/wlcs/run-wlcs.sh).
+#
+# MANUAL-TRIGGER ONLY for now (see todo #87). The skip-list IS seeded
+# (2026-06-19: ~432/1225 pass, 792 anvil-verified xfails, 0 our-side bugs) and
+# check-results gates against it + a flaky-list. What blocks a push/PR gate is
+# NOT the skip-list anymore but harness frame-pacing nondeterminism: a broad
+# LOAD/timing-dependent band of layer-shell/region/pointer-constraints/subsurface
+# tests flips pass<->fail run-to-run (membership shifts, so it can't be fully
+# flaky-listed). Under that, a blocking gate would intermittently red-fail on
+# correct code. Flip the `on:` block below to push/pull_request ONLY after the
+# harness-determinism follow-up lands and a gate run is stable across repeats:
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin WLCS: it adds tests over time, and the xfail skip-list is only stable
+  # against a fixed suite. Bump deliberately (and re-seed) rather than tracking
+  # a moving branch.
+  WLCS_REF: v1.8.1
+
+jobs:
+  wlcs:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # WLCS build-deps (from its debian/control) plus a Rust toolchain for the
+      # plugin. libwayland-dev is for the C++ suite; the plugin itself dlopens
+      # libwayland at runtime and needs no -dev package.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config cmake \
+            libwayland-dev libboost-dev \
+            libgtest-dev libgmock-dev \
+            python3
+
+      - name: Build & install WLCS ${{ env.WLCS_REF }}
+        run: |
+          git clone --depth 1 --branch "$WLCS_REF" \
+            https://github.com/canonical/wlcs.git /tmp/wlcs
+          cmake -S /tmp/wlcs -B /tmp/wlcs/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/wlcs/build -j"$(nproc)"
+          sudo cmake --install /tmp/wlcs/build
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The plugin is its own (excluded) cargo workspace, so cache it under its
+      # manifest dir.
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/wlcs-shoestring
+
+      - name: Build WLCS plugin
+        run: cargo build --release --manifest-path crates/wlcs-shoestring/Cargo.toml
+
+      - name: Run WLCS (xfail-gated)
+        run: tests/wlcs/run-wlcs.sh crates/wlcs-shoestring/target/release/libwlcs_shoestring.so

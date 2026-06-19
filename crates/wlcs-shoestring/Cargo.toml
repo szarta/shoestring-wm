@@ -1,0 +1,44 @@
+# WLCS (Wayland Conformance Test Suite) integration plugin for shoestring-wm.
+#
+# Built as a cdylib (`libwlcs_shoestring.so`) that the `wlcs` test runner
+# dlopen()s. It constructs `ShoestringWm` headless (no listening socket, smithay
+# DummyRenderer) on a worker thread and drives it as a Wayland server while WLCS
+# acts as the client. Mirrors smithay's `wlcs_anvil`. Kept out of the workspace
+# default-members (see the root Cargo.toml) so plain `cargo build` skips it.
+# Excluded from the parent workspace (see root Cargo.toml), so it can't inherit
+# `workspace.package` fields — values are spelled out here.
+[package]
+name = "wlcs-shoestring"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/barrendo/shoestring-wm"
+description = "WLCS conformance-test plugin for shoestring-wm."
+publish = false
+
+[lib]
+# WLCS expects the integration symbol in a library named `libwlcs_<name>.so`.
+name = "wlcs_shoestring"
+crate-type = ["cdylib"]
+
+[dependencies]
+# default-features = false → no winit/udev backend; `gl` re-enables
+# smithay/renderer_gl so the (unused-here) screencopy capture helper still
+# compiles. The compositor renders headless via DummyRenderer at runtime.
+shoestring-wm = { path = "../..", default-features = false, features = ["gl"] }
+shoestring-config = { path = "../shoestring-config" }
+wlcs = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# dlopen: bind libwayland-client at runtime (it's always present — WLCS itself
+# links it) rather than statically, so building the plugin needs no libwayland
+# *-dev* package and no pkg-config. The `wlcs` runner crate only uses wl_display
+# / wl_proxy as opaque types, so it is unaffected; our own FFI calls go through
+# `wayland_client_handle()` (see lib.rs).
+wayland-sys = { version = "0.31", features = ["client", "server", "dlopen"] }
+libc = "0.2"
+
+[dependencies.smithay]
+git = "https://github.com/Smithay/smithay.git"
+rev = "95a8e45004f519f62f3490f2602c4082a7af9bf8"
+default-features = false
+features = ["wayland_frontend", "desktop", "renderer_test"]

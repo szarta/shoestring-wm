@@ -372,11 +372,37 @@ pub struct ShoestringWm {
 }
 
 impl ShoestringWm {
+    /// Construct the full session compositor: opens a Wayland listening socket
+    /// so external clients can connect. This is the path `main` takes for both
+    /// real backends.
     pub fn new(
         event_loop: &mut EventLoop<'static, Self>,
         display: Display<Self>,
         config: Config,
         config_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::new_inner(event_loop, display, config, config_path, true)
+    }
+
+    /// Construct the compositor for the WLCS conformance harness: identical
+    /// global/state setup, but **without** a listening socket. WLCS injects its
+    /// clients directly via [`DisplayHandle::insert_client`] over socketpairs,
+    /// so a public socket would be unused (and racy in CI). IPC/metrics/Xwayland
+    /// are not started here — those are `main`'s job, not the constructor's.
+    pub fn new_headless(
+        event_loop: &mut EventLoop<'static, Self>,
+        display: Display<Self>,
+        config: Config,
+    ) -> Self {
+        Self::new_inner(event_loop, display, config, None, false)
+    }
+
+    fn new_inner(
+        event_loop: &mut EventLoop<'static, Self>,
+        display: Display<Self>,
+        config: Config,
+        config_path: Option<std::path::PathBuf>,
+        open_socket: bool,
     ) -> Self {
         let dh = display.handle();
 
@@ -533,7 +559,11 @@ impl ShoestringWm {
         let popups = PopupManager::default();
         let workspaces = build_workspace_manager(&config.workspaces);
 
-        let socket_name = Self::init_wayland_listener(display, event_loop);
+        // Headless (WLCS) construction skips the listening socket; clients are
+        // injected directly. Give the field a recognizable placeholder so any
+        // accidental use surfaces obviously rather than as an empty string.
+        let socket_name = Self::init_wayland_listener(display, event_loop, open_socket)
+            .unwrap_or_else(|| OsString::from("wlcs-headless"));
         let loop_signal = event_loop.get_signal();
         let loop_handle = event_loop.handle();
 
@@ -635,38 +665,62 @@ impl ShoestringWm {
         let _ = self.note_screenshot_reaped(pid, status) || self.note_command_reaped(pid, status);
     }
 
+    /// Register the display dispatch source, and — when `open_socket` is set —
+    /// a Wayland listening socket. Returns the socket name when one was opened
+    /// (`None` in the headless/WLCS path, which injects clients directly). The
+    /// display `Generic` source is always registered; only the listener is
+    /// conditional.
     fn init_wayland_listener(
         display: Display<Self>,
         event_loop: &mut EventLoop<'static, Self>,
-    ) -> OsString {
-        let listening_socket = ListeningSocketSource::new_auto().unwrap();
-        let socket_name = listening_socket.socket_name().to_os_string();
+        open_socket: bool,
+    ) -> Option<OsString> {
         let loop_handle = event_loop.handle();
 
-        loop_handle
-            .insert_source(listening_socket, move |client_stream, _, state| {
-                if let Err(e) = state
-                    .display_handle
-                    .insert_client(client_stream, Arc::new(ClientState::default()))
-                {
-                    tracing::warn!("failed to insert wayland client: {e}");
-                }
-            })
-            .expect("failed to insert wayland listening socket");
+        let socket_name = if open_socket {
+            let listening_socket = ListeningSocketSource::new_auto().unwrap();
+            let name = listening_socket.socket_name().to_os_string();
+            loop_handle
+                .insert_source(listening_socket, move |client_stream, _, state| {
+                    if let Err(e) = state
+                        .display_handle
+                        .insert_client(client_stream, Arc::new(ClientState::default()))
+                    {
+                        tracing::warn!("failed to insert wayland client: {e}");
+                    }
+                })
+                .expect("failed to insert wayland listening socket");
+            Some(name)
+        } else {
+            None
+        };
 
         loop_handle
             .insert_source(
                 Generic::new(display, Interest::READ, Mode::Level),
-                |_, display, state| {
+                move |_, display, state| {
                     // SAFETY: we never drop the display while the source is registered.
                     unsafe {
                         let d = display.get_mut();
                         if let Err(e) = d.dispatch_clients(state) {
                             tracing::error!("dispatch_clients error: {e}");
                         }
-                        // Flush eagerly so clients receive replies even when no
-                        // redraw is firing (e.g. nested winit window not visible).
-                        let _ = d.flush_clients();
+                        // Real sessions flush eagerly so clients receive replies even
+                        // when no redraw is firing (e.g. nested winit not visible).
+                        //
+                        // The headless WLCS harness (open_socket == false) must NOT:
+                        // eager-flushing here sends a client's `wl_display.sync` reply
+                        // the instant the sync request is dispatched — before a pending
+                        // fake-input `WlcsEvent` (a separate calloop source) has been
+                        // applied. WLCS injects input then roundtrips to observe it, so
+                        // the premature reply makes the roundtrip see stale pointer
+                        // focus and the assertion fails (often flakily). Deferring to
+                        // the harness loop's single end-of-iteration `flush_clients`
+                        // — exactly what smithay's `wlcs_anvil` does — keeps injected
+                        // input ordered ahead of the sync that observes it.
+                        if open_socket {
+                            let _ = d.flush_clients();
+                        }
                     }
                     Ok(PostAction::Continue)
                 },

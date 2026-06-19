@@ -29,7 +29,7 @@ use crate::{
 
 pub struct PendingPicker {
     pub client_id: ClientId,
-    pub client: Rc<RefCell<Client>>,
+    pub(crate) client: Rc<RefCell<Client>>,
     /// Keyboard focus at the moment the picker armed. Restored when the
     /// picker resolves so the previously focused surface keeps receiving
     /// input — without this, any key the user was holding (notably the
@@ -43,7 +43,7 @@ impl ShoestringWm {
     /// the caller writes the error to its own client. The supplied client
     /// is held until [`Self::finish_picker`] (or a connection drop) resolves
     /// it.
-    pub fn start_picker(
+    pub(crate) fn start_picker(
         &mut self,
         client_id: ClientId,
         client: Rc<RefCell<Client>>,

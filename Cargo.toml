@@ -15,6 +15,13 @@ members = [
     "crates/xdg-desktop-portal-shoestring",
     "crates/shoestring-mediad",
 ]
+# `wlcs-shoestring` is a cdylib WLCS test plugin that pulls a second smithay
+# instantiation (renderer_test feature) — expensive and never wanted by a plain
+# `cargo build`, `cargo test`, or the `--workspace` clippy/release jobs. Exclude
+# it from the workspace so only the dedicated WLCS CI job builds it, via
+# `cargo build --manifest-path crates/wlcs-shoestring/Cargo.toml`. It still
+# path-depends back on the workspace crates; cargo gives it its own lockfile.
+exclude = ["crates/wlcs-shoestring"]
 
 [workspace.package]
 version = "0.4.0"
@@ -35,12 +42,22 @@ license.workspace = true
 repository.workspace = true
 description = "A lightweight Rust Wayland window manager."
 
+[lib]
+name = "shoestring_wm"
+path = "src/lib.rs"
+
 [[bin]]
 name = "shoestring-wm"
 path = "src/main.rs"
 
 [features]
 default = ["winit", "tty"]
+# Marker that a real GLES renderer is compiled in. Both real backends pull
+# `smithay/renderer_gl` already (winit transitively via backend_winit, tty
+# explicitly); this exposed feature lets a backend-less consumer — the WLCS
+# headless harness, which renders with smithay's DummyRenderer — still request
+# the `gles` module so GL-only code (the screencopy capture helper) compiles.
+gl = ["smithay/renderer_gl"]
 winit = ["smithay/backend_winit"]
 tty = [
     "smithay/backend_libinput",

@@ -29,7 +29,7 @@ use smithay::reexports::calloop::{
 use crate::state::ShoestringWm;
 
 pub struct Pending {
-    pub client: Rc<RefCell<crate::ipc::Client>>,
+    pub(crate) client: Rc<RefCell<crate::ipc::Client>>,
     pub client_id: crate::ipc::ClientId,
     /// Kept solely so a timeout can `kill()` it; we never `wait()` it (the
     /// global SIGCHLD reaper does that — see `main::install_sigchld_autoreap`).
@@ -71,7 +71,7 @@ impl ShoestringWm {
     /// Kick off the child and register the deferred-response machinery.
     /// On spawn failure the caller is expected to reply with
     /// `Response::Error` directly — no `Pending` is recorded.
-    pub fn spawn_remote_command(
+    pub(crate) fn spawn_remote_command(
         &mut self,
         client_id: crate::ipc::ClientId,
         client: Rc<RefCell<crate::ipc::Client>>,
