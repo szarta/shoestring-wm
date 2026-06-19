@@ -4,15 +4,23 @@
 #
 # Usage: tests/wlcs/run-wlcs.sh <path-to-libwlcs_shoestring.so>
 #
-# Each test runs in its OWN `wlcs` process under a timeout, in parallel. This is
-# deliberate: many tests for features we don't implement block on a WLCS
-# internal wait, and running the whole suite in one process serializes those
-# multi-second waits into an effective hang. Per-test isolation bounds each
-# failure and lets independent tests overlap.
+# Each test runs in its OWN `wlcs` process under a timeout. Per-test isolation
+# bounds each failure (a hanging test can't take the suite down) — kept even
+# though the old multi-second hangs are gone since the eager-flush (task 146)
+# and layer frame-callback (task 133) fixes; a full serial run is now ~55s with
+# zero timeouts.
+#
+# Runs SERIALLY by default (WLCS_JOBS=1). Parallelism (the old nproc*4 default)
+# made the suite non-deterministic run-to-run: each test spawns its own wlcs
+# process + compositor thread, and CPU contention reshuffled timing enough to
+# flip ~5-9 timing-sensitive tests pass<->fail between runs (task 155), which a
+# CI gate (check-results.py vs the skip-list) reads as phantom regressions.
+# Serial trades a faster wall-clock for a stable verdict — the right call for a
+# gate. Override with WLCS_JOBS=N to parallelise locally (accepts the variance).
 #
 # The `wlcs` runner must be on $PATH (or set $WLCS). Tunables:
 #   $WLCS_TIMEOUT  per-test timeout seconds (default 20)
-#   $WLCS_JOBS     parallel jobs (default: nproc*4 — failing tests mostly sleep)
+#   $WLCS_JOBS     concurrent jobs (default: 1 = serial/deterministic)
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +35,7 @@ fi
 plugin="$(cd "$(dirname "$plugin")" && pwd)/$(basename "$plugin")"   # absolutize
 
 timeout_s="${WLCS_TIMEOUT:-20}"
-jobs="${WLCS_JOBS:-$(( $(nproc) * 4 ))}"
+jobs="${WLCS_JOBS:-1}"
 results="${WLCS_RESULTS:-$here/results.txt}"
 
 # Enumerate every (non-DISABLED) full test name from gtest's listing. A line
@@ -39,7 +47,8 @@ tests="$(mktemp)"
   /^[[:space:]]/  { name=$1; sub(/#.*/,"",name); gsub(/[[:space:]]/,"",name);
                     if (name!="" && name !~ /DISABLED_/) print suite name }
 ' > "$tests"
-echo "running $(wc -l < "$tests") WLCS tests (timeout ${timeout_s}s, ${jobs} parallel)…"
+mode=$([ "$jobs" -eq 1 ] && echo "serial" || echo "${jobs}-way parallel")
+echo "running $(wc -l < "$tests") WLCS tests (timeout ${timeout_s}s, ${mode})…"
 
 run_one() {
     local name="$1"
