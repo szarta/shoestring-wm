@@ -563,6 +563,31 @@ impl ShoestringWm {
         // when unused and lets toolkits drop client-side xcursor entirely.
         let cursor_shape_manager =
             smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Self>(&dh);
+        // Input-method support (CJK and other composed input via fcitx5/ibus).
+        // Three cooperating globals form one subsystem:
+        //   - zwp_text_input_v3: the application/toolkit side that wants text.
+        //   - zwp_input_method_v2: the IME side that composes and commits it.
+        //   - zwp_virtual_keyboard_v1: the IME re-injects keystrokes it doesn't
+        //     consume (latin passthrough); without it fcitx5's "off" state eats
+        //     keys, so the IME is only half-usable. (This is also task 116's
+        //     protocol — an on-screen keyboard is just another vk client.)
+        // smithay bridges text-input <-> input-method automatically on keyboard
+        // focus (its `KeyboardTarget for WlSurface`) and installs the IME
+        // keyboard grab; our keybind filter runs *before* that grab (see
+        // `KeyboardHandle::input`), so Super-binds keep working while an IME is
+        // active. Candidate popups ride the normal window-popup render path.
+        // The manager states are inert after construction — the live handles
+        // hang off the seat's user_data and the globals stay registered for the
+        // display's lifetime — so, like anvil, we don't retain them. Allow every
+        // client: an IME is an ordinary unprivileged process.
+        smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
+        smithay::wayland::input_method::InputMethodManagerState::new::<Self, _>(&dh, |_client| {
+            true
+        });
+        smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<Self, _>(
+            &dh,
+            |_client| true,
+        );
 
         let automation_enabled = config.general.automation_enabled;
 

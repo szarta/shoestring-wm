@@ -133,6 +133,13 @@ Implemented today:
   the focused client through the pointer, so apps (browsers, image
   viewers) can act on them. Always advertised; gesture events arrive only
   from the libinput (TTY) backend.
+- Input methods for CJK and other composed text (``zwp_text_input_v3`` +
+  ``zwp_input_method_v2`` + ``zwp_virtual_keyboard_v1``): IMEs such as
+  fcitx5 and ibus work out of the box. The compositor bridges an
+  application's text-input to the running input method on keyboard focus,
+  routes preedit/commit strings back, and renders the candidate popup
+  beside the text cursor. The IME's keyboard grab sits *below* the WM
+  keybindings, so ``Super``-shortcuts keep working while you type.
 - Accurate frame-presentation timing (``wp_presentation``): clients that
   request feedback get the precise on-screen timestamp for each buffer, so
   video players sync audio/video and animations pace correctly. On the

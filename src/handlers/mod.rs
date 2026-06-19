@@ -26,6 +26,7 @@ use smithay::wayland::foreign_toplevel_list::{
 use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsHandler};
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
@@ -72,6 +73,45 @@ impl smithay::wayland::idle_inhibit::IdleInhibitHandler for ShoestringWm {
             self.idle_inhibitors.remove(pos);
         }
         self.refresh_idle_inhibit();
+    }
+}
+
+impl smithay::wayland::input_method::InputMethodHandler for ShoestringWm {
+    fn new_popup(&mut self, surface: smithay::wayland::input_method::PopupSurface) {
+        // The IME candidate window. Tracking it in the PopupManager is all it
+        // takes to draw — smithay's window render walks `popups_for_surface`
+        // for the parent toplevel, and this popup is parented to it.
+        if let Err(err) = self
+            .popups
+            .track_popup(smithay::desktop::PopupKind::from(surface))
+        {
+            tracing::warn!(?err, "failed to track input-method popup");
+        }
+    }
+
+    fn popup_repositioned(&mut self, _surface: smithay::wayland::input_method::PopupSurface) {}
+
+    fn dismiss_popup(&mut self, surface: smithay::wayland::input_method::PopupSurface) {
+        if let Some(parent) = surface.get_parent().map(|p| p.surface.clone()) {
+            let _ = smithay::desktop::PopupManager::dismiss_popup(
+                &parent,
+                &smithay::desktop::PopupKind::from(surface),
+            );
+        }
+    }
+
+    fn parent_geometry(
+        &self,
+        parent: &WlSurface,
+    ) -> smithay::utils::Rectangle<i32, smithay::utils::Logical> {
+        // Geometry of the toplevel the popup hangs off, so smithay can place
+        // the candidate box against the client's reported text-cursor rect.
+        self.space
+            .elements()
+            .find_map(|window| {
+                (window.wl_surface().as_deref() == Some(parent)).then(|| window.geometry())
+            })
+            .unwrap_or_default()
     }
 }
 
