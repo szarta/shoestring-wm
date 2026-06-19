@@ -4,11 +4,15 @@ name: WLCS
 # (crates/wlcs-shoestring, excluded from the workspace) and runs the full suite
 # against it, gating on the tracked xfail skip-list (tests/wlcs/run-wlcs.sh).
 #
-# DEFERRED — manual-trigger only for now (see todo #87). The harness works, but
-# the baseline is 162/1225 passing and tests/wlcs/skip-list.txt is not yet
-# seeded, so a push/PR gate would be red. Once the skip-list is seeded with the
-# current failures (and the wlcs-tagged feature tasks shrink it), replace the
-# `on:` block below with:
+# MANUAL-TRIGGER ONLY for now (see todo #87). The skip-list IS seeded
+# (2026-06-19: ~432/1225 pass, 792 anvil-verified xfails, 0 our-side bugs) and
+# check-results gates against it + a flaky-list. What blocks a push/PR gate is
+# NOT the skip-list anymore but harness frame-pacing nondeterminism: a broad
+# LOAD/timing-dependent band of layer-shell/region/pointer-constraints/subsurface
+# tests flips pass<->fail run-to-run (membership shifts, so it can't be fully
+# flaky-listed). Under that, a blocking gate would intermittently red-fail on
+# correct code. Flip the `on:` block below to push/pull_request ONLY after the
+# harness-determinism follow-up lands and a gate run is stable across repeats:
 #   on:
 #     push: { branches: [main] }
 #     pull_request:

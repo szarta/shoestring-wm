@@ -65,4 +65,10 @@ export WLCS_BIN="$wlcs_bin" WLCS_PLUGIN="$plugin" timeout_s
 xargs -d '\n' -P "$jobs" -I{} bash -c 'run_one "$@"' _ {} < "$tests" > "$results"
 rm -f "$tests"
 
-exec python3 "$here/check-results.py" "$results" "$here/skip-list.txt"
+# The flaky-list is optional; pass it through only when present.
+flaky="$here/flaky-list.txt"
+if [ -f "$flaky" ]; then
+    exec python3 "$here/check-results.py" "$results" "$here/skip-list.txt" "$flaky"
+else
+    exec python3 "$here/check-results.py" "$results" "$here/skip-list.txt"
+fi

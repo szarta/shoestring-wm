@@ -13,12 +13,21 @@ grows:
     entry so it can't silently regress). Exit non-zero.
   * failed and on the skip-list -> expected (xfail). Reported, not fatal.
 
-Skip-list format (tests/wlcs/skip-list.txt): one gtest full test name per line
-(`Suite.Case`, or parameterized `Suite/Case.Param/0`). Blank lines and lines
-starting with `#` are ignored; an inline `# reason` after a name is stripped.
+A test on the optional FLAKY-list is exempt from both fatal cases: it is
+inherently non-deterministic (passes some runs, fails others) for reasons we
+can't pin to a code defect, so neither a pass nor a fail is treated as a
+regression. Use sparingly and always with a reason — a flaky entry is a blind
+spot in the gate. (Seeded for the negative-exclusive-zone layer params /28<->/30,
+which trade pass/fail run-to-run even serially; see task 155.)
 
-Usage: check-results.py <results.txt> <skip-list.txt>
+Skip-list format (tests/wlcs/skip-list.txt) and flaky-list format
+(tests/wlcs/flaky-list.txt): one gtest full test name per line (`Suite.Case`, or
+parameterized `Suite/Case.Param/0`). Blank lines and lines starting with `#` are
+ignored; an inline `# reason` after a name is stripped.
+
+Usage: check-results.py <results.txt> <skip-list.txt> [flaky-list.txt]
 """
+
 import sys
 
 
@@ -32,7 +41,7 @@ def load_skiplist(path):
                 continue
             name = line.split("#", 1)[0].strip()
             if name:
-                skip[name] = (line.split("#", 1)[1].strip() if "#" in line else "")
+                skip[name] = line.split("#", 1)[1].strip() if "#" in line else ""
     return skip
 
 
@@ -52,38 +61,50 @@ def load_results(path):
 
 
 def main(argv):
-    if len(argv) != 3:
+    if len(argv) not in (3, 4):
         print(__doc__)
         return 2
     results = load_results(argv[1])
     skip = load_skiplist(argv[2])
+    flaky = load_skiplist(argv[3]) if len(argv) == 4 else {}
 
     failed = {name for name, ok in results.items() if not ok}
     passed = {name for name, ok in results.items() if ok}
 
-    unexpected_failures = sorted(failed - set(skip))
+    # Flaky tests are exempt from both fatal cases regardless of this run's verdict.
+    unexpected_failures = sorted(failed - set(skip) - set(flaky))
     unexpected_passes = sorted(name for name in skip if name in passed)
     expected_failures = sorted(failed & set(skip))
     stale_skips = sorted(name for name in skip if name not in results)
+    flaky_seen = sorted(name for name in flaky if name in results)
 
     total = len(results)
-    print(f"WLCS: {len(passed)}/{total} passed, {len(failed)} failed "
-          f"({len(expected_failures)} expected via skip-list)")
+    print(
+        f"WLCS: {len(passed)}/{total} passed, {len(failed)} failed "
+        f"({len(expected_failures)} expected via skip-list, "
+        f"{len(flaky_seen)} flaky-exempt)"
+    )
 
     if stale_skips:
-        print(f"\nNote: {len(stale_skips)} skip-list entries match no test this "
-              f"run (renamed/removed upstream?):")
+        print(
+            f"\nNote: {len(stale_skips)} skip-list entries match no test this "
+            f"run (renamed/removed upstream?):"
+        )
         for name in stale_skips:
             print(f"  ? {name}")
 
     if unexpected_passes:
-        print(f"\nUNEXPECTED PASSES ({len(unexpected_passes)}) — remove from the skip-list:")
+        print(
+            f"\nUNEXPECTED PASSES ({len(unexpected_passes)}) — remove from the skip-list:"
+        )
         for name in unexpected_passes:
             print(f"  + {name}")
 
     if unexpected_failures:
-        print(f"\nUNEXPECTED FAILURES ({len(unexpected_failures)}) — "
-              f"regressions, or new tests to triage onto the skip-list:")
+        print(
+            f"\nUNEXPECTED FAILURES ({len(unexpected_failures)}) — "
+            f"regressions, or new tests to triage onto the skip-list:"
+        )
         for name in unexpected_failures:
             print(f"  ! {name}")
 
