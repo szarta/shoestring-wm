@@ -575,6 +575,20 @@ Each event is tagged by ``type``.
     layer — via the ``toggle-always-on-top`` action, a ``[[window_rules]]``
     ``always_on_top`` action, or the ``set_window_always_on_top`` request.
 
+``window_activation_requested``
+    ``{"type": "window_activation_requested", "id": "...", "granted": <bool>}``.
+    Fired when a client uses ``xdg_activation_v1`` to ask that one of its
+    surfaces be focused — typically an app launched by another app (a link
+    opened from a chat client, a file opened from a file manager) asking to
+    come to the front. ``granted`` is the WM's focus-stealing-prevention
+    verdict: ``true`` when the request was honored (the window was activated
+    and focused, so a ``window_focused`` event follows), ``false`` when it
+    was suppressed because the request wasn't user-driven — focus stayed put
+    and a bar may flag the window as demanding attention. The WM trusts an
+    activation only when its token is recent and either carries a real input
+    serial or was requested by the currently focused surface. Emitted only
+    for a window the WM tracks (one with an ``id``).
+
 ``output_added``
     Same shape as ``OutputSummary``.
 

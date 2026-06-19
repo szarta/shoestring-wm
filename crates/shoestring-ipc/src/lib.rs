@@ -752,6 +752,19 @@ pub enum Event {
         id: String,
         always_on_top: bool,
     },
+    /// A client used `xdg_activation_v1` to ask that one of its surfaces be
+    /// focused — typically an app launched by another app (a link opened
+    /// from a chat client, a file opened from a file manager) asking to come
+    /// to the front. `granted` is the WM's focus-stealing-prevention verdict:
+    /// `true` when the request was honored (the window was activated and
+    /// focused, so a [`Self::WindowFocused`] event follows), `false` when it
+    /// was suppressed because the request wasn't user-driven — focus stayed
+    /// put and a bar may flag the window as demanding attention. Emitted only
+    /// for a window the WM tracks (one with an `id`).
+    WindowActivationRequested {
+        id: String,
+        granted: bool,
+    },
     OutputAdded(OutputSummary),
     OutputRemoved {
         name: String,
@@ -1230,6 +1243,24 @@ mod tests {
         let e = Event::WindowFocused { id: None };
         let s = serde_json::to_string(&e).unwrap();
         assert_eq!(s, r#"{"type":"window_focused","id":null}"#);
+    }
+
+    #[test]
+    fn event_window_activation_requested_shape() {
+        let e = Event::WindowActivationRequested {
+            id: "ft-7".into(),
+            granted: false,
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"window_activation_requested","id":"ft-7","granted":false}"#
+        );
+        let back: Event = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            Event::WindowActivationRequested { id, granted } if id == "ft-7" && !granted
+        ));
     }
 
     #[test]

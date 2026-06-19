@@ -36,6 +36,7 @@ use smithay::{
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
+        xdg_activation::XdgActivationState,
     },
 };
 
@@ -91,6 +92,13 @@ pub struct ShoestringWm {
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    /// `xdg_activation_v1`: cross-client focus handoff via activation tokens.
+    /// A launcher/foreground app mints a token (ideally backed by a real
+    /// input serial) and hands it to the app it spawns, which `activate`s
+    /// itself with it. The focus-stealing-prevention policy lives in
+    /// [`crate::handlers::xdg_activation`]. Mutable (not just held for the
+    /// global) because the handler prunes consumed/stale tokens from it.
+    pub xdg_activation_state: XdgActivationState,
     /// Held for the global's lifetime. Every toplevel is forced into
     /// `ServerSide` mode; see [`crate::handlers::xdg_decoration`].
     #[allow(dead_code)]
@@ -423,6 +431,7 @@ impl ShoestringWm {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
@@ -588,6 +597,7 @@ impl ShoestringWm {
             udev: None,
             compositor_state,
             xdg_shell_state,
+            xdg_activation_state,
             xdg_decoration_state,
             layer_shell_state,
             foreign_toplevel_list,
@@ -906,6 +916,25 @@ impl ShoestringWm {
             .elements()
             .find(|w| crate::window_ext::matches_surface(w, &focused))
             .cloned()
+    }
+
+    /// The tracked window whose toplevel root surface is `surface`, searching
+    /// both mapped (active-workspace) elements and windows parked on other
+    /// workspaces or minimized. Used to resolve an `xdg_activation` target,
+    /// which names a `wl_surface` that may belong to a window not currently
+    /// in the space.
+    pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
+        if let Some(w) = self
+            .space
+            .elements()
+            .find(|w| crate::window_ext::matches_surface(w, surface))
+        {
+            return Some(w.clone());
+        }
+        self.workspaces
+            .windows_on_any()
+            .find(|(w, _)| crate::window_ext::matches_surface(w, surface))
+            .map(|(w, _)| w)
     }
 
     /// Raise + keyboard-focus + activate `window`, deactivating every other

@@ -968,10 +968,15 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
                 state.dirty = true;
             }
         }
+        // `WindowActivationRequested` is available for a future "demands
+        // attention" highlight (flag on `granted == false`, clear on the
+        // next `WindowFocused` for that id); the bar doesn't render urgency
+        // yet, so it's a no-op for now.
         IpcEvent::WindowTitleChanged { .. }
         | IpcEvent::WindowRestacked { .. }
         | IpcEvent::WindowStickyChanged { .. }
         | IpcEvent::WindowAlwaysOnTopChanged { .. }
+        | IpcEvent::WindowActivationRequested { .. }
         | IpcEvent::OutputAdded(_)
         | IpcEvent::OutputRemoved { .. }
         | IpcEvent::ConfigReloaded
