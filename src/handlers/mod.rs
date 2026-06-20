@@ -1,5 +1,6 @@
 mod compositor;
 mod dmabuf;
+mod ext_workspace;
 mod foreign_toplevel_mgmt;
 #[cfg(feature = "tty")]
 mod gamma_control;
@@ -291,7 +292,17 @@ impl WaylandDndGrabHandler for ShoestringWm {
     }
 }
 
-impl OutputHandler for ShoestringWm {}
+impl OutputHandler for ShoestringWm {
+    fn output_bound(
+        &mut self,
+        _output: smithay::output::Output,
+        wl_output: smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) {
+        // Late `wl_output` bind: tell any ext-workspace group of this client
+        // about the now-bound output (see [`crate::ext_workspace::notify_output_bound`]).
+        crate::ext_workspace::notify_output_bound(self, &wl_output);
+    }
+}
 
 impl FractionalScaleHandler for ShoestringWm {
     fn new_fractional_scale(&mut self, surface: WlSurface) {

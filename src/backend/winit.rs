@@ -84,6 +84,7 @@ pub fn init_winit(
     // answer the first manager bind with `done(0)`, which clients (and the
     // output_management integration test) read as "no done received".
     crate::output_management::broadcast_head_added(state, &output);
+    crate::ext_workspace::broadcast_output_enter(state, &output);
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 

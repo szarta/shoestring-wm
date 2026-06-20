@@ -764,6 +764,7 @@ fn connector_connected(
     ));
 
     crate::output_management::broadcast_head_added(state, &output);
+    crate::ext_workspace::broadcast_output_enter(state, &output);
     // A new output may now contain existing windows — refresh taskbar
     // output_enter/leave.
     crate::foreign_toplevel_mgmt::broadcast_all(state);
@@ -789,6 +790,7 @@ fn connector_disconnected(
     if let Some(surface) = device.surfaces.remove(&crtc) {
         let name = surface.output.name();
         crate::output_management::broadcast_head_removed(state, &surface.output);
+        crate::ext_workspace::broadcast_output_leave(state, &surface.output);
         state.space.unmap_output(&surface.output);
         state.space.refresh();
         // Windows that were on this output now report no output — refresh
@@ -841,6 +843,7 @@ pub fn disable_output(state: &mut ShoestringWm, output: &Output) -> bool {
     // see a valid output object in the finished event.
     let name = surface.output.name();
     crate::output_management::broadcast_head_removed(state, &surface.output);
+    crate::ext_workspace::broadcast_output_leave(state, &surface.output);
     state.space.unmap_output(&surface.output);
     state.space.refresh();
     // Windows that were on this output now report no output — refresh taskbar

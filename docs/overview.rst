@@ -94,6 +94,13 @@ Implemented today:
 - wlr-foreign-toplevel-management (``zwlr_foreign_toplevel_management_v1``):
   the writable taskbar protocol — waybar-style bars can activate, close,
   minimize and maximize windows and read each window's state.
+- Workspaces for standard bars (``ext_workspace_v1``): waybar, Sway 1.11+
+  and Niri-style bars read the workspace list and switch the active
+  workspace over this protocol instead of the shoestring-specific IPC. The
+  global workspaces are advertised as one group spanning all outputs, each
+  workspace carrying its configured name and 1-based number; ``activate``
+  is the only supported request (the set is fixed by
+  ``[workspaces].count``).
 - Cross-client activation (``xdg_activation_v1``): an app launched by
   another app (a link opened from a chat client, a file from a file
   manager) can request focus via an activation token, with focus-stealing

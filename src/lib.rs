@@ -14,6 +14,7 @@ mod config_watcher;
 mod confirm;
 mod cursor;
 pub mod drawing;
+mod ext_workspace;
 mod foreign_toplevel_mgmt;
 #[cfg(feature = "tty")]
 mod gamma_control;

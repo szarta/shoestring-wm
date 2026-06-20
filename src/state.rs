@@ -122,6 +122,10 @@ pub struct ShoestringWm {
     /// activate/close/minimize/maximize windows and read their state. Hand-wired
     /// (smithay ships no delegate); see [`crate::foreign_toplevel_mgmt`].
     pub foreign_toplevel_mgmt: crate::foreign_toplevel_mgmt::ForeignToplevelMgmtState,
+    /// `ext-workspace-v1`: lets standard bars (waybar, Sway/Niri-style) read and
+    /// switch workspaces without our custom IPC. Hand-wired (smithay ships no
+    /// delegate); see [`crate::ext_workspace`].
+    pub ext_workspace: crate::ext_workspace::ExtWorkspaceState,
     pub shm_state: ShmState,
     // Held for the lifetime of the WM so their globals stay registered with the
     // display. wp_viewporter + wp_fractional_scale_manager_v1 let HiDPI clients
@@ -473,6 +477,14 @@ impl ShoestringWm {
             handles: HashMap::new(),
             last_outputs: HashMap::new(),
         };
+        // ext-workspace-v1: advertise the manager (v1) unconditionally so
+        // standard bars see our workspaces. Backend-agnostic, like the foreign
+        // toplevel globals above.
+        let ext_workspace = crate::ext_workspace::ExtWorkspaceState {
+            manager_global: dh
+                .create_global::<Self, _, _>(1, crate::ext_workspace::ExtWorkspaceManagerData),
+            instances: Vec::new(),
+        };
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
@@ -671,6 +683,7 @@ impl ShoestringWm {
             foreign_toplevels: HashMap::new(),
             window_name_overrides: HashMap::new(),
             foreign_toplevel_mgmt,
+            ext_workspace,
             shm_state,
             viewporter_state,
             fractional_scale_manager_state,
@@ -1362,6 +1375,7 @@ impl ShoestringWm {
         self.emit_ipc(shoestring_ipc::Event::WorkspaceChanged {
             active: target.one_based(),
         });
+        crate::ext_workspace::broadcast_active(self);
         // The set of mapped windows just changed wholesale; a video player
         // may have come into or gone out of view.
         self.refresh_idle_inhibit();

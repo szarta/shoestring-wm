@@ -249,7 +249,8 @@ wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client", "wayland-client"] }
 # Used by tests/pointer_constraints.rs: speak zwp_pointer_constraints_v1 +
 # zwp_relative_pointer_v1 as a client. Both live behind the `unstable` feature.
-wayland-protocols = { version = "0.32", features = ["client", "unstable", "wayland-client"] }
+# `staging` adds ext-workspace-v1 for tests/ext_workspace.rs.
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging", "wayland-client"] }
 
 # shoestring-lock authenticates via pam-client2, which only compiles
 # against Linux-PAM: it hardcodes `const char *` for `pam_message.msg`
