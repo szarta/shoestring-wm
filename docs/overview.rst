@@ -108,6 +108,11 @@ Implemented today:
   either carries a real input serial or came from the focused surface;
   otherwise focus stays put and a ``window_activation_requested`` IPC event
   (``granted: false``) lets a bar flag the window as demanding attention.
+- Cross-process window parenting (``xdg_foreign_v2``): one client exports a
+  toplevel under an opaque handle that a *different process* can import and
+  set as the parent of its own toplevel. The desktop portal uses this to
+  parent its file-chooser / print dialogs to the application that summoned
+  them, the same parent/child link a same-process dialog gets for free.
 - Pointer lock / confinement (``zwp_pointer_constraints_v1``) with
   relative motion (``zwp_relative_pointer_v1``): FPS games and RDP/VNC
   clients can lock the cursor in place (receiving only relative deltas)

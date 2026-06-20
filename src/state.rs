@@ -37,6 +37,7 @@ use smithay::{
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
+        xdg_foreign::XdgForeignState,
     },
 };
 
@@ -99,6 +100,15 @@ pub struct ShoestringWm {
     /// [`crate::handlers::xdg_activation`]. Mutable (not just held for the
     /// global) because the handler prunes consumed/stale tokens from it.
     pub xdg_activation_state: XdgActivationState,
+    /// `xdg_foreign_v2` (zxdg_exporter/importer): lets one client export a
+    /// toplevel under an opaque handle and another *different-process* client
+    /// import it and set it as the parent of its own toplevel. The canonical
+    /// consumer is the desktop portal — a file-chooser/print dialog runs in
+    /// the portal process but wants to be parented to the app that summoned
+    /// it. The whole protocol (export/import/set_parent_of, handle revocation)
+    /// is driven by smithay through the blanket `delegate_dispatch2!`; we only
+    /// hold the state and surface it via [`crate::handlers::xdg_foreign`].
+    pub xdg_foreign_state: XdgForeignState,
     /// Held for the global's lifetime. Every toplevel is forced into
     /// `ServerSide` mode; see [`crate::handlers::xdg_decoration`].
     #[allow(dead_code)]
@@ -462,6 +472,7 @@ impl ShoestringWm {
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
+        let xdg_foreign_state = XdgForeignState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
@@ -677,6 +688,7 @@ impl ShoestringWm {
             compositor_state,
             xdg_shell_state,
             xdg_activation_state,
+            xdg_foreign_state,
             xdg_decoration_state,
             layer_shell_state,
             foreign_toplevel_list,

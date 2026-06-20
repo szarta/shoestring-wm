@@ -11,6 +11,7 @@ pub(crate) mod session_lock;
 mod virtual_pointer;
 mod xdg_activation;
 mod xdg_decoration;
+mod xdg_foreign;
 mod xdg_shell;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
