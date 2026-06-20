@@ -6,6 +6,15 @@ pub mod udev;
 
 use smithay::output::Scale;
 
+/// Resolved variable-refresh-rate state for an output, stored in the smithay
+/// [`Output`](smithay::output::Output)'s user data so the IPC layer can report
+/// it without reaching into a feature-gated backend. The bool is what the WM
+/// actually enabled — `true` only when the config opted in *and* the connector
+/// advertised support. The winit backend never inserts this, so nested outputs
+/// report `false`.
+#[derive(Debug, Clone, Copy)]
+pub struct VrrState(pub bool);
+
 /// Pick the right `Scale` variant for a configured `output_scale`. Whole
 /// numbers (within a small epsilon) go through `Integer` so plain `wl_output`
 /// clients get the natural value; fractional values use `Fractional`. Legacy

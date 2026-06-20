@@ -238,8 +238,20 @@ are optional; unset fields fall back to the matching ``[general]`` default.
        set. Use this to declare a stable multi-monitor arrangement that
        is independent of plug-in order. Coordinates are in logical pixels
        (before scaling).
+   * - ``adaptive_sync``
+     - bool
+     - ``false``
+     - Enable variable refresh rate (VRR / adaptive sync, a.k.a.
+       FreeSync / G-Sync) on this output. Opt-in per connector because
+       VRR can cause visible flicker on some panels. ``true`` only takes
+       effect if the monitor and driver actually advertise support;
+       otherwise the WM logs a warning and leaves it off. Only honored on
+       the DRM/KMS (TTY) backend — ignored when running nested under
+       winit. ``shoestring-ctl outputs`` reports the resolved state in
+       each output's ``adaptive_sync`` field.
 
-Example — a HiDPI laptop panel at 2× on the left, 1× external on the right::
+Example — a HiDPI laptop panel at 2× on the left, 1× external (a VRR gaming
+monitor) on the right::
 
     [general]
     output_scale = 1.0      # fallback for any unspecified output
@@ -251,6 +263,7 @@ Example — a HiDPI laptop panel at 2× on the left, 1× external on the right::
     [outputs.DP-1]
     scale = 1.0
     position = [1920, 0]
+    adaptive_sync = true
 
 .. note::
 

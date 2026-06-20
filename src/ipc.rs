@@ -1097,6 +1097,10 @@ fn collect_outputs(state: &ShoestringWm) -> Vec<OutputSummary> {
                 width: mode.map(|m| m.size.w).unwrap_or(0),
                 height: mode.map(|m| m.size.h).unwrap_or(0),
                 scale,
+                adaptive_sync: o
+                    .user_data()
+                    .get::<crate::backend::VrrState>()
+                    .is_some_and(|v| v.0),
             }
         })
         .collect()

@@ -471,8 +471,13 @@ these fields omit them too — clients should treat "absent" and "off-screen"
       "name":   "DP-1",
       "width":  3840,
       "height": 2160,
-      "scale":  1.5
+      "scale":  1.5,
+      "adaptive_sync": false
     }
+
+``adaptive_sync`` is ``true`` only when the output opted in via
+``[outputs.<name>] adaptive_sync = true`` *and* the connector advertised VRR
+support. It is always ``false`` under the nested winit backend.
 
 ``tree`` payload types
 ~~~~~~~~~~~~~~~~~~~~~~~

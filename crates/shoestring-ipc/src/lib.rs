@@ -690,6 +690,12 @@ pub struct OutputSummary {
     /// Logical scale; matches what's advertised on `wl_output.scale` /
     /// `wp_fractional_scale_v1`.
     pub scale: f64,
+    /// Whether variable refresh rate (VRR / adaptive sync) is enabled on this
+    /// output. `true` only when the output opted in via config *and* the
+    /// connector advertised support. Always `false` under the nested winit
+    /// backend, which cannot drive VRR.
+    #[serde(default)]
+    pub adaptive_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

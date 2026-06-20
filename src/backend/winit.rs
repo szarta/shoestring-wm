@@ -76,6 +76,8 @@ pub fn init_winit(
             width: mode.size.w,
             height: mode.size.h,
             scale: state.config.general.output_scale,
+            // Nested winit cannot drive VRR.
+            adaptive_sync: false,
         },
     ));
     // Register the output with wlr-output-management, exactly as the udev

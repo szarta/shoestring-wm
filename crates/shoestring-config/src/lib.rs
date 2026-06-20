@@ -28,6 +28,14 @@ pub struct OutputConfig {
     /// stable multi-monitor arrangement independent of plug-in order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[i32; 2]>,
+    /// Enable variable refresh rate (VRR / adaptive sync) on this output.
+    /// `true` opts the connector in; the WM only actually enables VRR if the
+    /// monitor and driver advertise support (otherwise it logs a warning and
+    /// leaves it off). Defaults to off — VRR can cause visible flicker on some
+    /// panels, so it is strictly opt-in per output. Only honored on the
+    /// DRM/KMS (TTY) backend; ignored when running nested under winit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_sync: Option<bool>,
 }
 
 /// Top-level config. Sections are all optional; missing sections take defaults.

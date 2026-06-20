@@ -40,7 +40,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
             CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmEventMetadata,
-            DrmEventTime, DrmNode, NodeType,
+            DrmEventTime, DrmNode, NodeType, VrrSupport,
         },
         egl::{self, context::ContextPriority, EGLContext, EGLDevice, EGLDisplay},
         input::InputEvent,
@@ -183,6 +183,12 @@ struct SurfaceData {
     /// Held until drop so we can `remove_global` symmetrically.
     global: Option<GlobalId>,
     drm_output: ShoestringDrmOutput,
+    /// Whether VRR/adaptive-sync is enabled for this surface. Resolved once at
+    /// connect time (config opt-in ∧ connector support). When `true` we
+    /// re-assert it before each `render_frame` — `use_vrr` is idempotent, so
+    /// this is cheap and guards against any pending-state reset across mode
+    /// changes or VT switches.
+    vrr: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -747,10 +753,51 @@ fn connector_connected(
         }
     };
 
+    // Resolve VRR/adaptive-sync: opt-in per output via config, gated on the
+    // connector actually advertising support. `use_vrr` only takes effect on
+    // the next `render_frame`; for `RequiresModeset` connectors that first
+    // frame does a modeset, which is fine here on initial bring-up.
+    let want_vrr = state
+        .config
+        .outputs
+        .get(&output_name)
+        .and_then(|oc| oc.adaptive_sync)
+        .unwrap_or(false);
+    let vrr = want_vrr
+        && match drm_output.with_compositor(|c| c.vrr_supported(connector.handle())) {
+            Ok(VrrSupport::Supported) | Ok(VrrSupport::RequiresModeset) => {
+                match drm_output.with_compositor(|c| c.use_vrr(true)) {
+                    Ok(()) => {
+                        tracing::info!(%output_name, "adaptive sync (VRR) enabled");
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(%output_name, error = ?e, "enabling VRR failed");
+                        false
+                    }
+                }
+            }
+            Ok(VrrSupport::NotSupported) => {
+                tracing::warn!(
+                    %output_name,
+                    "adaptive_sync requested but the connector does not advertise VRR support"
+                );
+                false
+            }
+            Err(e) => {
+                tracing::warn!(%output_name, error = ?e, "querying VRR support failed");
+                false
+            }
+        };
+    output
+        .user_data()
+        .insert_if_missing(|| crate::backend::VrrState(vrr));
+
     let surface = SurfaceData {
         output: output.clone(),
         global: Some(global),
         drm_output,
+        vrr,
     };
     device.surfaces.insert(crtc, surface);
 
@@ -760,6 +807,7 @@ fn connector_connected(
             width: wl_mode.size.w,
             height: wl_mode.size.h,
             scale: scale_val,
+            adaptive_sync: vrr,
         },
     ));
 
@@ -1529,6 +1577,16 @@ impl ShoestringWm {
         } else {
             [0.1, 0.1, 0.1, 1.0]
         };
+        // Re-assert VRR for outputs that opted in. `use_vrr` short-circuits
+        // when the pending state already matches, so this is a couple of cheap
+        // lock acquisitions per frame; it only does real work after something
+        // (mode change, VT switch) reset the surface's pending state.
+        if surface.vrr {
+            if let Err(e) = surface.drm_output.with_compositor(|c| c.use_vrr(true)) {
+                tracing::warn!(?crtc, error = ?e, "re-asserting VRR failed");
+            }
+        }
+
         let render_start = std::time::Instant::now();
         let result =
             surface
