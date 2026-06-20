@@ -877,8 +877,8 @@ version (``shoestring-ctl --version``). Per the :ref:`stability policy
 been renamed, removed, or repurposed since 0.1.0 — so a client written
 against any prior version still works against a newer WM.
 
-Unreleased
-~~~~~~~~~~
+0.5.0
+~~~~~
 
 - ``inputs`` request + ``inputs`` response (``InputSummary`` list): the
   input-device analogue of ``outputs``. Read-only, not gated.
