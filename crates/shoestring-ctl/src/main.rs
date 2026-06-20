@@ -55,6 +55,11 @@ enum Command {
     },
     /// List every connected output with its mode and scale.
     Outputs,
+    /// List every connected input device (keyboards, pointers, touchpads,
+    /// tablets) with its libinput identity and capabilities — the input
+    /// analogue of `outputs`. Read-only and not gated by automation. Reports
+    /// nothing under the nested winit backend, which has no libinput devices.
+    Inputs,
     /// Dump the full window tree: outputs with their logical placement, plus
     /// each workspace and the windows on it (geometry, stacking order, and
     /// the output each window sits on). The `swaymsg -t get_tree` analogue —
@@ -362,6 +367,7 @@ fn main() -> Result<()> {
         Command::Windows => Request::Windows,
         Command::FindWindows { title, app_id } => Request::FindWindows { title, app_id },
         Command::Outputs => Request::Outputs,
+        Command::Inputs => Request::Inputs,
         Command::Tree => Request::GetTree,
         Command::Metrics { watch, interval } => {
             if watch {

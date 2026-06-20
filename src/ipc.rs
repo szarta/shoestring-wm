@@ -35,8 +35,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use shoestring_ipc::{
-    default_socket_path, Event, OutputNode, OutputSummary, Request, Response, WindowGeometry,
-    WindowNode, WindowSummary, WorkspaceNode, SOCKET_ENV,
+    default_socket_path, Event, InputSummary, OutputNode, OutputSummary, Request, Response,
+    WindowGeometry, WindowNode, WindowSummary, WorkspaceNode, SOCKET_ENV,
 };
 use smithay::reexports::calloop::{
     generic::Generic, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
@@ -309,6 +309,11 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             Request::Outputs => {
                 let outputs = collect_outputs(state);
                 let _ = write_response(client, &Response::Outputs { outputs });
+                return true;
+            }
+            Request::Inputs => {
+                let inputs = collect_inputs(state);
+                let _ = write_response(client, &Response::Inputs { inputs });
                 return true;
             }
             Request::GetTree => {
@@ -1105,6 +1110,51 @@ fn collect_outputs(state: &ShoestringWm) -> Vec<OutputSummary> {
             }
         })
         .collect()
+}
+
+/// Collect every connected libinput device into [`InputSummary`]s. Only the
+/// TTY/udev backend tracks real devices — it already keeps a roster so a
+/// config hot-reload can re-apply `[input]` settings (see
+/// [`crate::backend::udev`]) — so we reuse that roster here. The nested winit
+/// backend has no libinput devices, hence the empty-list stub below.
+#[cfg(feature = "tty")]
+fn collect_inputs(state: &ShoestringWm) -> Vec<InputSummary> {
+    use smithay::reexports::input::DeviceCapability;
+
+    const CAPS: &[(DeviceCapability, &str)] = &[
+        (DeviceCapability::Keyboard, "keyboard"),
+        (DeviceCapability::Pointer, "pointer"),
+        (DeviceCapability::Touch, "touch"),
+        (DeviceCapability::TabletTool, "tablet_tool"),
+        (DeviceCapability::TabletPad, "tablet_pad"),
+        (DeviceCapability::Gesture, "gesture"),
+        (DeviceCapability::Switch, "switch"),
+    ];
+
+    let Some(udev) = state.udev.as_ref() else {
+        return Vec::new();
+    };
+    udev.devices
+        .iter()
+        .map(|d| InputSummary {
+            name: d.name().into_owned(),
+            sysname: d.sysname().to_string(),
+            vendor: d.id_vendor(),
+            product: d.id_product(),
+            capabilities: CAPS
+                .iter()
+                .filter(|(cap, _)| d.has_capability(*cap))
+                .map(|(_, name)| name.to_string())
+                .collect(),
+            size_mm: d.size(),
+            output: d.output_name().map(|s| s.into_owned()),
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "tty"))]
+fn collect_inputs(_state: &ShoestringWm) -> Vec<InputSummary> {
+    Vec::new()
 }
 
 impl ShoestringWm {

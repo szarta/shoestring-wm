@@ -41,6 +41,12 @@ Each request is a JSON object with a ``type`` discriminator:
      - List every mapped window (across all workspaces).
    * - ``{"type": "outputs"}``
      - List every connected output.
+   * - ``{"type": "inputs"}``
+     - List every connected input device (keyboards, pointers, touchpads,
+       tablets) with its libinput identity and capabilities — the input
+       analogue of ``outputs``. Reply is ``inputs``. Read-only and not gated
+       by automation. Empty under the nested winit backend, which has no
+       libinput devices.
    * - ``{"type": "get_tree"}``
      - Snapshot the full window tree: outputs with their logical
        placement, plus each workspace and the windows on it (geometry,
@@ -295,6 +301,9 @@ The server replies with a single JSON object tagged by ``type``:
 ``outputs``
     ``{"type": "outputs", "outputs": [OutputSummary, ...]}``
 
+``inputs``
+    ``{"type": "inputs", "inputs": [InputSummary, ...]}``
+
 ``tree``
     ``{"type": "tree", "outputs": [OutputNode, ...], "workspaces": [WorkspaceNode, ...], "minimized": [WindowNode, ...]}``.
     Returned in reply to ``get_tree``. Only workspaces that have windows —
@@ -486,6 +495,31 @@ support. It is always ``false`` under the nested winit backend.
 state, whether set via ``[outputs.<name>] transform`` or a later
 ``wlr-output-management`` apply. ``width`` and ``height`` are the raw mode
 dimensions; a ``"90"`` / ``"270"`` transform swaps the logical usable area.
+
+``InputSummary``::
+
+    {
+      "name":     "SynPS/2 Synaptics TouchPad",
+      "sysname":  "event5",
+      "vendor":   2,
+      "product":  7,
+      "capabilities": ["pointer", "gesture"],
+      "size_mm":  [97.33, 66.86]
+    }
+
+Properties come straight off the live libinput device handle the WM holds for
+``[input]`` config application, so this enumerates exactly the devices the
+compositor is driving. ``vendor`` / ``product`` are the USB/Bluetooth ids (``0``
+when the bus exposes none). ``capabilities`` is the set of libinput
+capabilities the device advertises, drawn from ``"keyboard"``, ``"pointer"``,
+``"touch"``, ``"tablet_tool"``, ``"tablet_pad"``, ``"gesture"``, ``"switch"`` —
+a single device may report several. ``size_mm`` is the physical ``[width,
+height]`` in millimetres for devices that measure it (touchpads, touchscreens,
+tablets) and is **omitted** otherwise. ``output`` (omitted unless set) names the
+output a device is pinned to, when libinput knows the mapping.
+
+Only the TTY/udev backend tracks real libinput devices, so under the nested
+winit backend ``inputs`` is always ``[]``.
 
 ``tree`` payload types
 ~~~~~~~~~~~~~~~~~~~~~~~

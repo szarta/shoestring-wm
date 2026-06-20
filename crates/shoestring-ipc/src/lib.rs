@@ -53,6 +53,12 @@ pub enum Request {
     Windows,
     /// List every connected output.
     Outputs,
+    /// List every connected input device (keyboards, pointers, touchpads,
+    /// tablets, …) with its libinput identity and capabilities. The input
+    /// analogue of [`Request::Outputs`]; reply is [`Response::Inputs`].
+    /// Read-only and not gated by automation. Only the TTY/udev backend has
+    /// real libinput devices — the nested winit backend reports an empty list.
+    Inputs,
     /// Snapshot the full window tree: every output with its logical
     /// placement, plus each workspace and the windows on it (with geometry,
     /// stacking order, and the output each window sits on). The
@@ -481,6 +487,11 @@ pub enum Response {
     Outputs {
         outputs: Vec<OutputSummary>,
     },
+    /// Reply to [`Request::Inputs`]: every connected input device. Empty on
+    /// the nested winit backend, which has no real libinput devices.
+    Inputs {
+        inputs: Vec<InputSummary>,
+    },
     /// Full window tree for [`Request::GetTree`]: outputs with their logical
     /// placement, every workspace and the windows on it, plus any minimized
     /// windows (which belong to no workspace — minimizing drops a window's
@@ -702,6 +713,36 @@ pub struct OutputSummary {
     /// logical usable area.
     #[serde(default = "default_transform")]
     pub transform: String,
+}
+
+/// A connected input device, as reported by [`Request::Inputs`]. Mirrors the
+/// libinput device identity so callers can tell a touchpad from a wired mouse
+/// without scraping `/dev/input`. Properties come straight off the live
+/// libinput handle the WM holds for `[input]` config application.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputSummary {
+    /// libinput device name (e.g. `"SynPS/2 Synaptics TouchPad"`).
+    pub name: String,
+    /// Kernel sysfs name, the `eventN`-style node (e.g. `"event5"`).
+    pub sysname: String,
+    /// USB/Bluetooth vendor id, or `0` when the bus exposes none.
+    pub vendor: u32,
+    /// USB/Bluetooth product id, or `0` when the bus exposes none.
+    pub product: u32,
+    /// libinput capabilities the device advertises, as lowercase names:
+    /// `"keyboard"`, `"pointer"`, `"touch"`, `"tablet_tool"`, `"tablet_pad"`,
+    /// `"gesture"`, `"switch"`. A single device can hold several.
+    pub capabilities: Vec<String>,
+    /// Physical size `(width, height)` in millimetres, for devices that report
+    /// it (touchpads, touchscreens, tablets). `None` for keyboards/mice and
+    /// anything libinput can't measure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_mm: Option<(f64, f64)>,
+    /// Name of the output this device is bound to, when libinput knows the
+    /// mapping (typically touchscreens/tablets pinned to a screen). Usually
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 fn default_transform() -> String {
@@ -965,6 +1006,53 @@ mod tests {
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"pointer_position","x":10.0,"y":20.0}"#
         );
+    }
+
+    #[test]
+    fn inputs_request_response_shapes() {
+        let q = Request::Inputs;
+        assert_eq!(serde_json::to_string(&q).unwrap(), r#"{"type":"inputs"}"#);
+
+        // A plain pointer: no physical size, no output mapping — both optional
+        // fields are skipped so the common case stays terse.
+        let mouse = InputSummary {
+            name: "Logitech USB Mouse".into(),
+            sysname: "event2".into(),
+            vendor: 0x046d,
+            product: 0xc077,
+            capabilities: vec!["pointer".into()],
+            size_mm: None,
+            output: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&mouse).unwrap(),
+            r#"{"name":"Logitech USB Mouse","sysname":"event2","vendor":1133,"product":49271,"capabilities":["pointer"]}"#
+        );
+
+        // A touchpad reports a physical size; that field appears.
+        let touchpad = InputSummary {
+            name: "SynPS/2 Synaptics TouchPad".into(),
+            sysname: "event5".into(),
+            vendor: 2,
+            product: 7,
+            capabilities: vec!["pointer".into(), "gesture".into()],
+            size_mm: Some((97.33, 66.86)),
+            output: None,
+        };
+        let s = serde_json::to_string(&touchpad).unwrap();
+        assert!(s.contains(r#""size_mm":[97.33,66.86]"#), "got {s}");
+        let resp = Response::Inputs {
+            inputs: vec![touchpad],
+        };
+        let back: Response = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        match back {
+            Response::Inputs { inputs } => {
+                assert_eq!(inputs.len(), 1);
+                assert_eq!(inputs[0].capabilities, ["pointer", "gesture"]);
+                assert_eq!(inputs[0].size_mm, Some((97.33, 66.86)));
+            }
+            _ => panic!("expected Inputs"),
+        }
     }
 
     #[test]
