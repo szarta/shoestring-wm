@@ -31,6 +31,7 @@ use smithay::{
     },
     utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER},
     wayland::{
+        keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
         pointer_constraints::{with_pointer_constraint, PointerConstraint},
         tablet_manager::{TabletDescriptor, TabletSeatTrait},
     },
@@ -684,6 +685,25 @@ impl ShoestringWm {
                         // shows the locker still up). Everything else is
                         // forwarded to the lock surface, which holds focus.
                         if state.is_locked() {
+                            if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
+                                let mask = ModMask::from_state(mods);
+                                if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
+                                    if matches!(a, Action::ChangeVt { .. }) {
+                                        return FilterResult::Intercept(a.clone());
+                                    }
+                                }
+                            }
+                            return FilterResult::Forward;
+                        }
+                        // A focused client holding an active keyboard-shortcuts
+                        // inhibitor (a game, VM/SPICE window, nested compositor,
+                        // or remote-desktop viewer) asked for the raw key
+                        // stream, so forward every bind to it. The sole
+                        // exception is VT switching — kept live as a hard escape
+                        // hatch so a client that grabs all keys can never lock
+                        // the user out of the machine (same policy as the lock
+                        // block above).
+                        if state.seat.keyboard_shortcuts_inhibited() {
                             if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
                                 let mask = ModMask::from_state(mods);
                                 if let Some(a) = state.bindings.lookup(mask, sym.raw()) {

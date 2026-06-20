@@ -24,6 +24,7 @@ use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelListHandler, ForeignToplevelListState,
 };
 use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler};
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsHandler};
 use smithay::wayland::seat::WaylandFocus;
@@ -73,6 +74,42 @@ impl smithay::wayland::idle_inhibit::IdleInhibitHandler for ShoestringWm {
             self.idle_inhibitors.remove(pos);
         }
         self.refresh_idle_inhibit();
+    }
+}
+
+impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandler
+    for ShoestringWm
+{
+    fn keyboard_shortcuts_inhibit_state(
+        &mut self,
+    ) -> &mut smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    fn new_inhibitor(
+        &mut self,
+        inhibitor: smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor,
+    ) {
+        // Grant every request (single-user WM — no privilege model), but only
+        // arm it if its surface already holds keyboard focus. Otherwise it
+        // stays dormant until `focus_changed` activates it on focus entry.
+        let focused = self.seat.get_keyboard().and_then(|kb| kb.current_focus());
+        if focused.as_ref() == Some(inhibitor.wl_surface()) {
+            inhibitor.activate();
+            self.active_shortcuts_inhibitor = Some(inhibitor);
+        }
+    }
+
+    fn inhibitor_destroyed(
+        &mut self,
+        inhibitor: smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor,
+    ) {
+        // The client tore down (or died with) its inhibitor; smithay has
+        // already dropped it from the seat list. Forget our cached handle so we
+        // don't try to deactivate a dead object on the next focus change.
+        if self.active_shortcuts_inhibitor.as_ref() == Some(&inhibitor) {
+            self.active_shortcuts_inhibitor = None;
+        }
     }
 }
 
@@ -138,6 +175,22 @@ impl SeatHandler for ShoestringWm {
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
+
+        // Keyboard-shortcuts inhibit follows focus: at most one inhibitor is
+        // active at a time, always the one on the focused surface. Deactivate
+        // whatever we had armed, then arm the newly-focused surface's inhibitor
+        // (if any). The `active`/`inactive` events tell the client whether its
+        // shortcuts are actually being passed through right now.
+        let next = focused.and_then(|s| seat.keyboard_shortcuts_inhibitor_for_surface(s));
+        if self.active_shortcuts_inhibitor != next {
+            if let Some(prev) = self.active_shortcuts_inhibitor.take() {
+                prev.inactivate();
+            }
+            if let Some(inhibitor) = &next {
+                inhibitor.activate();
+            }
+            self.active_shortcuts_inhibitor = next;
+        }
     }
 }
 

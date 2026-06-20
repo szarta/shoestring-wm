@@ -228,6 +228,23 @@ pub struct ShoestringWm {
     /// Dispatched through the blanket `delegate_dispatch2!`, not this field.
     #[allow(dead_code)]
     pub cursor_shape_manager: smithay::wayland::cursor_shape::CursorShapeManagerState,
+    /// `zwp_keyboard_shortcuts_inhibit_v1`: lets a focused client (a nested
+    /// compositor, VM, remote-desktop viewer, or game) ask us to stop eating
+    /// its keybinds so every key reaches it. Unlike the always-on globals
+    /// above, this state is load-bearing — it owns the per-seat inhibitor list
+    /// the `KeyboardShortcutsInhibitHandler` mutates, so it must be retained.
+    /// See the handler impl in [`crate::handlers`] and the keybind filter in
+    /// [`crate::input`].
+    pub keyboard_shortcuts_inhibit_state:
+        smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
+    /// The inhibitor we have currently *activated* — at most one, always the
+    /// one on the keyboard-focused surface. We grant every request but only
+    /// activate the focused surface's inhibitor (and deactivate it on focus
+    /// loss), so `Seat::keyboard_shortcuts_inhibited()` cleanly means "the
+    /// focused client is grabbing all keys." Updated in `focus_changed` /
+    /// `new_inhibitor` / `inhibitor_destroyed`.
+    pub active_shortcuts_inhibitor:
+        Option<smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor>,
     /// `wp_presentation` global. Clients use it to request precise on-screen
     /// timestamps for the buffers they commit (video A/V sync, animation
     /// pacing). The udev/DRM backend fulfils them from hardware vblank
@@ -563,6 +580,16 @@ impl ShoestringWm {
         // when unused and lets toolkits drop client-side xcursor entirely.
         let cursor_shape_manager =
             smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Self>(&dh);
+        // Keyboard-shortcuts inhibit. A focused client that needs the raw key
+        // stream — a nested compositor, a VM/SPICE window, a remote-desktop
+        // viewer, a game — asks us to stop intercepting its keybinds. We grant
+        // every request (single-user WM, no privilege model to enforce) but
+        // only ever *activate* the inhibitor whose surface holds keyboard
+        // focus; see the `KeyboardShortcutsInhibitHandler` impl.
+        let keyboard_shortcuts_inhibit_state =
+            smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState::new::<Self>(
+                &dh,
+            );
         // Input-method support (CJK and other composed input via fcitx5/ibus).
         // Three cooperating globals form one subsystem:
         //   - zwp_text_input_v3: the application/toolkit side that wants text.
@@ -670,6 +697,8 @@ impl ShoestringWm {
             tablet_manager,
             pointer_gestures,
             cursor_shape_manager,
+            keyboard_shortcuts_inhibit_state,
+            active_shortcuts_inhibitor: None,
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
             ipc: None,

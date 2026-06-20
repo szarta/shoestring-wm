@@ -140,6 +140,15 @@ Implemented today:
   routes preedit/commit strings back, and renders the candidate popup
   beside the text cursor. The IME's keyboard grab sits *below* the WM
   keybindings, so ``Super``-shortcuts keep working while you type.
+- Keyboard-shortcuts inhibit (``zwp_keyboard_shortcuts_inhibit_v1``): a
+  focused client that needs the raw key stream — a nested compositor, a
+  VM/SPICE window, a remote-desktop viewer, a full-screen game — can ask
+  the WM to stop intercepting its keybinds, so ``Super``-combos reach the
+  client instead of triggering window-manager actions. Every request is
+  granted but only takes effect while the requesting surface holds
+  keyboard focus (the client is told via ``active``/``inactive``). VT
+  switching stays live as a hard escape hatch, so a client that grabs
+  every key can never lock you out of the machine.
 - Accurate frame-presentation timing (``wp_presentation``): clients that
   request feedback get the precise on-screen timestamp for each buffer, so
   video players sync audio/video and animations pace correctly. On the
