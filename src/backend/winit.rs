@@ -78,6 +78,9 @@ pub fn init_winit(
             scale: state.config.general.output_scale,
             // Nested winit cannot drive VRR.
             adaptive_sync: false,
+            // The output's `Flipped180` is GL y-flip compensation, not a
+            // user-facing orientation — report the nested output as upright.
+            transform: "normal".to_string(),
         },
     ));
     // Register the output with wlr-output-management, exactly as the udev

@@ -696,6 +696,16 @@ pub struct OutputSummary {
     /// backend, which cannot drive VRR.
     #[serde(default)]
     pub adaptive_sync: bool,
+    /// Output orientation as a `wlr-randr`-style name (`"normal"`, `"90"`,
+    /// `"180"`, `"270"`, `"flipped"`, `"flipped-90"`, …). `width`/`height`
+    /// above are the raw mode dimensions; a `"90"`/`"270"` transform swaps the
+    /// logical usable area.
+    #[serde(default = "default_transform")]
+    pub transform: String,
+}
+
+fn default_transform() -> String {
+    "normal".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

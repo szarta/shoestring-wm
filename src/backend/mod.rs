@@ -5,6 +5,9 @@ pub mod winit;
 pub mod udev;
 
 use smithay::output::Scale;
+use smithay::utils::Transform;
+
+use shoestring_config::OutputTransform;
 
 /// Resolved variable-refresh-rate state for an output, stored in the smithay
 /// [`Output`](smithay::output::Output)'s user data so the IPC layer can report
@@ -30,6 +33,38 @@ pub fn scale_from_config(scale: f64) -> Scale {
     }
 }
 
+/// Map a configured [`OutputTransform`] onto smithay's [`Transform`]. Kept here
+/// (rather than in the config crate) so `shoestring-config` stays free of a
+/// smithay dependency.
+pub fn transform_from_config(t: OutputTransform) -> Transform {
+    match t {
+        OutputTransform::Normal => Transform::Normal,
+        OutputTransform::_90 => Transform::_90,
+        OutputTransform::_180 => Transform::_180,
+        OutputTransform::_270 => Transform::_270,
+        OutputTransform::Flipped => Transform::Flipped,
+        OutputTransform::Flipped90 => Transform::Flipped90,
+        OutputTransform::Flipped180 => Transform::Flipped180,
+        OutputTransform::Flipped270 => Transform::Flipped270,
+    }
+}
+
+/// Render a smithay [`Transform`] as its `wlr-randr` / config name, for the IPC
+/// `outputs` report. Inverse of [`transform_from_config`] over the names the
+/// config accepts.
+pub fn transform_name(t: Transform) -> &'static str {
+    match t {
+        Transform::Normal => "normal",
+        Transform::_90 => "90",
+        Transform::_180 => "180",
+        Transform::_270 => "270",
+        Transform::Flipped => "flipped",
+        Transform::Flipped90 => "flipped-90",
+        Transform::Flipped180 => "flipped-180",
+        Transform::Flipped270 => "flipped-270",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,6 +80,38 @@ mod tests {
         match scale_from_config(1.5) {
             Scale::Fractional(v) => assert!((v - 1.5).abs() < 1e-9),
             other => panic!("expected Fractional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_config_covers_every_variant() {
+        // Each config orientation maps to the matching smithay transform, and
+        // its IPC name round-trips back to the config name.
+        let cases = [
+            (OutputTransform::Normal, Transform::Normal, "normal"),
+            (OutputTransform::_90, Transform::_90, "90"),
+            (OutputTransform::_180, Transform::_180, "180"),
+            (OutputTransform::_270, Transform::_270, "270"),
+            (OutputTransform::Flipped, Transform::Flipped, "flipped"),
+            (
+                OutputTransform::Flipped90,
+                Transform::Flipped90,
+                "flipped-90",
+            ),
+            (
+                OutputTransform::Flipped180,
+                Transform::Flipped180,
+                "flipped-180",
+            ),
+            (
+                OutputTransform::Flipped270,
+                Transform::Flipped270,
+                "flipped-270",
+            ),
+        ];
+        for (cfg, smithay, name) in cases {
+            assert_eq!(transform_from_config(cfg), smithay);
+            assert_eq!(transform_name(smithay), name);
         }
     }
 }

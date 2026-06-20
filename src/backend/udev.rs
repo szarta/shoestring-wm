@@ -717,8 +717,14 @@ fn connector_connected(
         .and_then(|oc| oc.scale)
         .unwrap_or(state.config.general.output_scale);
     let scale = crate::backend::scale_from_config(scale_val);
+    let transform = state
+        .config
+        .outputs
+        .get(&output_name)
+        .and_then(|oc| oc.transform)
+        .map(crate::backend::transform_from_config);
     output.set_preferred(wl_mode);
-    output.change_current_state(Some(wl_mode), None, Some(scale), Some(position));
+    output.change_current_state(Some(wl_mode), transform, Some(scale), Some(position));
     state.space.map_output(&output, position);
 
     output.user_data().insert_if_missing(|| UdevOutputId {
@@ -808,6 +814,7 @@ fn connector_connected(
             height: wl_mode.size.h,
             scale: scale_val,
             adaptive_sync: vrr,
+            transform: crate::backend::transform_name(output.current_transform()).to_string(),
         },
     ));
 

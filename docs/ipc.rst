@@ -472,12 +472,20 @@ these fields omit them too — clients should treat "absent" and "off-screen"
       "width":  3840,
       "height": 2160,
       "scale":  1.5,
-      "adaptive_sync": false
+      "adaptive_sync": false,
+      "transform": "normal"
     }
 
 ``adaptive_sync`` is ``true`` only when the output opted in via
 ``[outputs.<name>] adaptive_sync = true`` *and* the connector advertised VRR
 support. It is always ``false`` under the nested winit backend.
+
+``transform`` is the output's orientation as a ``wlr-randr``-style name —
+``"normal"``, ``"90"``, ``"180"``, ``"270"``, or the mirrored ``"flipped"`` /
+``"flipped-90"`` / ``"flipped-180"`` / ``"flipped-270"``. It reflects the live
+state, whether set via ``[outputs.<name>] transform`` or a later
+``wlr-output-management`` apply. ``width`` and ``height`` are the raw mode
+dimensions; a ``"90"`` / ``"270"`` transform swaps the logical usable area.
 
 ``tree`` payload types
 ~~~~~~~~~~~~~~~~~~~~~~~

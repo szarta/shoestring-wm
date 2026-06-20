@@ -249,6 +249,20 @@ are optional; unset fields fall back to the matching ``[general]`` default.
        the DRM/KMS (TTY) backend — ignored when running nested under
        winit. ``shoestring-ctl outputs`` reports the resolved state in
        each output's ``adaptive_sync`` field.
+   * - ``transform``
+     - string
+     - ``"normal"``
+     - Rotate or flip this output. Accepted values match ``wlr-randr`` /
+       ``wl_output``: ``"normal"``, ``"90"``, ``"180"``, ``"270"``
+       (clockwise rotations), and the mirrored variants ``"flipped"``,
+       ``"flipped-90"``, ``"flipped-180"``, ``"flipped-270"`` (mirror
+       horizontally, then rotate). A ``"90"`` / ``"270"`` transform swaps
+       the logical width and height — a 1920×1080 panel becomes a
+       1080×1920 portrait workspace. Applied at output creation. Only
+       honored on the DRM/KMS (TTY) backend; ignored under nested winit. A
+       later ``wlr-output-management`` apply (e.g. ``wlr-randr --transform``)
+       overrides whatever is set here. ``shoestring-ctl outputs`` reports
+       the live orientation in each output's ``transform`` field.
 
 Example — a HiDPI laptop panel at 2× on the left, 1× external (a VRR gaming
 monitor) on the right::
@@ -264,6 +278,17 @@ monitor) on the right::
     scale = 1.0
     position = [1920, 0]
     adaptive_sync = true
+
+A portrait monitor rotated 90° clockwise, sat to the right of a landscape
+panel. Note the ``position`` x-offset is the landscape panel's logical width,
+and the rotated panel now occupies a 1080-wide column::
+
+    [outputs.eDP-1]
+    position = [0, 0]               # 1920×1080 landscape
+
+    [outputs.DP-2]
+    transform = "90"                # 1920×1080 panel → 1080×1920 portrait
+    position = [1920, 0]
 
 .. note::
 

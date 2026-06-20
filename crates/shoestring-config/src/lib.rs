@@ -36,6 +36,36 @@ pub struct OutputConfig {
     /// DRM/KMS (TTY) backend; ignored when running nested under winit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_sync: Option<bool>,
+    /// Rotate / flip this output. Applied at output creation. Unset leaves the
+    /// panel in its native orientation. Only honored on the DRM/KMS (TTY)
+    /// backend; ignored under nested winit (which owns its own transform).
+    /// A later `wlr-output-management` apply (e.g. `wlr-randr --transform`)
+    /// overrides whatever is configured here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<OutputTransform>,
+}
+
+/// Output orientation, matching the `wl_output` / `wlr-randr` transform names.
+/// `_90`/`_180`/`_270` are clockwise rotations; the `Flipped*` variants mirror
+/// horizontally first, then rotate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum OutputTransform {
+    #[serde(rename = "normal")]
+    Normal,
+    #[serde(rename = "90")]
+    _90,
+    #[serde(rename = "180")]
+    _180,
+    #[serde(rename = "270")]
+    _270,
+    #[serde(rename = "flipped")]
+    Flipped,
+    #[serde(rename = "flipped-90")]
+    Flipped90,
+    #[serde(rename = "flipped-180")]
+    Flipped180,
+    #[serde(rename = "flipped-270")]
+    Flipped270,
 }
 
 /// Top-level config. Sections are all optional; missing sections take defaults.
@@ -1450,6 +1480,45 @@ actions = { sticky = true, always_on_top = true }
         let oc = cfg.outputs.get("eDP-1").unwrap();
         assert_eq!(oc.scale, Some(2.0));
         assert_eq!(oc.position, Some([0, 0]));
+    }
+
+    #[test]
+    fn per_output_transform_parses_rotations() {
+        let toml_src =
+            "[outputs.DP-1]\ntransform = \"90\"\n\n[outputs.DP-2]\ntransform = \"flipped-270\"\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            cfg.outputs.get("DP-1").and_then(|o| o.transform),
+            Some(OutputTransform::_90)
+        );
+        assert_eq!(
+            cfg.outputs.get("DP-2").and_then(|o| o.transform),
+            Some(OutputTransform::Flipped270)
+        );
+    }
+
+    #[test]
+    fn per_output_transform_absent_is_none() {
+        let toml_src = "[outputs.DP-1]\nscale = 1.0\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.outputs.get("DP-1").and_then(|o| o.transform), None);
+    }
+
+    #[test]
+    fn per_output_transform_rejects_unknown() {
+        let toml_src = "[outputs.DP-1]\ntransform = \"sideways\"\n";
+        assert!(toml::from_str::<Config>(toml_src).is_err());
+    }
+
+    #[test]
+    fn per_output_transform_round_trips() {
+        let toml_src = "[outputs.DP-1]\ntransform = \"180\"\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let dumped = toml::to_string(&cfg).unwrap();
+        assert!(
+            dumped.contains("transform = \"180\""),
+            "transform must serialize back to its wlr-randr name, got:\n{dumped}"
+        );
     }
 
     #[test]

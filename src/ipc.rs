@@ -1101,6 +1101,7 @@ fn collect_outputs(state: &ShoestringWm) -> Vec<OutputSummary> {
                     .user_data()
                     .get::<crate::backend::VrrState>()
                     .is_some_and(|v| v.0),
+                transform: crate::backend::transform_name(o.current_transform()).to_string(),
             }
         })
         .collect()
