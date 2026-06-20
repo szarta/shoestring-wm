@@ -24,6 +24,78 @@ The reference client (``shoestring-ctl``) and the bar both use the
 ``shoestring-ipc`` crate's ``client_socket_path()`` helper which
 implements this fallback.
 
+.. _ipc-stability:
+
+Stability and versioning
+------------------------
+
+The wire format is **stabilizing, not yet frozen**. shoestring-wm is
+pre-1.0: no breaking change has been made since the protocol shipped in
+0.1.0, and the intent is to keep it that way, but the format is only
+contractually frozen at 1.0. From 1.0 onward the wire format follows
+semver — breaking changes ride a major bump.
+
+There is **no in-band protocol version** field and no ``version``
+request. The single reference point is the WM/CLI version, which tracks
+the workspace ``Cargo.toml`` version::
+
+    $ shoestring-ctl --version
+    shoestring-ctl 0.4.0
+
+A client that needs to know whether a newer request or field exists
+should key off that version, or simply issue the request and handle a
+possible ``error`` reply.
+
+Compatibility rules
+~~~~~~~~~~~~~~~~~~~~
+
+These are the guarantees the protocol holds *within* a release series,
+and the rules new server code follows when it touches the surface:
+
+**Additive evolution.** New request types, response types, event types,
+fields, enum variants, and metric names may appear in any release. The
+catalogues are **append-only**: an existing request/response/event/field
+is never renamed or repurposed without a major bump. The metric-name set
+is the original precedent (see :ref:`the metrics note <ipc-metrics>`),
+and the same discipline applies to the whole surface.
+
+**New fields are optional and omittable.** Every field added to a
+response or event is serialized with ``#[serde(default,
+skip_serializing_if = …)]`` — it is left off the wire when empty and
+defaults when absent. A client built against an older schema keeps
+deserializing newer payloads unchanged. Examples already on the wire:
+``WindowSummary.geometry`` / ``.z`` / ``.sticky`` /
+``.always_on_top`` and the ``workspaces`` reply's ``names`` array, all
+of which older builds simply didn't emit.
+
+**Unknown-tolerant outbound, strict inbound.** Responses and events are
+**not** ``deny_unknown_fields``: a client should *ignore* any field — or
+any ``type`` discriminator — it does not recognize, so a newer WM can add
+to the stream without breaking it. Requests, by contrast, **are**
+``deny_unknown_fields``: the WM rejects a request carrying a field it
+does not know. Do not send a field to a WM that predates it — gate on the
+version above. (This asymmetry is deliberate: tolerant readers make
+forward-compat cheap, while strict request parsing turns a typo or a
+too-new field into a loud ``error`` instead of a silently-ignored
+option.)
+
+**Error text is not an API.** Branch on the presence of
+``{"type": "error"}``, not on the human-readable ``message`` string,
+which may be reworded at any time. The one exception is explicitly
+called out: the automation-gate refusal prefix is *"stable enough to
+scrape on"* (see :ref:`the automation gate <ipc-automation-gate>`).
+
+**Experimental / internal surfaces.** Everything documented here is
+considered stable under the rules above, with two exceptions still
+expected to evolve:
+
+- ``metrics_stream`` interval handling — v1 clamps the push interval *up*
+  to the sample interval and cannot push faster than it samples; finer
+  control may be added later.
+- The media-privacy ``report_media`` request is an internal contract
+  between the WM and the trusted ``shoestring-mediad`` monitor, not a
+  general client API; its shape may change with that pair.
+
 Requests
 --------
 
@@ -261,6 +333,8 @@ Injected key and click events bypass the WM's binding table — a scripted
 ``Super+q`` will NOT trigger the ``Quit`` binding. Use
 ``dispatch_action`` (above) for that path.
 
+.. _ipc-automation-gate:
+
 Automation gate
 ~~~~~~~~~~~~~~~
 
@@ -347,6 +421,8 @@ The server replies with a single JSON object tagged by ``type``:
     child's real code; ``-1`` means killed by signal (typically the
     timeout-driven ``SIGKILL``). ``truncated`` is true if either
     stream exceeded the 64 KiB cap.
+
+.. _ipc-metrics:
 
 ``metrics``
     ``{"type": "metrics", "ts_ms": <u64>, "metrics": {<name>: MetricValue, ...}}``.
@@ -791,3 +867,70 @@ A minimal Python client::
 
 The protocol is one-shot per connection except for ``event_stream``;
 open a new connection for each ad-hoc query.
+
+Changelog
+---------
+
+Wire-format changes by release, newest first. Versions are the WM/CLI
+version (``shoestring-ctl --version``). Per the :ref:`stability policy
+<ipc-stability>` every entry below is an *additive* change — nothing has
+been renamed, removed, or repurposed since 0.1.0 — so a client written
+against any prior version still works against a newer WM.
+
+Unreleased
+~~~~~~~~~~
+
+- ``inputs`` request + ``inputs`` response (``InputSummary`` list): the
+  input-device analogue of ``outputs``. Read-only, not gated.
+- Media-privacy surface: ``media_status`` / ``set_audio_mute`` /
+  ``set_mic_mute`` requests, the ``report_media`` ingest request (WM ⇆
+  ``shoestring-mediad`` only), the ``media`` response, and the
+  ``media_changed`` event.
+- ``OutputSummary.transform`` — the active output rotation/flip.
+- New metric names: render, input, and IPC counters (append-only; older
+  consumers ignore unknown names).
+
+0.4.0
+~~~~~
+
+- ``raise_window`` / ``lower_window`` requests + ``window_restacked``
+  event; ``WindowSummary.z`` (stacking order) added to ``windows``.
+- ``set_window_sticky`` request + ``window_sticky_changed`` event;
+  ``WindowSummary.sticky`` added.
+- ``set_window_always_on_top`` request + ``window_always_on_top_changed``
+  event; ``WindowSummary.always_on_top`` added.
+- Per-client ``wl_surface`` gauges added to the ``metrics`` set.
+
+0.3.0
+~~~~~
+
+- ``metrics`` / ``metrics_stream`` requests, the ``metrics`` response and
+  event, and the ``MetricValue`` tagged shape (the append-only
+  metric-name set originates here).
+- Screen-capture gate: ``set_screen_capture`` / ``screen_capture_status``
+  requests, the ``screen_capture`` response, and the
+  ``screen_capture_changed`` event. Enabling automation now also enables
+  screen capture (automation is a superset).
+- ``set_gamma`` / ``reset_gamma`` requests (not automation-gated).
+- ``get_tree`` request + ``tree`` response — the outputs→workspaces→
+  windows layout snapshot.
+- ``set_window_name`` request — override a window's display title;
+  reflected in ``windows`` / ``get_tree`` / ``find_windows`` and the
+  ``window_title_changed`` event.
+
+0.2.0
+~~~~~
+
+- No wire-format changes.
+
+0.1.0
+~~~~~
+
+- Initial IPC surface. Read-only queries (``workspaces`` — including the
+  ``names`` array, ``windows``, ``outputs``, ``pointer_position``),
+  ``find_windows``, ``focus_window``, ``close_window``, ``event_stream``,
+  ``lock``, and ``reload_config``.
+- The automation gate, plus the automation-gated primitives:
+  ``inject_key`` / ``inject_text`` / ``inject_click``, ``move_mouse``,
+  ``dispatch_action``, ``pick_window``, ``screenshot``, and
+  ``run_command``; ``set_automation`` / ``automation_status``.
