@@ -219,9 +219,11 @@ pub fn broadcast_done(state: &mut crate::state::ShoestringWm) {
 /// Announce a newly-connected output to every bound manager and bump the
 /// serial.  Call this after the output is fully initialised and mapped.
 ///
-/// Only the tty/udev backend hotplugs outputs; the winit backend has a single
-/// static output, so this is dead code there.
-#[cfg(feature = "tty")]
+/// The tty/udev backend calls this on every connector hotplug; the winit
+/// backend calls it once at startup for its single static output (so the
+/// first manager bind sees a non-zero serial). Hence it must build under
+/// either real backend — `#[cfg(tty)]` alone broke the winit-only build.
+#[cfg(any(feature = "tty", feature = "winit"))]
 pub fn broadcast_head_added(state: &mut crate::state::ShoestringWm, output: &Output) {
     let dh = state.display_handle.clone();
     let managers: Vec<_> = state.output_management.managers.clone();

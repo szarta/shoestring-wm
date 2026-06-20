@@ -58,6 +58,58 @@ jobs:
       - name: cargo build (release)
         run: cargo build --workspace --release
 
+  # The default build is `winit + tty`; `cargo build --workspace` above only
+  # ever exercises that combo. This matrix compiles shoestring-wm with each
+  # non-default backend feature set on its own so they don't silently rot —
+  # e.g. a function gated `#[cfg(feature = "tty")]` but called from the winit
+  # backend compiles fine by default yet breaks the winit-only build.
+  #
+  # Combos:
+  #   - winit / tty: each real backend, built in isolation.
+  #   - gl: backend-less, renderer only — the shape the WLCS headless harness
+  #     consumes. (A pure `--no-default-features` build does NOT compile by
+  #     design: the screencopy capture path needs `renderer_gl`, which is
+  #     exactly what the `gl` marker feature pulls in for backend-less users.)
+  #
+  # Plain `cargo build`, not `clippy -D warnings`: the backend-less config
+  # legitimately leaves a lot of backend plumbing as dead code, so the goal
+  # here is compile-rot detection, not a warning gate.
+  feature-matrix:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: backend-less (gl only), features: gl }
+          - { name: winit only, features: winit }
+          - { name: tty only, features: tty }
+    name: build (${{ matrix.name }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Superset of every backend's build deps (same list as `check`, minus the
+      # PipeWire/clang headers, which only the portal/mediad crates need — this
+      # job builds the WM crate alone).
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build (${{ matrix.features }})
+        run: cargo build -p shoestring-wm --no-default-features --features ${{ matrix.features }}
+
   # Runs the WM's #[ignore]'d integration tests against a real, headless
   # shoestring-wm instance. The protocol suites (output-management,
   # pointer-constraints/gestures, tablet, idle-inhibit, virtual-pointer,
