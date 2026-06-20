@@ -1136,6 +1136,67 @@ impl ShoestringWm {
         self.sticky.contains(window)
     }
 
+    /// One-shot tile every window on the active workspace into `kind`, per
+    /// output. Windows are grouped by the output they currently sit on (so each
+    /// monitor is tiled independently inside its own usable rect) and ordered
+    /// by their current top-left for a stable, reading-order placement.
+    /// Minimized and fullscreen windows are left untouched. This holds no
+    /// persistent layout state — afterwards the windows are ordinary floating
+    /// windows. Bound to the Super+G cluster by default ([`Action::ArrangeGrid`]
+    /// / `ArrangeSpiral` / `ArrangeBsp`).
+    pub fn arrange_active_workspace(&mut self, kind: crate::layout::ArrangeKind) {
+        use smithay::utils::Rectangle;
+        let active = self.workspaces.active();
+        // Tileable windows on the active workspace: alive, mapped, not
+        // minimized, not app-driven-fullscreen.
+        let tileable: Vec<Window> = self
+            .workspaces
+            .windows_on(active)
+            .into_iter()
+            .filter(|w| {
+                w.alive()
+                    && self.space.element_location(w).is_some()
+                    && !self.layout.is_minimized(w)
+                    && self.layout.layout_state(w) != crate::layout::LayoutState::Fullscreen
+            })
+            .collect();
+        if tileable.is_empty() {
+            tracing::debug!(?kind, "arrange: no tileable windows on active workspace");
+            return;
+        }
+        // Group by output via each window's usable rect: an identical rect means
+        // the same output (the output's position is baked into the rect's loc).
+        // `Rectangle` isn't `Hash`, so key on its (x, y, w, h) tuple and carry
+        // the rect along in the value.
+        type RectKey = (i32, i32, i32, i32);
+        let mut groups: HashMap<RectKey, (Rectangle<i32, Logical>, Vec<Window>)> = HashMap::new();
+        for w in tileable {
+            if let Some(usable) = crate::layout::usable_rect_for(&self.space, &w) {
+                let key = (usable.loc.x, usable.loc.y, usable.size.w, usable.size.h);
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (usable, Vec::new()))
+                    .1
+                    .push(w);
+            }
+        }
+        for (_, (usable, mut group)) in groups {
+            // Stable, intuitive order: top-to-bottom, then left-to-right.
+            group.sort_by_key(|w| {
+                let loc = self.space.element_location(w).unwrap_or_default();
+                (loc.y, loc.x)
+            });
+            crate::layout::arrange(&mut self.space, &mut self.layout, &group, usable, kind);
+            // Persist the new positions so a workspace round-trip keeps them.
+            for w in &group {
+                if let Some(loc) = self.space.element_location(w) {
+                    self.workspaces.record_location(w, loc);
+                }
+            }
+        }
+        tracing::debug!(?kind, workspace = active.one_based(), "arranged workspace");
+    }
+
     /// Toggle the sticky flag on the focused window. No-op when nothing is
     /// focused. Bound to Super+S by default ([`Action::ToggleSticky`]).
     pub fn toggle_sticky_focused(&mut self) {

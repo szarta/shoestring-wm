@@ -126,6 +126,13 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
     ``maximize``
         Maximize to the monitor's usable rect (toggle).
 
+    ``arrange-grid`` / ``arrange-spiral`` / ``arrange-bsp``
+        One-shot auto-arrange of every window on the active workspace
+        (per output, in reading order) into a grid, fibonacci spiral, or
+        binary "dwindle" split. No persistent tiling — the windows stay
+        floating, so later opens/closes do not re-flow; invoke again to
+        re-tile. Skips minimized and fullscreen windows.
+
     ``minimize``
         Hide the focused window.
 

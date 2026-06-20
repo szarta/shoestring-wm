@@ -150,6 +150,11 @@ impl ShoestringWm {
             Action::TileLeft => self.window_layout_action(LayoutState::TiledLeft),
             Action::TileRight => self.window_layout_action(LayoutState::TiledRight),
             Action::Maximize => self.window_layout_action(LayoutState::Maximized),
+            Action::ArrangeGrid => self.arrange_active_workspace(crate::layout::ArrangeKind::Grid),
+            Action::ArrangeSpiral => {
+                self.arrange_active_workspace(crate::layout::ArrangeKind::Spiral)
+            }
+            Action::ArrangeBsp => self.arrange_active_workspace(crate::layout::ArrangeKind::Bsp),
             Action::Minimize => {
                 // Toggle: if something has focus, hide it; if nothing does,
                 // pop the last-hidden window back. Makes Super+D feel like

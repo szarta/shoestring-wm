@@ -21,8 +21,9 @@ libinput, and libseat.
 The compositor reads its configuration from a TOML file (see
 **shoestring-wm**\(5)) and exports a unix-socket JSON IPC for status
 bars and launcher utilities. The default keymap mirrors an Openbox
-flow: Super+E/W for half-tiling, Super+M to maximize, Super+D to
-minimize, Super+1..9 to switch workspaces, Super+drag for move/resize.
+flow: Super+E/W for half-tiling, Super+M to maximize, Super+G to
+arrange the workspace into a grid (one-shot), Super+D to minimize,
+Super+1..9 to switch workspaces, Super+drag for move/resize.
 Scrolling the mouse wheel over the bare desktop switches workspaces
 (wheel up for the next, wheel down for the previous).
 

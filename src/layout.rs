@@ -163,6 +163,144 @@ fn current_rect(space: &Space<Window>, window: &Window) -> Rectangle<i32, Logica
     Rectangle::new(loc, window.geometry().size)
 }
 
+/// One-shot automatic-arrangement layouts. Unlike the manual tile/maximize
+/// toggles ([`set_layout`]), these compute positions for *all* windows on a
+/// workspace's output at once, when the user invokes the matching action. They
+/// hold no persistent state — the arrangement is recomputed from scratch each
+/// time from the window count + order, and afterwards the windows are ordinary
+/// floating windows again (the user can move/resize/re-tile freely).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrangeKind {
+    /// Even-ish grid: ~√n rows, each split into columns covering the width.
+    Grid,
+    /// Fibonacci spiral: each window halves the remainder, the kept corner
+    /// rotating so the windows spiral inward; the last fills what's left.
+    Spiral,
+    /// Binary "dwindle": like [`Spiral`](ArrangeKind::Spiral) but the kept
+    /// corner is fixed, so windows shrink toward the bottom-right corner.
+    Bsp,
+}
+
+/// Compute the tiled rectangles for `n` windows inside `usable` under `kind`.
+/// Returns exactly `n` rectangles (empty for `n == 0`) that partition `usable`:
+/// pairwise non-overlapping, each within bounds, together covering it exactly.
+pub fn arrange_rects(
+    usable: Rectangle<i32, Logical>,
+    n: usize,
+    kind: ArrangeKind,
+) -> Vec<Rectangle<i32, Logical>> {
+    match kind {
+        ArrangeKind::Grid => grid_rects(usable, n),
+        ArrangeKind::Spiral => split_rects(usable, n, true),
+        ArrangeKind::Bsp => split_rects(usable, n, false),
+    }
+}
+
+/// Split `total` into `parts` contiguous integer spans covering it exactly,
+/// distributing the remainder one pixel at a time to the earliest spans. Each
+/// returned `(offset, len)` is relative to 0; callers add the axis origin.
+/// `parts` must be >= 1.
+fn even_spans(total: i32, parts: i32) -> Vec<(i32, i32)> {
+    debug_assert!(parts >= 1);
+    let base = total / parts;
+    let extra = total % parts; // 0..parts; could be negative if total < 0
+    let mut spans = Vec::with_capacity(parts as usize);
+    let mut off = 0;
+    for i in 0..parts {
+        // Hand the remainder out to the first `extra` spans so the sum is exact
+        // even when `total` isn't divisible (and when it's negative/degenerate).
+        let len = base + if i < extra { 1 } else { 0 };
+        spans.push((off, len));
+        off += len;
+    }
+    spans
+}
+
+/// Grid layout: ~√n rows, windows distributed across rows as evenly as
+/// possible (earlier rows take the extra), each row split into columns that
+/// cover the full width. Covers `usable` exactly with no gaps or overlap.
+fn grid_rects(usable: Rectangle<i32, Logical>, n: usize) -> Vec<Rectangle<i32, Logical>> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let n_i = n as i32;
+    let rows = (n as f64).sqrt().floor().max(1.0) as i32;
+    let base_cols = n_i / rows;
+    let extra = n_i % rows; // first `extra` rows get one more column
+    let mut out = Vec::with_capacity(n);
+    let row_spans = even_spans(usable.size.h, rows);
+    for (r, (y_off, h)) in row_spans.into_iter().enumerate() {
+        let cols = base_cols + if (r as i32) < extra { 1 } else { 0 };
+        if cols == 0 {
+            continue; // only when n < rows, which can't happen for rows=floor(√n)
+        }
+        let y = usable.loc.y + y_off;
+        for (x_off, w) in even_spans(usable.size.w, cols) {
+            out.push(Rectangle::new(
+                (usable.loc.x + x_off, y).into(),
+                (w, h).into(),
+            ));
+        }
+    }
+    out
+}
+
+/// Recursive split layout shared by spiral and dwindle. Each window but the
+/// last takes half of the current remainder along the alternating long-ish
+/// axis (vertical split first, then horizontal, …); the last window fills the
+/// whole remainder. `rotate` chooses spiral (kept corner rotates) vs dwindle
+/// (kept corner fixed at top/left).
+fn split_rects(
+    usable: Rectangle<i32, Logical>,
+    n: usize,
+    rotate: bool,
+) -> Vec<Rectangle<i32, Logical>> {
+    let mut out = Vec::with_capacity(n);
+    let mut rem = usable;
+    for i in 0..n {
+        if i == n - 1 {
+            out.push(rem);
+            break;
+        }
+        // Alternate split axis: even steps split left|right (vertical seam),
+        // odd steps split top|bottom (horizontal seam).
+        let vertical = i % 2 == 0;
+        // Spiral rotates the kept corner every other split so windows wind
+        // inward; dwindle always keeps the first (left/top) piece.
+        let keep_first = !rotate || (i % 4 < 2);
+        let (mine, next) = if vertical {
+            let (lw, rw) = halves(rem.size.w);
+            let left = Rectangle::new(rem.loc, (lw, rem.size.h).into());
+            let right = Rectangle::new((rem.loc.x + lw, rem.loc.y).into(), (rw, rem.size.h).into());
+            if keep_first {
+                (left, right)
+            } else {
+                (right, left)
+            }
+        } else {
+            let (th, bh) = halves(rem.size.h);
+            let top = Rectangle::new(rem.loc, (rem.size.w, th).into());
+            let bottom =
+                Rectangle::new((rem.loc.x, rem.loc.y + th).into(), (rem.size.w, bh).into());
+            if keep_first {
+                (top, bottom)
+            } else {
+                (bottom, top)
+            }
+        };
+        out.push(mine);
+        rem = next;
+    }
+    out
+}
+
+/// Split a length into two halves covering it exactly; the extra pixel on odd
+/// lengths goes to the second half (matching the tile-half convention).
+fn halves(len: i32) -> (i32, i32) {
+    let first = len / 2;
+    (first, len - first)
+}
+
 /// Target rect for a tile/maximize state within `usable`. Returns `None` for
 /// `Floating` and `Fullscreen`, which don't derive from the usable rect.
 fn tiled_rect(
@@ -221,6 +359,28 @@ pub fn apply_geometry(
         let _ = x11.configure(rect);
     }
     space.map_element(window.clone(), rect.loc, false);
+}
+
+/// One-shot arrange: tile `windows` (in the given order) into `usable` under
+/// `kind`. Each window is configured to its computed rect and left as an
+/// ordinary [`Floating`](LayoutState::Floating) window — there's no saved rect
+/// or toggle-back, so the user can immediately move/resize/re-tile. Callers
+/// group windows per output and pass that output's usable rect.
+pub fn arrange(
+    space: &mut Space<Window>,
+    layout: &mut LayoutManager,
+    windows: &[Window],
+    usable: Rectangle<i32, Logical>,
+    kind: ArrangeKind,
+) {
+    let rects = arrange_rects(usable, windows.len(), kind);
+    for (window, rect) in windows.iter().zip(rects) {
+        let meta = layout.entry(window);
+        meta.layout = LayoutState::Floating;
+        meta.saved_rect = None;
+        meta.pre_fullscreen = None;
+        apply_geometry(space, window, rect, LayoutState::Floating);
+    }
 }
 
 /// Transition `window` toward `target`. If it's already in `target`, restore
@@ -418,6 +578,61 @@ mod tests {
             }
         }
 
+        /// Every one-shot arrange layout must partition the usable rect: produce
+        /// exactly `n` rects, each within bounds, pairwise non-overlapping, and
+        /// together covering the whole area (areas sum to the usable area).
+        #[test]
+        fn arrange_layouts_partition_usable(
+            usable in any_usable(),
+            n in 0usize..40,
+        ) {
+            for kind in [ArrangeKind::Grid, ArrangeKind::Spiral, ArrangeKind::Bsp] {
+                let rects = arrange_rects(usable, n, kind);
+                prop_assert_eq!(rects.len(), n, "kind={:?} n={}", kind, n);
+
+                // Each rect is inside the usable bounds and non-negative.
+                for r in &rects {
+                    prop_assert!(r.size.w >= 0 && r.size.h >= 0);
+                    prop_assert!(r.loc.x >= usable.loc.x);
+                    prop_assert!(r.loc.y >= usable.loc.y);
+                    prop_assert!(r.loc.x + r.size.w <= usable.loc.x + usable.size.w);
+                    prop_assert!(r.loc.y + r.size.h <= usable.loc.y + usable.size.h);
+                }
+
+                // Areas sum to the usable area — full coverage with no double
+                // counting (combined with the pairwise-disjoint check below,
+                // this proves an exact partition). Use i64 to avoid overflow.
+                let total: i64 = rects
+                    .iter()
+                    .map(|r| r.size.w as i64 * r.size.h as i64)
+                    .sum();
+                let want = usable.size.w as i64 * usable.size.h as i64;
+                if n == 0 {
+                    prop_assert_eq!(total, 0);
+                } else {
+                    prop_assert_eq!(total, want, "kind={:?} n={}", kind, n);
+                }
+
+                // Pairwise non-overlapping (skip zero-area rects: they can't
+                // overlap anything and may share an edge coordinate).
+                for (i, a) in rects.iter().enumerate() {
+                    if a.size.w == 0 || a.size.h == 0 {
+                        continue;
+                    }
+                    for b in &rects[i + 1..] {
+                        if b.size.w == 0 || b.size.h == 0 {
+                            continue;
+                        }
+                        let disjoint = a.loc.x + a.size.w <= b.loc.x
+                            || b.loc.x + b.size.w <= a.loc.x
+                            || a.loc.y + a.size.h <= b.loc.y
+                            || b.loc.y + b.size.h <= a.loc.y;
+                        prop_assert!(disjoint, "overlap kind={:?} n={} {:?} {:?}", kind, n, a, b);
+                    }
+                }
+            }
+        }
+
         /// Multi-output placement: side-by-side outputs that tile a region must
         /// contain every interior point in exactly one output — `rect_contains`
         /// being half-open means a point on a shared seam isn't claimed twice or
@@ -462,5 +677,52 @@ mod tests {
             let point: Point<i32, Logical> = (total_w, 0).into();
             prop_assert!(rects.iter().all(|r| !rect_contains(*r, point)));
         }
+    }
+
+    /// Concrete small-`n` shapes for the arrange layouts, to pin behavior the
+    /// partition proptest can't (it only checks the invariants, not placement).
+    #[test]
+    fn arrange_small_n_shapes() {
+        let u = Rectangle::new((0, 0).into(), (100, 80).into());
+
+        // n == 0 → nothing; n == 1 → the whole usable rect, every layout.
+        for kind in [ArrangeKind::Grid, ArrangeKind::Spiral, ArrangeKind::Bsp] {
+            assert!(arrange_rects(u, 0, kind).is_empty());
+            assert_eq!(arrange_rects(u, 1, kind), vec![u]);
+        }
+
+        // Grid n == 2 → one row of two columns (rows = floor(√2) = 1).
+        assert_eq!(
+            grid_rects(u, 2),
+            vec![
+                Rectangle::new((0, 0).into(), (50, 80).into()),
+                Rectangle::new((50, 0).into(), (50, 80).into()),
+            ]
+        );
+        // Grid n == 4 → 2×2.
+        assert_eq!(
+            grid_rects(u, 4),
+            vec![
+                Rectangle::new((0, 0).into(), (50, 40).into()),
+                Rectangle::new((50, 0).into(), (50, 40).into()),
+                Rectangle::new((0, 40).into(), (50, 40).into()),
+                Rectangle::new((50, 40).into(), (50, 40).into()),
+            ]
+        );
+
+        // Both recursive layouts: first window takes the left half (vertical
+        // split first), the last fills the remainder.
+        for kind in [ArrangeKind::Spiral, ArrangeKind::Bsp] {
+            let r = arrange_rects(u, 2, kind);
+            assert_eq!(r[0], Rectangle::new((0, 0).into(), (50, 80).into()));
+            assert_eq!(r[1], Rectangle::new((50, 0).into(), (50, 80).into()));
+        }
+
+        // Dwindle keeps the top of the right column for window 1; window 2 fills
+        // the bottom of the right column (corner fixed, shrinking down-right).
+        let bsp = arrange_rects(u, 3, ArrangeKind::Bsp);
+        assert_eq!(bsp[0], Rectangle::new((0, 0).into(), (50, 80).into()));
+        assert_eq!(bsp[1], Rectangle::new((50, 0).into(), (50, 40).into()));
+        assert_eq!(bsp[2], Rectangle::new((50, 40).into(), (50, 40).into()));
     }
 }

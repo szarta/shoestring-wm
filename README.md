@@ -73,6 +73,7 @@ cargo build --release --no-default-features --features winit
 | `Super+P` / `Super+B` | Command launcher / bookmarks (shoestring-menu) |
 | `Super+E` / `Super+W` | Tile focused window left / right half |
 | `Super+M` | Maximize |
+| `Super+G` / `+Shift` / `+Ctrl` | Arrange workspace: grid / spiral / BSP (one-shot) |
 | `Super+D` / `Super+Shift+D` | Minimize / unminimize last |
 | `Super+X` | Close focused window |
 | `Alt+Tab` / `Super+Down` | Cycle focus through the workspace's windows |
@@ -114,6 +115,7 @@ Working today:
 - Configurable workspace count (default 16) with sparse per-slot names.
 - Multi-monitor with hotplug; HiDPI / fractional scale.
 - TileLeft / TileRight / Maximize / Minimize with floating-rect restore.
+- One-shot workspace arrange into grid / spiral / BSP-dwindle (per output).
 - Super+drag move; sustained edge-drag shifts the window across workspaces.
 - Configurable focus model: click-to-focus (default), focus-follows-mouse, sloppy.
 - XWayland integration: X11 toplevels (e.g. GIMP, Inkscape) map alongside Wayland windows; class/title window rules apply; clipboard + primary selection bridged.

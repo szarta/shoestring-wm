@@ -14,6 +14,9 @@ Binding                            Action
 ``Super+E``                        Tile left half
 ``Super+W``                        Tile right half
 ``Super+M``                        Maximize (toggle)
+``Super+G``                        Arrange workspace in a grid (one-shot)
+``Super+Shift+G``                  Arrange workspace in a spiral (one-shot)
+``Super+Ctrl+G``                   Arrange workspace as BSP/dwindle (one-shot)
 ``Super+D``                        Minimize
 ``Super+Shift+D``                  Restore most-recently-minimized window
 ``Super+X``                        Close the focused window
@@ -24,6 +27,12 @@ Binding                            Action
 ``Super+Left-drag``                Move the window under the cursor
 ``Super+Right-drag``               Resize the window under the cursor
 ================================  ============================================
+
+The three **arrange** binds are *one-shot*: they tile every window on the
+active workspace once (each output independently, in reading order), then leave
+the windows floating — there's no persistent tiling mode, so opening or closing
+a window later does not re-flow. Press an arrange bind again to re-tile.
+Minimized and fullscreen windows are left alone.
 
 Workspaces
 ----------

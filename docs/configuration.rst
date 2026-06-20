@@ -451,6 +451,17 @@ Each action type and its fields:
     layer-shell exclusive zones). Toggle: re-pressing restores the saved
     floating geometry.
 
+``arrange-grid`` / ``arrange-spiral`` / ``arrange-bsp``
+    One-shot auto-arrange of *every* window on the active workspace —
+    ``arrange-grid`` into an even-ish grid (~√n rows), ``arrange-spiral``
+    into a fibonacci spiral, ``arrange-bsp`` into a binary "dwindle" split.
+    Each output is tiled independently within its own usable rect, with
+    windows placed in reading order (top-to-bottom, then left-to-right).
+    These hold no state: the windows stay floating afterwards, so opening or
+    closing a window does not re-flow — invoke the action again to re-tile.
+    Minimized and fullscreen windows are skipped. Bound to ``Super+G`` /
+    ``Super+Shift+G`` / ``Super+Ctrl+G`` by default.
+
 ``minimize``
     Hide the focused window. The window is *not* destroyed; restore it
     with ``unminimize``.

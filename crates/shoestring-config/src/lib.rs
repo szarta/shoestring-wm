@@ -611,6 +611,19 @@ pub enum Action {
     TileRight,
     /// Maximize the focused window to its monitor's usable rect (toggle).
     Maximize,
+    /// One-shot: tile every window on the active workspace into an even-ish
+    /// grid (~√n rows). Computed per output from the current window count and
+    /// order; the windows stay floating afterwards (no persistent layout, no
+    /// reflow on later map/close). Wire form `{"type":"arrange-grid"}`.
+    ArrangeGrid,
+    /// One-shot: tile the active workspace into a fibonacci spiral. Like
+    /// [`Action::ArrangeGrid`] but each window halves the remaining space with
+    /// the kept corner rotating inward. Wire form `{"type":"arrange-spiral"}`.
+    ArrangeSpiral,
+    /// One-shot: tile the active workspace with a binary "dwindle" split — like
+    /// [`Action::ArrangeSpiral`] but the kept corner is fixed, so windows
+    /// shrink toward one corner. Wire form `{"type":"arrange-bsp"}`.
+    ArrangeBsp,
     /// Hide the focused window without destroying it. Restore via `unminimize`.
     Minimize,
     /// Restore the most-recently-minimized window.
@@ -813,6 +826,23 @@ impl Config {
                 mods: super_only(),
                 key: "m".into(),
                 action: Action::Maximize,
+            },
+            // One-shot auto-arrange of the active workspace, on the "g" cluster
+            // (g for grid/arrange): Super+G grid, +Shift spiral, +Ctrl dwindle.
+            Binding {
+                mods: super_only(),
+                key: "g".into(),
+                action: Action::ArrangeGrid,
+            },
+            Binding {
+                mods: super_shift(),
+                key: "g".into(),
+                action: Action::ArrangeSpiral,
+            },
+            Binding {
+                mods: super_ctrl(),
+                key: "g".into(),
+                action: Action::ArrangeBsp,
             },
             Binding {
                 mods: super_only(),
@@ -1428,6 +1458,39 @@ actions = { sticky = true }
         assert!(cfg.bindings.iter().any(|b| {
             matches!(b.action, Action::ToggleAlwaysOnTop) && b.key == "a" && b.mods == ["Super"]
         }));
+    }
+
+    #[test]
+    fn default_bindings_include_arrange_cluster() {
+        let cfg = Config::with_default_bindings();
+        let has = |pred: &dyn Fn(&Binding) -> bool| cfg.bindings.iter().any(|b| pred(b));
+        assert!(has(&|b| {
+            matches!(b.action, Action::ArrangeGrid) && b.key == "g" && b.mods == ["Super"]
+        }));
+        assert!(has(&|b| {
+            matches!(b.action, Action::ArrangeSpiral)
+                && b.key == "g"
+                && b.mods == ["Super", "Shift"]
+        }));
+        assert!(has(&|b| {
+            matches!(b.action, Action::ArrangeBsp) && b.key == "g" && b.mods == ["Super", "Ctrl"]
+        }));
+    }
+
+    #[test]
+    fn arrange_actions_use_kebab_case_wire_form() {
+        // The IPC dispatch_action path (serde_json) and config (toml) both rely
+        // on these kebab-case tags; parse each from a binding to lock them in.
+        let parse = |ty: &str| -> Action {
+            toml::from_str::<Binding>(&format!(
+                "mods = [\"Super\"]\nkey = \"g\"\naction = {{ type = \"{ty}\" }}\n"
+            ))
+            .unwrap()
+            .action
+        };
+        assert!(matches!(parse("arrange-grid"), Action::ArrangeGrid));
+        assert!(matches!(parse("arrange-spiral"), Action::ArrangeSpiral));
+        assert!(matches!(parse("arrange-bsp"), Action::ArrangeBsp));
     }
 
     #[test]
