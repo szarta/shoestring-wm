@@ -122,8 +122,18 @@ jobs:
     # records Fedora library packages (mesa-libgbm, mesa-libEGL, pam, ...)
     # rather than the Ubuntu sonames the host runner would carry. Without
     # this the .rpm installs but its dependencies don't resolve on Fedora.
+    #
+    # Track the CURRENT stable Fedora (`fedora:latest`), not a frozen release.
+    # The binary links some libraries whose soname Fedora bumps across releases
+    # — notably libdisplay-info (.so.2 on F41 -> .so.3 on F44), via
+    # smithay-drm-extras' EDID parsing — so an rpm built on an old Fedora hard-
+    # requires an soname that newer Fedora no longer ships and fails to install
+    # (found install-testing v0.4.0, built on fedora:41, on a real F44 box;
+    # todo #145). Building against the current stable keeps the single rpm
+    # installable on what people actually run; the supported floor follows
+    # upstream as a deliberate trade for zero per-release maintenance.
     container:
-      image: fedora:41
+      image: fedora:latest
 
     steps:
       - uses: actions/checkout@v4
