@@ -148,6 +148,7 @@ impl ShoestringWm {
             z: crate::ipc::window_z(self, window),
             sticky: self.is_sticky(window),
             always_on_top: self.is_always_on_top(window),
+            pid: crate::ipc::window_pid(self, window),
         })
     }
 

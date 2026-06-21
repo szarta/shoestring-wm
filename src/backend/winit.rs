@@ -25,9 +25,17 @@ pub fn init_winit(
     // which gets multiplied by its guessed scale factor (often 2x-2.75x on HiDPI
     // panels in X11 sessions where nothing else actually does per-app scaling),
     // creating a window larger than the visible screen and clipping the right half.
+    // Window title for the nested winit window. Defaults to "shoestring-wm",
+    // but $SHOESTRING_WM_WINIT_TITLE overrides it so a specific nested instance
+    // is identifiable on the parent compositor (the default collides when more
+    // than one nested WM is running — rename to disambiguate, then resolve it
+    // to a pid via the parent's `find_windows` → `WindowSummary::pid`).
+    let title =
+        std::env::var("SHOESTRING_WM_WINIT_TITLE").unwrap_or_else(|_| "shoestring-wm".to_string());
+    tracing::info!(%title, "winit window title");
     let attrs = WinitWindow::default_attributes()
         .with_inner_size(PhysicalSize::new(1600, 1000))
-        .with_title("shoestring-wm")
+        .with_title(title)
         .with_visible(true);
     let (mut backend, winit) = winit::init_from_attributes(attrs)
         .map_err(|e| anyhow::anyhow!("winit init failed: {e}"))?;

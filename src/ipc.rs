@@ -882,9 +882,26 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
                 z: window_z(state, window),
                 sticky: state.is_sticky(window),
                 always_on_top: state.is_always_on_top(window),
+                pid: window_pid(state, window),
             }
         })
         .collect()
+}
+
+/// OS process id of `window`'s owning client, when resolvable. The window's
+/// `wl_surface` carries the client; its peer credentials carry the pid.
+/// `None` when there's no surface yet, no client, or the platform reports no
+/// pid (FreeBSD `LOCAL_PEERCRED` yields 0 — treated as absent). For X11
+/// windows the surface belongs to XWayland, so this is XWayland's pid.
+pub(crate) fn window_pid(state: &ShoestringWm, window: &smithay::desktop::Window) -> Option<i32> {
+    use smithay::reexports::wayland_server::Resource;
+    let surface = crate::window_ext::focus_surface(window)?;
+    let client = surface.client()?;
+    client
+        .get_credentials(&state.display_handle)
+        .ok()
+        .map(|creds| creds.pid)
+        .filter(|&pid| pid > 0)
 }
 
 /// A window's on-screen rectangle in compositor-global logical coords, using

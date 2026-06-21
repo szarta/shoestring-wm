@@ -532,7 +532,8 @@ The server replies with a single JSON object tagged by ``type``:
       "geometry":     {"x": 0, "y": 0, "w": 960, "h": 1080},
       "z":            2,
       "sticky":       true,
-      "always_on_top": true
+      "always_on_top": true,
+      "pid":          1234
     }
 
 ``id`` matches the ``identifier`` event from ``ext-foreign-toplevel-list-v1``,
@@ -549,6 +550,16 @@ is ``true`` when the window is pinned to all workspaces; ``always_on_top`` is
 (defaulting to ``false``) for ordinary windows. Older WM builds that pre-dated
 these fields omit them too — clients should treat "absent" and "off-screen"
 (and "not sticky" / "not always-on-top") identically.
+
+``pid`` is the operating-system process id of the window's owning client,
+letting a script resolve a window (matched by ``title`` / ``app_id`` via
+``find_windows``) to a process — e.g. to find a specific nested
+``shoestring-wm``'s pid (give it a distinct title with
+``SHOESTRING_WM_WINIT_TITLE`` first, since the default title collides across
+instances). It is **omitted** when the compositor can't resolve a pid: clients
+whose peer credentials carry none (e.g. FreeBSD ``LOCAL_PEERCRED``) and older
+WM builds. For **X11** windows it is XWayland's pid — the wayland surface
+belongs to the XWayland connection, not the X application.
 
 ``OutputSummary``::
 

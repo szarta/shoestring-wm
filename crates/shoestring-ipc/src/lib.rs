@@ -601,6 +601,15 @@ pub struct WindowSummary {
     /// builds and for ordinary windows.
     #[serde(default, skip_serializing_if = "is_false")]
     pub always_on_top: bool,
+    /// Operating-system process id of the window's owning client, when the
+    /// compositor can resolve it. `None` for clients whose peer credentials
+    /// don't carry a pid (e.g. FreeBSD's `LOCAL_PEERCRED`) and on older WM
+    /// builds. For X11 windows this is XWayland's pid, not the X app's, since
+    /// the wayland surface belongs to the XWayland connection. Lets a script
+    /// resolve a window (matched by `title` / `app_id`) to a pid — e.g. to
+    /// find a specific nested `shoestring-wm`'s process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i32>,
 }
 
 /// `skip_serializing_if` helper for `bool` fields that default to `false`,
@@ -1426,21 +1435,25 @@ mod tests {
             z: Some(2),
             sticky: true,
             always_on_top: true,
+            pid: Some(4242),
         };
         let s = serde_json::to_string(&with_geo).unwrap();
         assert!(s.contains(r#""geometry":{"x":0,"y":0,"w":640,"h":480}"#));
         assert!(s.contains(r#""z":2"#));
         assert!(s.contains(r#""sticky":true"#));
         assert!(s.contains(r#""always_on_top":true"#));
-        // A plain summary omits both flag fields entirely (default false).
+        assert!(s.contains(r#""pid":4242"#));
+        // A plain summary omits the optional/flag fields entirely.
         let plain = WindowSummary {
             sticky: false,
             always_on_top: false,
+            pid: None,
             ..with_geo.clone()
         };
         let plain_s = serde_json::to_string(&plain).unwrap();
         assert!(!plain_s.contains("sticky"));
         assert!(!plain_s.contains("always_on_top"));
+        assert!(!plain_s.contains("pid"));
     }
 
     #[test]
@@ -1665,6 +1678,7 @@ mod tests {
                 z: Some(0),
                 sticky: false,
                 always_on_top: false,
+                pid: Some(99),
             }),
         };
         let s = serde_json::to_string(&picked).unwrap();
