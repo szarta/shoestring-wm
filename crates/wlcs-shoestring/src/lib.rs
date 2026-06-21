@@ -261,5 +261,49 @@ impl wlcs::Touch for TouchHandle {
 }
 
 fn start_wm(channel: calloop::channel::Channel<WlcsEvent>) -> JoinHandle<()> {
+    // Pin this plugin in memory *before* spawning the compositor thread, so the
+    // thread can never outlive our mapped segments. See `pin_cdylib`.
+    pin_cdylib();
     std::thread::spawn(move || main_loop::run(channel))
+}
+
+/// Mark this cdylib `RTLD_NODELETE` so the dynamic loader never unmaps it.
+///
+/// WLCS `dlopen()`s this plugin and, at process teardown, `dlclose()`s it (via
+/// a C++ `shared_ptr` release in the runner's exit handlers). Each test spawns
+/// the compositor on its own thread ([`start_wm`]); under heavy load — e.g. the
+/// suite run many-way parallel on a busy machine — a just-spawned worker thread
+/// can still be in its libc TLS-setup trampoline (`tls_get_addr_tail`) at the
+/// instant the loader `munmap`s our segments, faulting on a TLS module whose
+/// link-map has been freed (`the_map == NULL`). The test itself has already
+/// passed by then, so the only symptom is a SIGSEGV *during process exit* that
+/// the runner scores (by exit code) as a spurious FAIL. That race — not any
+/// frame-pacing / arrange-timing effect — is the whole "load-dependent flaky
+/// band" that blocked a deterministic WLCS gate (task 161).
+///
+/// Re-`dlopen`ing ourselves with `RTLD_NODELETE` sets the link-map's nodelete
+/// flag, so the runner's `dlclose` decrements our refcount but never unmaps us.
+/// Our code and TLS stay valid for the (imminently-exiting) process's lifetime;
+/// a worker thread that hasn't been joined yet leaks harmlessly instead of
+/// touching freed memory. Idempotent and cheap: a [`Once`] guards the one
+/// `RTLD_NOLOAD` self-open per process.
+fn pin_cdylib() {
+    static PIN: std::sync::Once = std::sync::Once::new();
+    PIN.call_once(|| {
+        // SAFETY: `dladdr` only reads; we pass a code address from this module
+        // so `dli_fname` names our own `.so`, which we then re-open with
+        // NOLOAD (fetch the existing handle, don't map a second copy) and
+        // NODELETE (pin it). The returned handle is intentionally leaked.
+        unsafe {
+            let mut info: libc::Dl_info = std::mem::zeroed();
+            if libc::dladdr(pin_cdylib as *const libc::c_void, &mut info) != 0
+                && !info.dli_fname.is_null()
+            {
+                libc::dlopen(
+                    info.dli_fname,
+                    libc::RTLD_NOW | libc::RTLD_NOLOAD | libc::RTLD_NODELETE,
+                );
+            }
+        }
+    });
 }

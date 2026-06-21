@@ -4,19 +4,23 @@ name: WLCS
 # (crates/wlcs-shoestring, excluded from the workspace) and runs the full suite
 # against it, gating on the tracked xfail skip-list (tests/wlcs/run-wlcs.sh).
 #
-# MANUAL-TRIGGER ONLY for now (see todo #87). The skip-list IS seeded
-# (2026-06-19: ~432/1225 pass, 792 anvil-verified xfails, 0 our-side bugs) and
-# check-results gates against it + a flaky-list. What blocks a push/PR gate is
-# NOT the skip-list anymore but harness frame-pacing nondeterminism: a broad
-# LOAD/timing-dependent band of layer-shell/region/pointer-constraints/subsurface
-# tests flips pass<->fail run-to-run (membership shifts, so it can't be fully
-# flaky-listed). Under that, a blocking gate would intermittently red-fail on
-# correct code. Flip the `on:` block below to push/pull_request ONLY after the
-# harness-determinism follow-up lands and a gate run is stable across repeats:
-#   on:
-#     push: { branches: [main] }
-#     pull_request:
+# BLOCKING push/PR gate. The skip-list is seeded (2026-06-19: 433/1225 pass, 792
+# anvil-verified xfails, 0 our-side bugs) and the harness gives a deterministic
+# verdict under load as of task 161. The "load-dependent flaky band" that kept
+# this manual-only turned out NOT to be frame-pacing but a teardown crash: WLCS
+# dlopen()s the plugin and dlclose()s it at process exit, and under load a
+# just-spawned compositor thread could still be in its TLS-setup trampoline when
+# the loader unmapped our segments -> SIGSEGV during exit, AFTER the test had
+# already passed, which the runner scored (by exit code) as a spurious FAIL. The
+# plugin now pins itself RTLD_NODELETE (crates/wlcs-shoestring/src/lib.rs), so
+# the suite is stable across repeats and many-way parallelism (verified on an
+# 8-core node: 3x full parallel runs == serial baseline, 0 churn). A red run now
+# means a real conformance regression (or a newly-passing skip-list entry to
+# remove).
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 env:
