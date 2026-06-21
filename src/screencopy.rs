@@ -99,15 +99,16 @@ pub struct FrameInner {
 /// wl_shm buffer and send `ready`. Frames for other outputs are left in
 /// place for their own render pass to handle.
 ///
-/// `cursor_elements` are the same per-frame pointer elements the backend
-/// composites onto its real framebuffer; passing them in means screenshots
-/// match what's on screen.
+/// `overlays` are the same per-frame overlay elements the backend composites
+/// above the window stack onto its real framebuffer — the cursor (or lock
+/// surface) plus the server-side window borders. Passing them in means
+/// screenshots match what's on screen, borders included.
 pub fn process_pending<R>(
     screencopy: &mut ScreencopyState,
     space: &Space<smithay::desktop::Window>,
     output: &Output,
     renderer: &mut R,
-    cursor_elements: &[crate::drawing::PointerRenderElement<R>],
+    overlays: &[crate::drawing::CaptureOverlay<R>],
 ) where
     R: Renderer
         + ImportAll
@@ -118,7 +119,7 @@ pub fn process_pending<R>(
         + Offscreen<GlesTexture>,
     <R as RendererSuper>::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
-    crate::drawing::PointerRenderElement<R>: RenderElement<R>,
+    crate::drawing::CaptureOverlay<R>: RenderElement<R>,
     smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>: RenderElement<R>,
 {
     // Fast path: nothing to do.
@@ -194,7 +195,7 @@ pub fn process_pending<R>(
             &mut framebuffer,
             output,
             space,
-            cursor_elements,
+            overlays,
         );
         drop(framebuffer);
         match result {
@@ -262,7 +263,7 @@ pub fn process_pending<R>(
             &mut framebuffer,
             output,
             space,
-            cursor_elements,
+            overlays,
         );
         // Drop framebuffer before we re-borrow the renderer for copy.
         drop(framebuffer);
@@ -373,23 +374,23 @@ fn render_into<R>(
     framebuffer: &mut R::Framebuffer<'_>,
     output: &Output,
     space: &Space<smithay::desktop::Window>,
-    cursor_elements: &[crate::drawing::PointerRenderElement<R>],
+    overlays: &[crate::drawing::CaptureOverlay<R>],
 ) -> Result<(), String>
 where
     R: Renderer + ImportAll + ImportMem,
     R::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
-    crate::drawing::PointerRenderElement<R>: RenderElement<R>,
+    crate::drawing::CaptureOverlay<R>: RenderElement<R>,
     smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>: RenderElement<R>,
 {
-    smithay::desktop::space::render_output::<_, crate::drawing::PointerRenderElement<R>, _, _>(
+    smithay::desktop::space::render_output::<_, crate::drawing::CaptureOverlay<R>, _, _>(
         output,
         renderer,
         framebuffer,
         1.0,
         0,
         [space],
-        cursor_elements,
+        overlays,
         damage_tracker,
         [0.0, 0.0, 0.0, 1.0],
     )

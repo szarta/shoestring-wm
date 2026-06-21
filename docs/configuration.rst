@@ -26,8 +26,9 @@ It exits non-zero on a parse error or a missing file, making it suitable
 for a pre-commit hook or a CI check on a dotfiles repo.
 
 The file's main sections — ``[general]``, ``[workspaces]``,
-``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, and
-``[input]`` — are all optional. Missing sections take built-in defaults.
+``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, ``[input]``,
+and ``[decorations]`` — are all optional. Missing sections take built-in
+defaults.
 
 The ``[general]`` section
 -------------------------
@@ -667,6 +668,46 @@ when more than one output is connected. See :doc:`portals`.
     - anything else — run as a dmenu-style command: the connector names are
       written to its stdin, one per line, and the line it prints on stdout is
       taken as the chosen output (e.g. ``"wofi --dmenu"``).
+
+Window decorations
+------------------
+
+``[decorations]`` controls the server-side window border. shoestring-wm
+advertises ``xdg-decoration`` ServerSide, so well-behaved clients draw no
+decorations of their own; this section adds a thin, focus-aware border ring
+the compositor paints just inside each window's edges.
+
+It is **off by default** — the no-decorations workflow stays the default, so a
+border only appears once you set a non-zero ``border_width``. The border draws
+*inside* each window's own rectangle, so it never bleeds onto a neighboring
+tile; in gapless tiling the shared seam shows each window's own border and the
+focused window is picked out by color. Captures (screenshots, screen-sharing)
+include the border, matching what's on screen.
+
+Note this cannot silence a client that ignores ``xdg-decoration`` and draws its
+own client-side titlebar anyway (some GTK apps): that titlebar is the client's,
+not ours. The server-side border is drawn regardless.
+
+::
+
+    [decorations]
+    border_width = 2
+    focused_color = "#5e81ac"
+    unfocused_color = "#4c566a"
+
+``border_width``
+    Border thickness in logical pixels. ``0`` (the default) disables the border
+    entirely. A window too small to hold the ring (either dimension smaller than
+    twice the width) is left undecorated.
+
+``focused_color``
+    Border color of the focused window, as ``#RRGGBB`` or ``#RRGGBBAA`` hex
+    (a leading ``#`` is optional; alpha defaults to opaque). Defaults to
+    ``"#5e81ac"``. An unparseable value falls back to the default with a warning.
+
+``unfocused_color``
+    Border color of every unfocused window, same format. Defaults to
+    ``"#4c566a"``.
 
 Pointer bindings
 ----------------

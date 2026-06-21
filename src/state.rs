@@ -87,6 +87,12 @@ pub struct ShoestringWm {
     pub popups: PopupManager,
     pub layout: crate::layout::LayoutManager,
     pub workspaces: crate::workspace::WorkspaceManager,
+    /// Persistent solid-color buffers backing each window's server-side border
+    /// (when `[decorations].border_width > 0`). Kept across frames so the
+    /// damage tracker sees stable element ids; pruned to live windows each
+    /// frame in [`crate::decorations::border_elements`]. Empty when borders are
+    /// off, which is the default.
+    pub window_borders: HashMap<Window, crate::decorations::WindowBorder>,
 
     #[cfg(feature = "tty")]
     pub udev: Option<crate::backend::udev::UdevData>,
@@ -683,6 +689,7 @@ impl ShoestringWm {
             popups,
             layout: crate::layout::LayoutManager::default(),
             workspaces,
+            window_borders: HashMap::new(),
             #[cfg(feature = "tty")]
             udev: None,
             compositor_state,

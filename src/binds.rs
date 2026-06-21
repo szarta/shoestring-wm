@@ -129,6 +129,7 @@ mod tests {
             diagnostics: Default::default(),
             input: Default::default(),
             portal: Default::default(),
+            decorations: Default::default(),
         }
     }
 

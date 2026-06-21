@@ -37,6 +37,11 @@ sections (all optional):
     match   = { app_id = "firefox" }
     actions = { workspace = 2 }
 
+    [decorations]
+    border_width   = 0                       # 0 = no border (default)
+    focused_color  = "#5e81ac"
+    unfocused_color = "#4c566a"
+
 Generate a starter file with ``shoestring-wm --write-default-config``.
 
 [general] keys
@@ -218,6 +223,24 @@ Settings for the ``xdg-desktop-portal-shoestring`` screen-sharing backend
     ``none`` (use the first output), or a dmenu-style command (connector names
     on stdin, the chosen line on stdout). Overridden by
     ``$SHOESTRING_SCREENCAST_CHOOSER``.
+
+[decorations] keys
+------------------
+
+Server-side window border. Off by default; a border is drawn only when
+**border_width** is non-zero. The border is painted just inside each window's
+own rectangle (so it never bleeds onto an adjacent tile) and is focus-aware.
+
+**border_width** (integer, default ``0``)
+    Border thickness in logical pixels. ``0`` disables the border. A window
+    smaller than twice the width in either dimension is left undecorated.
+
+**focused_color** (string, default ``#5e81ac``)
+    Border color of the focused window, ``#RRGGBB`` or ``#RRGGBBAA`` hex. An
+    unparseable value falls back to the default.
+
+**unfocused_color** (string, default ``#4c566a``)
+    Border color of unfocused windows, same format.
 
 Examples
 --------

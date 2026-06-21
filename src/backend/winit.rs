@@ -164,6 +164,30 @@ pub fn init_winit(
                         [0.1, 0.1, 0.1, 1.0]
                     };
 
+                    // A fullscreen window on this output is rendered alone,
+                    // dropping the bar/layer surfaces it covers. While locked we
+                    // render an empty scene so no client content leaks.
+                    let fullscreen = if locked {
+                        None
+                    } else {
+                        crate::layout::fullscreen_window_on(&state.space, &state.layout, &output)
+                    };
+                    // Overlay elements that ride above the window stack: the
+                    // cursor (or lock surface) plus the server-side window
+                    // borders. Built once so the capture path composites the
+                    // exact same overlays the screen shows.
+                    let border_elements =
+                        state.output_border_elements(&output, locked, fullscreen.as_ref());
+                    let overlays: Vec<crate::drawing::CaptureOverlay<GlesRenderer>> = cursor_elements
+                        .into_iter()
+                        .map(crate::drawing::CaptureOverlay::Pointer)
+                        .chain(
+                            border_elements
+                                .into_iter()
+                                .map(crate::drawing::CaptureOverlay::Border),
+                        )
+                        .collect();
+
                     // Fulfil any pending wlr-screencopy captures for this
                     // output first. The helper binds an offscreen GLES
                     // texture as the renderer's framebuffer, so doing it
@@ -175,17 +199,9 @@ pub fn init_winit(
                         &state.space,
                         &output,
                         renderer,
-                        &cursor_elements,
+                        &overlays,
                     );
 
-                    // A fullscreen window on this output is rendered alone,
-                    // dropping the bar/layer surfaces it covers. While locked we
-                    // render an empty scene so no client content leaks.
-                    let fullscreen = if locked {
-                        None
-                    } else {
-                        crate::layout::fullscreen_window_on(&state.space, &state.layout, &output)
-                    };
                     let space_elements = if locked {
                         Vec::new()
                     } else {
@@ -196,18 +212,18 @@ pub fn init_winit(
                             fullscreen.as_ref(),
                         )
                     };
-                    // Cursor (custom) goes on top, then the space stack —
-                    // render_output draws first-element-first.
+                    // Overlays (cursor on top, then borders) above the space
+                    // stack — render_output draws first-element-first.
                     let mut elements: Vec<
                         crate::drawing::OutputRenderElements<
                             GlesRenderer,
                             WaylandSurfaceRenderElement<GlesRenderer>,
                         >,
-                    > = Vec::with_capacity(cursor_elements.len() + space_elements.len());
+                    > = Vec::with_capacity(overlays.len() + space_elements.len());
                     elements.extend(
-                        cursor_elements
+                        overlays
                             .into_iter()
-                            .map(crate::drawing::OutputRenderElements::Pointer),
+                            .map(crate::drawing::CaptureOverlay::into_output_element),
                     );
                     elements.extend(
                         space_elements

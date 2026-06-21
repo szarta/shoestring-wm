@@ -1469,6 +1469,12 @@ impl ShoestringWm {
             .then(|| crate::layout::fullscreen_window_on(&self.space, &self.layout, &output))
             .flatten();
 
+        // Server-side window borders, built before the `self.udev` re-borrow
+        // below (the renderer borrow would preclude the `&mut self` call).
+        // Solid-color elements need no renderer, so this is fine to do here.
+        // Empty unless `[decorations].border_width > 0`.
+        let border_elements = self.output_border_elements(&output, locked, fullscreen.as_ref());
+
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
@@ -1548,6 +1554,20 @@ impl ShoestringWm {
             Vec::new()
         };
 
+        // Overlay elements above the window stack: cursor (on top) then the
+        // server-side borders. Folded into one list so the capture path
+        // composites the exact same overlays the scanout does (borders
+        // included in screenshots), and consumed by the main render below.
+        let overlays: Vec<crate::drawing::CaptureOverlay<UdevRenderer<'_>>> = cursor_elements
+            .into_iter()
+            .map(crate::drawing::CaptureOverlay::Pointer)
+            .chain(
+                border_elements
+                    .into_iter()
+                    .map(crate::drawing::CaptureOverlay::Border),
+            )
+            .collect();
+
         // Run any pending screencopy captures for this output BEFORE the
         // scanout render. The capture path renders the same scene into an
         // offscreen GLES texture and reads back the requested region; doing
@@ -1559,7 +1579,7 @@ impl ShoestringWm {
             &self.space,
             &output,
             &mut renderer,
-            &cursor_elements,
+            &overlays,
         );
 
         let mut elements: Vec<
@@ -1567,11 +1587,11 @@ impl ShoestringWm {
                 UdevRenderer<'_>,
                 WaylandSurfaceRenderElement<UdevRenderer<'_>>,
             >,
-        > = Vec::with_capacity(space_elements.len() + cursor_elements.len());
+        > = Vec::with_capacity(space_elements.len() + overlays.len());
         elements.extend(
-            cursor_elements
+            overlays
                 .into_iter()
-                .map(crate::drawing::OutputRenderElements::Pointer),
+                .map(crate::drawing::CaptureOverlay::into_output_element),
         );
         elements.extend(
             space_elements

@@ -97,6 +97,8 @@ pub struct Config {
     pub input: Input,
     #[serde(default)]
     pub portal: Portal,
+    #[serde(default)]
+    pub decorations: Decorations,
 }
 
 /// `[portal]` — settings for the `xdg-desktop-portal-shoestring` screen-sharing
@@ -184,6 +186,95 @@ impl Default for Diagnostics {
             fd_warn_fraction: default_fd_warn_fraction(),
         }
     }
+}
+
+/// `[decorations]` — server-side window decorations. The WM advertises
+/// `xdg-decoration` ServerSide and, when `border_width > 0`, draws a
+/// focus-aware solid-color border ring just inside each window's edges.
+///
+/// Off by default (`border_width = 0`): the no-decorations workflow stays the
+/// default, so well-behaved clients that honor `xdg-decoration` keep their
+/// borderless look until you opt in here. Colors are `#RRGGBB` or `#RRGGBBAA`
+/// hex; an unparseable value falls back to the default for that field.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Decorations {
+    /// Border thickness in logical pixels, drawn inside the window's own rect
+    /// (so it never bleeds onto neighboring tiles). `0` disables borders.
+    #[serde(default)]
+    pub border_width: u32,
+    /// Border color of the focused window.
+    #[serde(default = "default_focused_border")]
+    pub focused_color: String,
+    /// Border color of unfocused windows.
+    #[serde(default = "default_unfocused_border")]
+    pub unfocused_color: String,
+}
+
+fn default_focused_border() -> String {
+    "#5e81ac".to_string()
+}
+fn default_unfocused_border() -> String {
+    "#4c566a".to_string()
+}
+
+impl Default for Decorations {
+    fn default() -> Self {
+        Self {
+            border_width: 0,
+            focused_color: default_focused_border(),
+            unfocused_color: default_unfocused_border(),
+        }
+    }
+}
+
+impl Decorations {
+    /// Focused-border color as straight (non-premultiplied) RGBA in `0.0..=1.0`,
+    /// falling back to the default color if the configured string won't parse.
+    pub fn focused_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.focused_color)
+            .unwrap_or_else(|| parse_hex_rgba(&default_focused_border()).unwrap())
+    }
+
+    /// Unfocused-border color, same semantics as [`focused_rgba`](Self::focused_rgba).
+    pub fn unfocused_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.unfocused_color)
+            .unwrap_or_else(|| parse_hex_rgba(&default_unfocused_border()).unwrap())
+    }
+
+    /// Names of color fields that don't parse, for a load-time warning. Empty
+    /// when both colors are valid (the common case).
+    pub fn color_errors(&self) -> Vec<&'static str> {
+        let mut errs = Vec::new();
+        if parse_hex_rgba(&self.focused_color).is_none() {
+            errs.push("decorations.focused_color");
+        }
+        if parse_hex_rgba(&self.unfocused_color).is_none() {
+            errs.push("decorations.unfocused_color");
+        }
+        errs
+    }
+}
+
+/// Parse a `#RRGGBB` or `#RRGGBBAA` hex color into straight RGBA floats in
+/// `0.0..=1.0`. A leading `#` is optional; missing alpha defaults to opaque.
+/// Returns `None` for any other length or a non-hex digit.
+fn parse_hex_rgba(s: &str) -> Option<[f32; 4]> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    if h.len() != 6 && h.len() != 8 {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok();
+    let r = byte(0)?;
+    let g = byte(1)?;
+    let b = byte(2)?;
+    let a = if h.len() == 8 { byte(3)? } else { 0xff };
+    Some([
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        a as f32 / 255.0,
+    ])
 }
 
 /// `[input]` — libinput device tuning applied to every applicable device on
@@ -991,6 +1082,7 @@ impl Config {
             diagnostics: Diagnostics::default(),
             input: Input::default(),
             portal: Portal::default(),
+            decorations: Decorations::default(),
         }
     }
 }
@@ -1297,6 +1389,52 @@ actions = {}
         assert!(!cfg.diagnostics.enabled);
         assert_eq!(cfg.diagnostics.sample_interval_ms, 5000);
         assert_eq!(cfg.diagnostics.fd_warn_fraction, 0.9);
+    }
+
+    #[test]
+    fn decorations_default_off() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.decorations.border_width, 0);
+        // Defaults still parse to valid colors even though borders are off.
+        assert!(cfg.decorations.color_errors().is_empty());
+    }
+
+    #[test]
+    fn decorations_user_override() {
+        let cfg: Config = toml::from_str(
+            "[decorations]\nborder_width = 2\nfocused_color = \"#ff0000\"\nunfocused_color = \"#00ff0080\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.decorations.border_width, 2);
+        assert_eq!(cfg.decorations.focused_rgba(), [1.0, 0.0, 0.0, 1.0]);
+        let [r, g, b, a] = cfg.decorations.unfocused_rgba();
+        assert_eq!([r, g, b], [0.0, 1.0, 0.0]);
+        assert!((a - 0x80 as f32 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decorations_bad_color_falls_back_and_reports() {
+        let cfg: Config =
+            toml::from_str("[decorations]\nfocused_color = \"not-a-color\"\n").unwrap();
+        // Falls back to the default focused color rather than panicking.
+        assert_eq!(
+            cfg.decorations.focused_rgba(),
+            parse_hex_rgba("#5e81ac").unwrap()
+        );
+        assert_eq!(
+            cfg.decorations.color_errors(),
+            vec!["decorations.focused_color"]
+        );
+    }
+
+    #[test]
+    fn parse_hex_rgba_forms() {
+        assert_eq!(parse_hex_rgba("#000000"), Some([0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(parse_hex_rgba("ffffff"), Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(parse_hex_rgba("#ffffff00"), Some([1.0, 1.0, 1.0, 0.0]));
+        assert_eq!(parse_hex_rgba("#fff"), None); // 3-digit shorthand unsupported
+        assert_eq!(parse_hex_rgba("#gggggg"), None); // non-hex
+        assert_eq!(parse_hex_rgba(""), None);
     }
 
     #[test]

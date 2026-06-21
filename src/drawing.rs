@@ -66,6 +66,7 @@ render_elements! {
     pub OutputRenderElements<R, E> where R: ImportAll + ImportMem;
     Space=smithay::desktop::space::SpaceRenderElements<R, E>,
     Pointer=PointerRenderElement<R>,
+    Border=smithay::backend::renderer::element::solid::SolidColorRenderElement,
 }
 
 impl<R: Renderer> std::fmt::Debug for PointerRenderElement<R> {
@@ -74,6 +75,46 @@ impl<R: Renderer> std::fmt::Debug for PointerRenderElement<R> {
             Self::Surface(e) => f.debug_tuple("Surface").field(e).finish(),
             Self::Memory(e) => f.debug_tuple("Memory").field(e).finish(),
             Self::_GenericCatcher(_) => f.write_str("_GenericCatcher"),
+        }
+    }
+}
+
+// Overlay elements that ride above the window stack: the cursor (or a lock
+// surface) and the server-side window borders. The capture path
+// ([`crate::screencopy`]) takes a single `RenderElement` type for its custom
+// slot, and cursor elements aren't `Clone`, so we fold both into one owned enum
+// built once per frame — screencopy borrows it, then the on-screen render
+// consumes it via [`CaptureOverlay::into_output_element`]. This is what keeps
+// screenshots/screencasts showing the same borders the screen does.
+render_elements! {
+    pub CaptureOverlay<R> where R: ImportAll + ImportMem;
+    Pointer=PointerRenderElement<R>,
+    Border=smithay::backend::renderer::element::solid::SolidColorRenderElement,
+}
+
+impl<R: Renderer> std::fmt::Debug for CaptureOverlay<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pointer(e) => f.debug_tuple("Pointer").field(e).finish(),
+            Self::Border(e) => f.debug_tuple("Border").field(e).finish(),
+            Self::_GenericCatcher(_) => f.write_str("_GenericCatcher"),
+        }
+    }
+}
+
+impl<R: Renderer + ImportAll + ImportMem> CaptureOverlay<R> {
+    /// Move this overlay into the on-screen [`OutputRenderElements`] enum,
+    /// preserving its kind (cursor stays a pointer, border stays a border).
+    pub fn into_output_element<E>(self) -> OutputRenderElements<R, E>
+    where
+        E: smithay::backend::renderer::element::RenderElement<R>,
+    {
+        match self {
+            Self::Pointer(p) => OutputRenderElements::Pointer(p),
+            Self::Border(b) => OutputRenderElements::Border(b),
+            // `_GenericCatcher` holds `std::convert::Infallible` — uninhabited,
+            // so this arm is statically unreachable.
+            Self::_GenericCatcher(never) => match never {},
         }
     }
 }
