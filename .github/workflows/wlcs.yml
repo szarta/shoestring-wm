@@ -58,7 +58,10 @@ jobs:
             https://github.com/canonical/wlcs.git /tmp/wlcs
           cmake -S /tmp/wlcs -B /tmp/wlcs/build -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/wlcs/build -j"$(nproc)"
-          sudo cmake --install /tmp/wlcs/build
+          # `cmake --install` ships the integration library + headers, NOT the
+          # `wlcs` gtest runner binary — that stays at build/wlcs. run-wlcs.sh
+          # needs the runner on PATH, so install it explicitly.
+          sudo install -Dm755 /tmp/wlcs/build/wlcs /usr/local/bin/wlcs
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable
