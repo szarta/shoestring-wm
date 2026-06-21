@@ -39,13 +39,16 @@ jobs:
 
       # WLCS build-deps (from its debian/control) plus a Rust toolchain for the
       # plugin. libwayland-dev is for the C++ suite; the plugin itself dlopens
-      # libwayland at runtime and needs no -dev package.
+      # libwayland at runtime and needs no -dev package. libxkbcommon-dev IS
+      # needed though: smithay's wayland_frontend pulls the `xkbcommon` crate,
+      # which links libxkbcommon.so unconditionally (not dlopen'd), so the
+      # plugin won't link without it.
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config cmake \
-            libwayland-dev libboost-dev \
+            libwayland-dev libxkbcommon-dev libboost-dev \
             libgtest-dev libgmock-dev \
             python3
 
