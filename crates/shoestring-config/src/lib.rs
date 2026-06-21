@@ -1463,7 +1463,7 @@ actions = { sticky = true }
     #[test]
     fn default_bindings_include_arrange_cluster() {
         let cfg = Config::with_default_bindings();
-        let has = |pred: &dyn Fn(&Binding) -> bool| cfg.bindings.iter().any(|b| pred(b));
+        let has = |pred: &dyn Fn(&Binding) -> bool| cfg.bindings.iter().any(pred);
         assert!(has(&|b| {
             matches!(b.action, Action::ArrangeGrid) && b.key == "g" && b.mods == ["Super"]
         }));
