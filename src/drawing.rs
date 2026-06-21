@@ -67,6 +67,10 @@ render_elements! {
     Space=smithay::desktop::space::SpaceRenderElements<R, E>,
     Pointer=PointerRenderElement<R>,
     Border=smithay::backend::renderer::element::solid::SolidColorRenderElement,
+    // F3-style diagnostics overlay (see [`crate::diag_overlay`]). On-screen
+    // only — deliberately absent from `CaptureOverlay` so it never burns into
+    // screenshots/screencasts the way the cursor and borders do.
+    Overlay=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>,
 }
 
 impl<R: Renderer> std::fmt::Debug for PointerRenderElement<R> {

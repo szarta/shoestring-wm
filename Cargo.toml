@@ -85,6 +85,10 @@ xcursor = "0.3"
 notify = "8"
 regex = "1"
 libc = "0.2"
+# Software font rasterizer for the F3-style diagnostics overlay. Pure Rust,
+# no fontconfig/freetype — the same rasterizer the client crates (bar, menu,
+# notify, lock, confirm) already carry.
+fontdue = "0.9"
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"

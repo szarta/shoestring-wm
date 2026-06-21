@@ -166,6 +166,17 @@ pub struct Diagnostics {
     /// at load.
     #[serde(default = "default_fd_warn_fraction")]
     pub fd_warn_fraction: f64,
+    /// Font size (logical px) of the F3-style on-screen diagnostics overlay
+    /// ([`Action::ToggleDiagnostics`]). Default 15.
+    #[serde(default = "default_overlay_font_size")]
+    pub overlay_font_size: f32,
+    /// Overlay text color, `#RRGGBB` or `#RRGGBBAA`. Default light grey.
+    #[serde(default = "default_overlay_fg")]
+    pub overlay_fg_color: String,
+    /// Overlay panel background color, `#RRGGBB` or `#RRGGBBAA`. Default a
+    /// translucent dark slate so the scene shows through faintly.
+    #[serde(default = "default_overlay_bg")]
+    pub overlay_bg_color: String,
 }
 
 fn default_diagnostics_enabled() -> bool {
@@ -177,6 +188,15 @@ fn default_sample_interval_ms() -> u64 {
 fn default_fd_warn_fraction() -> f64 {
     0.75
 }
+fn default_overlay_font_size() -> f32 {
+    15.0
+}
+fn default_overlay_fg() -> String {
+    "#e0e0e0".to_string()
+}
+fn default_overlay_bg() -> String {
+    "#1c1f26e0".to_string()
+}
 
 impl Default for Diagnostics {
     fn default() -> Self {
@@ -184,7 +204,25 @@ impl Default for Diagnostics {
             enabled: default_diagnostics_enabled(),
             sample_interval_ms: default_sample_interval_ms(),
             fd_warn_fraction: default_fd_warn_fraction(),
+            overlay_font_size: default_overlay_font_size(),
+            overlay_fg_color: default_overlay_fg(),
+            overlay_bg_color: default_overlay_bg(),
         }
+    }
+}
+
+impl Diagnostics {
+    /// Overlay text color as straight (non-premultiplied) RGBA in `0.0..=1.0`,
+    /// falling back to the default if the configured string won't parse.
+    pub fn overlay_fg_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.overlay_fg_color)
+            .unwrap_or_else(|| parse_hex_rgba(&default_overlay_fg()).unwrap())
+    }
+
+    /// Overlay background color, same semantics as [`overlay_fg_rgba`](Self::overlay_fg_rgba).
+    pub fn overlay_bg_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.overlay_bg_color)
+            .unwrap_or_else(|| parse_hex_rgba(&default_overlay_bg()).unwrap())
     }
 }
 
@@ -789,6 +827,13 @@ pub enum Action {
     /// Toggle the default audio source (microphone) mute, the mic analogue of
     /// [`Action::ToggleAudioMute`]. Spawns `shoestring-mediad mic-mute toggle`.
     ToggleMicMute,
+    /// Toggle the on-screen diagnostics overlay — a Minecraft-F3-style panel
+    /// the WM draws (top-left of the output under the pointer) from the live
+    /// metrics registry. Purely a visualization of the same data
+    /// [`Request::Metrics`] serves; no effect on the metrics themselves. Bound
+    /// to Super+F3 by default. Values refresh on the `[diagnostics]` sampler,
+    /// so set `enabled = true` (the default) for them to update live.
+    ToggleDiagnostics,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -813,7 +858,8 @@ pub fn default_config_toml() -> String {
 # minimize, unminimize, close, cycle-windows, raise, lower, toggle-sticky,
 # toggle-always-on-top, focus-workspace, focus-workspace-relative,
 # move-window-to-workspace, move-window-to-workspace-relative, change-vt,
-# inject-key, inject-text, inject-click, lock.
+# inject-key, inject-text, inject-click, lock, cycle-layout,
+# toggle-audio-mute, toggle-mic-mute, toggle-diagnostics.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
@@ -1028,6 +1074,12 @@ impl Config {
                 action: Action::MoveWindowToWorkspaceRelative { delta: 1 },
             },
         ];
+        // Super+F3 → toggle the on-screen diagnostics overlay (F3-style).
+        bindings.push(Binding {
+            mods: super_only(),
+            key: "F3".into(),
+            action: Action::ToggleDiagnostics,
+        });
         // Super+1..9 → focus workspace 1..9; Super+Shift+1..9 → move window there.
         for n in 1u8..=9 {
             let key = char::from(b'0' + n).to_string();

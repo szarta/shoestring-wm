@@ -1475,6 +1475,16 @@ impl ShoestringWm {
         // Empty unless `[decorations].border_width > 0`.
         let border_elements = self.output_border_elements(&output, locked, fullscreen.as_ref());
 
+        // F3-style diagnostics overlay: refresh its buffer before re-borrowing
+        // `self.udev` for the renderer (the borrow would preclude the `&mut
+        // self` call). Drawn on a single output (under the pointer), never
+        // while locked, and built into its own top-most slot below — kept out
+        // of the `CaptureOverlay` list so it doesn't taint screenshots.
+        let show_overlay = !locked && self.is_diag_overlay_output(&output);
+        if show_overlay {
+            self.refresh_diag_overlay(&output);
+        }
+
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
@@ -1598,6 +1608,14 @@ impl ShoestringWm {
                 .into_iter()
                 .map(crate::drawing::OutputRenderElements::Space),
         );
+        // Overlay on top of everything (index 0 = drawn first). Reads
+        // `self.diag_overlay` — disjoint from the `self.udev`-rooted renderer.
+        if show_overlay {
+            let scale_int = (output.current_scale().fractional_scale().ceil() as i32).max(1);
+            if let Some(el) = self.diag_overlay.element(&mut renderer, scale_int) {
+                elements.insert(0, crate::drawing::OutputRenderElements::Overlay(el));
+            }
+        }
 
         let clear = if locked {
             [0.0, 0.0, 0.0, 1.0]

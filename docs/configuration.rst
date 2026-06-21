@@ -516,6 +516,20 @@ Each action type and its fields:
     keymap rebuild — and the new state is sent to the focused client
     immediately.
 
+``toggle-diagnostics``
+    Toggle the on-screen diagnostics overlay — a Minecraft-F3-style panel the
+    WM draws in the top-left corner of the output under the pointer, listing
+    the live metrics registry (frame rate, open fds, RSS, window/client counts,
+    per-client surface counts, …). Bound to **Super+F3** by default. It's a pure
+    visualization of the same data ``shoestring-ctl metrics`` prints, so
+    toggling it changes nothing but what's drawn, and it is deliberately kept
+    out of screenshots and screencasts. Values refresh on the ``[diagnostics]``
+    sampler, so leave ``[diagnostics].enabled = true`` (the default) for them to
+    update live. The panel's look is tunable under ``[diagnostics]``:
+    ``overlay_font_size`` (logical px, default 15), ``overlay_fg_color`` and
+    ``overlay_bg_color`` (``#RRGGBB`` or ``#RRGGBBAA``; the background defaults
+    translucent so the scene shows through).
+
 ``focus-workspace``
     Switch every output to show workspace ``index`` (1-based, 1..=16).
     Example::

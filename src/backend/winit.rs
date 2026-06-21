@@ -178,6 +178,15 @@ pub fn init_winit(
                     // exact same overlays the screen shows.
                     let border_elements =
                         state.output_border_elements(&output, locked, fullscreen.as_ref());
+
+                    // F3-style diagnostics overlay (its own top-most slot, not
+                    // a CaptureOverlay — kept out of screenshots). Refresh the
+                    // buffer now, before the renderer touches it below. Hidden
+                    // while locked: nothing but the lock surface should show.
+                    let show_overlay = !locked && state.is_diag_overlay_output(&output);
+                    if show_overlay {
+                        state.refresh_diag_overlay(&output);
+                    }
                     let overlays: Vec<crate::drawing::CaptureOverlay<GlesRenderer>> = cursor_elements
                         .into_iter()
                         .map(crate::drawing::CaptureOverlay::Pointer)
@@ -230,6 +239,14 @@ pub fn init_winit(
                             .into_iter()
                             .map(crate::drawing::OutputRenderElements::Space),
                     );
+                    // Overlay on top of everything (index 0 = drawn first).
+                    if show_overlay {
+                        let scale_int =
+                            (output.current_scale().fractional_scale().ceil() as i32).max(1);
+                        if let Some(el) = state.diag_overlay.element(renderer, scale_int) {
+                            elements.insert(0, crate::drawing::OutputRenderElements::Overlay(el));
+                        }
+                    }
                     let render_start = std::time::Instant::now();
                     let result = damage_tracker
                         .render_output(renderer, &mut framebuffer, 0, &elements, clear)

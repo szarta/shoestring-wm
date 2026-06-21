@@ -237,6 +237,12 @@ impl ShoestringWm {
             Action::CycleLayout => self.cycle_keyboard_layout(),
             Action::ToggleAudioMute => self.spawn_mediad(&["audio-mute", "toggle"]),
             Action::ToggleMicMute => self.spawn_mediad(&["mic-mute", "toggle"]),
+            Action::ToggleDiagnostics => {
+                let on = self.diag_overlay.toggle();
+                tracing::info!(on, "diagnostics overlay toggled");
+                // The continuous render loop (winit redraw / udev frame poll)
+                // picks the change up within a frame — no explicit redraw kick.
+            }
         }
     }
 

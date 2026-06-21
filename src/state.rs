@@ -94,6 +94,11 @@ pub struct ShoestringWm {
     /// off, which is the default.
     pub window_borders: HashMap<Window, crate::decorations::WindowBorder>,
 
+    /// F3-style on-screen diagnostics overlay (off by default; toggled by
+    /// [`shoestring_config::Action::ToggleDiagnostics`]). Holds the persistent
+    /// text buffer and its throttle/cache state; renders from `metrics`.
+    pub diag_overlay: crate::diag_overlay::DiagOverlay,
+
     #[cfg(feature = "tty")]
     pub udev: Option<crate::backend::udev::UdevData>,
 
@@ -690,6 +695,7 @@ impl ShoestringWm {
             layout: crate::layout::LayoutManager::default(),
             workspaces,
             window_borders: HashMap::new(),
+            diag_overlay: crate::diag_overlay::DiagOverlay::default(),
             #[cfg(feature = "tty")]
             udev: None,
             compositor_state,

@@ -2445,6 +2445,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.13.0",
  "clap",
+ "fontdue",
  "libc",
  "notify",
  "proptest",
