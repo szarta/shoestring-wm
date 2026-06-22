@@ -27,8 +27,8 @@ for a pre-commit hook or a CI check on a dotfiles repo.
 
 The file's main sections — ``[general]``, ``[workspaces]``,
 ``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, ``[input]``,
-and ``[decorations]`` — are all optional. Missing sections take built-in
-defaults.
+``[decorations]``, and ``[background]`` — are all optional. Missing sections
+take built-in defaults.
 
 The ``[general]`` section
 -------------------------
@@ -722,6 +722,62 @@ not ours. The server-side border is drawn regardless.
 ``unfocused_color``
     Border color of every unfocused window, same format. Defaults to
     ``"#4c566a"``.
+
+Desktop background
+------------------
+
+``[background]`` sets the desktop background drawn beneath every window and
+layer-shell surface: a solid color, optionally with a wallpaper image on top.
+
+With no ``[background]`` section the screen is cleared to a dark grey
+(``#1a1a1a``), matching the historic default. Point ``image`` at a PNG or SVG
+file to paint a wallpaper, positioned per ``mode``. The ``color`` still shows in
+any area the image doesn't cover — the letterbox bars of ``fit``, or the gaps of
+a ``center`` image smaller than the screen — so choose a color that complements
+the image. The background is part of the rendered scene, so it appears
+identically in screenshots and screen-sharing.
+
+The wallpaper is rendered per output at that output's resolution, so it stays
+crisp on a HiDPI panel. On a multi-monitor setup every output shows the same
+background. Edits take effect on the next frame via config hot-reload — no
+restart needed.
+
+::
+
+    [background]
+    color = "#2e3440"
+    image = "~/Pictures/wallpaper.png"
+    mode = "fill"
+
+``color``
+    Solid background color, as ``#RRGGBB`` or ``#RRGGBBAA`` hex (a leading ``#``
+    is optional; alpha defaults to opaque). Painted across the whole output and
+    used as the backdrop behind ``image``. Defaults to ``"#1a1a1a"``. An
+    unparseable value falls back to the default with a warning.
+
+``image``
+    Path to a wallpaper image — **PNG** or **SVG**, chosen by file extension.
+    A leading ``~`` (home) and ``$VAR`` / ``${VAR}`` environment references are
+    expanded. Unset (the default) means solid ``color`` only. A path that
+    doesn't exist or won't decode logs a warning and leaves the solid color
+    showing.
+
+``mode``
+    How the image is fitted to each output. Defaults to ``"fill"``.
+
+    ================  ===============================================
+    ``fill``          Scale (keeping aspect) to cover the whole
+                      output, cropping the overflow. *(default)*
+    ``fit``           Scale (keeping aspect) to fit entirely on the
+                      output, filling the remainder with ``color``.
+    ``center``        No scaling; place the image at its native size,
+                      centered. Larger images crop; smaller ones leave
+                      a ``color`` border.
+    ``stretch``       Stretch to exactly the output size, ignoring
+                      aspect ratio.
+    ``tile``          Repeat the image at its native size from the
+                      top-left to fill the output.
+    ================  ===============================================
 
 Pointer bindings
 ----------------

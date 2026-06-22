@@ -89,6 +89,14 @@ libc = "0.2"
 # no fontconfig/freetype — the same rasterizer the client crates (bar, menu,
 # notify, lock, confirm) already carry.
 fontdue = "0.9"
+# Wallpaper image decoding for the `[background]` section: PNG via `png`, SVG
+# via `resvg` (which re-exports tiny-skia, also used as the wallpaper
+# compositor). Same versions the bar already carries for icon rendering — the
+# accepted low-dependency exception for image rendering. resvg is the heaviest
+# dep here; pulled in only when a wallpaper image is configured at runtime, but
+# linked unconditionally.
+png = "0.17"
+resvg = { version = "0.45", default-features = false }
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"

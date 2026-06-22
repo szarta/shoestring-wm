@@ -99,6 +99,8 @@ pub struct Config {
     pub portal: Portal,
     #[serde(default)]
     pub decorations: Decorations,
+    #[serde(default)]
+    pub background: Background,
 }
 
 /// `[portal]` — settings for the `xdg-desktop-portal-shoestring` screen-sharing
@@ -313,6 +315,150 @@ fn parse_hex_rgba(s: &str) -> Option<[f32; 4]> {
         b as f32 / 255.0,
         a as f32 / 255.0,
     ])
+}
+
+/// `[background]` — the desktop background drawn beneath every window and
+/// layer-shell surface.
+///
+/// With no `[background]` section the screen is cleared to [`color`](Self::color)
+/// (a dark grey by default, matching the historic hardcoded clear). Set
+/// [`image`](Self::image) to a PNG or SVG file to paint a wallpaper on top of
+/// that color, positioned per [`mode`](Self::mode). The color still shows in any
+/// region the image doesn't cover (e.g. the letterbox bars of `fit`, or the gaps
+/// of a non-tiling `center`), so pick a `color` that complements the image.
+///
+/// The wallpaper is rendered identically into screenshots/screencasts — it is
+/// part of the scene, not an on-screen-only overlay.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Background {
+    /// Solid clear color, `#RRGGBB` or `#RRGGBBAA` hex. Painted across the whole
+    /// output; also the backdrop the [`image`](Self::image) (if any) sits on.
+    /// An unparseable value falls back to the default. Default `#1a1a1a`.
+    #[serde(default = "default_background_color")]
+    pub color: String,
+    /// Path to a wallpaper image (PNG or SVG, by extension). `~` and
+    /// `$VAR`/`${VAR}` are expanded at load. Unset (default) ⇒ solid
+    /// [`color`](Self::color) only. A path that doesn't exist or won't decode
+    /// logs a warning and leaves the solid color showing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// How the image is fitted to each output. Default `fill`.
+    #[serde(default)]
+    pub mode: BackgroundMode,
+}
+
+/// Wallpaper fitting strategy. All preserve the image's own pixels; they differ
+/// in how the image is scaled/placed within the output rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundMode {
+    /// Scale (preserving aspect) to cover the whole output, cropping overflow.
+    #[default]
+    Fill,
+    /// Scale (preserving aspect) to fit entirely within the output, letterboxing
+    /// the remainder with [`Background::color`].
+    Fit,
+    /// No scaling; place the image at its native size, centered. Larger images
+    /// are cropped, smaller ones leave a color border.
+    Center,
+    /// Stretch to exactly the output size, ignoring aspect ratio.
+    Stretch,
+    /// Tile the image at native size from the top-left, repeating to fill.
+    Tile,
+}
+
+fn default_background_color() -> String {
+    "#1a1a1a".to_string()
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        Self {
+            color: default_background_color(),
+            image: None,
+            mode: BackgroundMode::default(),
+        }
+    }
+}
+
+impl Background {
+    /// Clear color as straight (non-premultiplied) RGBA in `0.0..=1.0`, falling
+    /// back to the default color if the configured string won't parse.
+    pub fn color_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.color)
+            .unwrap_or_else(|| parse_hex_rgba(&default_background_color()).unwrap())
+    }
+
+    /// The wallpaper image path with `~`/`$VAR` expanded, or `None` when unset.
+    pub fn image_path(&self) -> Option<PathBuf> {
+        self.image.as_deref().map(expand_path)
+    }
+
+    /// Names of fields that don't parse, for a load-time warning. Empty when the
+    /// color is valid (the common case).
+    pub fn color_errors(&self) -> Vec<&'static str> {
+        if parse_hex_rgba(&self.color).is_none() {
+            vec!["background.color"]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Expand a leading `~` (home) and `$VAR` / `${VAR}` environment references in a
+/// path string. Unknown variables expand to empty, matching shell behavior.
+fn expand_path(s: &str) -> PathBuf {
+    let mut out = String::with_capacity(s.len());
+    let after_home = if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            out.push_str(&home);
+            out.push('/');
+        }
+        rest
+    } else {
+        s
+    };
+    let bytes = after_home.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            let (name, next) = if bytes[i + 1] == b'{' {
+                // ${VAR}
+                match after_home[i + 2..].find('}') {
+                    Some(end) => (&after_home[i + 2..i + 2 + end], i + 2 + end + 1),
+                    None => {
+                        out.push('$');
+                        i += 1;
+                        continue;
+                    }
+                }
+            } else {
+                // $VAR — letters, digits, underscore.
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                if end == start {
+                    out.push('$');
+                    i += 1;
+                    continue;
+                }
+                (&after_home[start..end], end)
+            };
+            if let Ok(val) = std::env::var(name) {
+                out.push_str(&val);
+            }
+            i = next;
+        } else {
+            out.push(after_home[i..].chars().next().unwrap());
+            i += after_home[i..].chars().next().unwrap().len_utf8();
+        }
+    }
+    PathBuf::from(out)
 }
 
 /// `[input]` — libinput device tuning applied to every applicable device on
@@ -1135,6 +1281,7 @@ impl Config {
             input: Input::default(),
             portal: Portal::default(),
             decorations: Decorations::default(),
+            background: Background::default(),
         }
     }
 }
@@ -1476,6 +1623,88 @@ actions = {}
         assert_eq!(
             cfg.decorations.color_errors(),
             vec!["decorations.focused_color"]
+        );
+    }
+
+    #[test]
+    fn background_default_solid_color() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.background.color, "#1a1a1a");
+        assert_eq!(cfg.background.mode, BackgroundMode::Fill);
+        assert!(cfg.background.image.is_none());
+        assert!(cfg.background.image_path().is_none());
+        assert!(cfg.background.color_errors().is_empty());
+        // ~0.1 like the historic hardcoded clear.
+        let [r, g, b, a] = cfg.background.color_rgba();
+        assert!((r - 26.0 / 255.0).abs() < 1e-6);
+        assert_eq!([g, b, a], [r, r, 1.0]);
+    }
+
+    #[test]
+    fn background_user_override() {
+        let cfg: Config = toml::from_str(
+            "[background]\ncolor = \"#102030\"\nimage = \"/usr/share/wp.png\"\nmode = \"center\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.background.mode, BackgroundMode::Center);
+        assert_eq!(
+            cfg.background.image_path().unwrap(),
+            PathBuf::from("/usr/share/wp.png")
+        );
+        let [r, g, b, a] = cfg.background.color_rgba();
+        assert_eq!(
+            [r, g, b, a],
+            [
+                0x10 as f32 / 255.0,
+                0x20 as f32 / 255.0,
+                0x30 as f32 / 255.0,
+                1.0
+            ]
+        );
+    }
+
+    #[test]
+    fn background_all_modes_parse() {
+        for (s, want) in [
+            ("fill", BackgroundMode::Fill),
+            ("fit", BackgroundMode::Fit),
+            ("center", BackgroundMode::Center),
+            ("stretch", BackgroundMode::Stretch),
+            ("tile", BackgroundMode::Tile),
+        ] {
+            let cfg: Config = toml::from_str(&format!("[background]\nmode = \"{s}\"\n")).unwrap();
+            assert_eq!(cfg.background.mode, want, "mode {s}");
+        }
+    }
+
+    #[test]
+    fn background_bad_color_falls_back_and_reports() {
+        let cfg: Config = toml::from_str("[background]\ncolor = \"nope\"\n").unwrap();
+        assert_eq!(
+            cfg.background.color_rgba(),
+            parse_hex_rgba("#1a1a1a").unwrap()
+        );
+        assert_eq!(cfg.background.color_errors(), vec!["background.color"]);
+    }
+
+    #[test]
+    fn background_path_expands_home_and_env() {
+        std::env::set_var("HOME", "/home/tester");
+        std::env::set_var("WP_DIR", "/data/walls");
+        let cfg: Config = toml::from_str("[background]\nimage = \"~/pics/bg.png\"\n").unwrap();
+        assert_eq!(
+            cfg.background.image_path().unwrap(),
+            PathBuf::from("/home/tester/pics/bg.png")
+        );
+        let cfg: Config = toml::from_str("[background]\nimage = \"${WP_DIR}/a.svg\"\n").unwrap();
+        assert_eq!(
+            cfg.background.image_path().unwrap(),
+            PathBuf::from("/data/walls/a.svg")
+        );
+        let cfg: Config = toml::from_str("[background]\nimage = \"$WP_DIR/b.png\"\n").unwrap();
+        assert_eq!(
+            cfg.background.image_path().unwrap(),
+            PathBuf::from("/data/walls/b.png")
         );
     }
 

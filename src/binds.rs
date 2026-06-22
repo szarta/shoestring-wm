@@ -130,6 +130,7 @@ mod tests {
             input: Default::default(),
             portal: Default::default(),
             decorations: Default::default(),
+            background: Default::default(),
         }
     }
 

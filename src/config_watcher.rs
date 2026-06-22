@@ -98,6 +98,10 @@ impl ShoestringWm {
                 };
                 self.config = cfg;
                 self.bindings = table;
+                // Drop the cached wallpaper canvas so a changed `[background]`
+                // color/mode/image takes effect on the next frame. The decoded
+                // source is kept; `ensure` re-reads only if the path changed.
+                self.wallpaper.invalidate();
                 self.reapply_input_config();
                 if xkb_changed {
                     self.reapply_xkb_config();

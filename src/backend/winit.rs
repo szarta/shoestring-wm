@@ -166,11 +166,20 @@ pub fn init_winit(
                                 scale,
                             )
                         };
+                    // Clear to the configured background color (the wallpaper, if
+                    // any, is composited on top below). Black while locked so no
+                    // client content leaks.
                     let clear = if locked {
                         [0.0, 0.0, 0.0, 1.0]
                     } else {
-                        [0.1, 0.1, 0.1, 1.0]
+                        state.config.background.color_rgba()
                     };
+                    // Rebuild the wallpaper canvas if the output size / config
+                    // changed (no-op otherwise). Before the renderer is used to
+                    // build elements below; the buffer is owned by `state`.
+                    if !locked {
+                        state.refresh_wallpaper(&output);
+                    }
 
                     // A fullscreen window on this output is rendered alone,
                     // dropping the bar/layer surfaces it covers. While locked we
@@ -205,20 +214,6 @@ pub fn init_winit(
                         )
                         .collect();
 
-                    // Fulfil any pending wlr-screencopy captures for this
-                    // output first. The helper binds an offscreen GLES
-                    // texture as the renderer's framebuffer, so doing it
-                    // before render_output ensures the window framebuffer is
-                    // the LAST bind, which is what backend.submit() requires
-                    // (otherwise eglSwapBuffersWithDamageKHR hits BAD_SURFACE).
-                    crate::screencopy::process_pending(
-                        &mut state.screencopy,
-                        &state.space,
-                        &output,
-                        renderer,
-                        &overlays,
-                    );
-
                     let space_elements = if locked {
                         Vec::new()
                     } else {
@@ -229,14 +224,18 @@ pub fn init_winit(
                             fullscreen.as_ref(),
                         )
                     };
-                    // Overlays (cursor on top, then borders) above the space
-                    // stack — render_output draws first-element-first.
+                    // The composited scene, top to bottom: overlays (cursor on
+                    // top, then borders), the window/layer stack, and the
+                    // wallpaper at the very bottom — render_output draws
+                    // first-element-first. Built before screencopy so captures
+                    // composite the exact same list (the screen-only diagnostics
+                    // overlay is added afterwards).
                     let mut elements: Vec<
                         crate::drawing::OutputRenderElements<
                             GlesRenderer,
                             WaylandSurfaceRenderElement<GlesRenderer>,
                         >,
-                    > = Vec::with_capacity(overlays.len() + space_elements.len());
+                    > = Vec::with_capacity(overlays.len() + space_elements.len() + 1);
                     elements.extend(
                         overlays
                             .into_iter()
@@ -247,12 +246,38 @@ pub fn init_winit(
                             .into_iter()
                             .map(crate::drawing::OutputRenderElements::Space),
                     );
-                    // Overlay on top of everything (index 0 = drawn first).
+                    // Wallpaper at the very bottom (pushed last): below every
+                    // window and layer-shell surface. Skipped while locked.
+                    if !locked {
+                        if let Some((phys, logical)) = state.wallpaper_dims(&output) {
+                            if let Some(el) = state.wallpaper.element(renderer, phys, logical) {
+                                elements.push(crate::drawing::OutputRenderElements::Memory(el));
+                            }
+                        }
+                    }
+
+                    // Fulfil any pending wlr-screencopy captures for this output
+                    // first, feeding the same `elements` and `clear` the scanout
+                    // uses so screenshots match the screen. The helper binds an
+                    // offscreen GLES texture as the renderer's framebuffer, so
+                    // doing it before render_output ensures the window
+                    // framebuffer is the LAST bind, which backend.submit()
+                    // requires (else eglSwapBuffersWithDamageKHR hits BAD_SURFACE).
+                    crate::screencopy::process_pending(
+                        &mut state.screencopy,
+                        &output,
+                        renderer,
+                        &elements,
+                        clear,
+                    );
+
+                    // Diagnostics overlay on top of everything (index 0 = drawn
+                    // first), added after screencopy so it stays out of captures.
                     if show_overlay {
                         let scale_int =
                             (output.current_scale().fractional_scale().ceil() as i32).max(1);
                         if let Some(el) = state.diag_overlay.element(renderer, scale_int) {
-                            elements.insert(0, crate::drawing::OutputRenderElements::Overlay(el));
+                            elements.insert(0, crate::drawing::OutputRenderElements::Memory(el));
                         }
                     }
                     let render_start = std::time::Instant::now();

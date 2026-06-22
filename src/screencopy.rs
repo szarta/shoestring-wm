@@ -28,7 +28,6 @@ use smithay::{
             ExportMem, ImportAll, ImportMem, Offscreen, Renderer, RendererSuper,
         },
     },
-    desktop::Space,
     output::Output,
     reexports::{
         wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
@@ -99,16 +98,21 @@ pub struct FrameInner {
 /// wl_shm buffer and send `ready`. Frames for other outputs are left in
 /// place for their own render pass to handle.
 ///
-/// `overlays` are the same per-frame overlay elements the backend composites
-/// above the window stack onto its real framebuffer — the cursor (or lock
-/// surface) plus the server-side window borders. Passing them in means
-/// screenshots match what's on screen, borders included.
+/// `elements` is the exact element list the backend composites onto its real
+/// framebuffer (cursor/borders on top, windows/layers, wallpaper at the
+/// bottom), and `clear` the same clear color — so screenshots match what's on
+/// screen. The backend builds this list before its own scanout render and adds
+/// the screen-only diagnostics overlay only afterwards, keeping it out of
+/// captures.
 pub fn process_pending<R>(
     screencopy: &mut ScreencopyState,
-    space: &Space<smithay::desktop::Window>,
     output: &Output,
     renderer: &mut R,
-    overlays: &[crate::drawing::CaptureOverlay<R>],
+    elements: &[crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >],
+    clear: [f32; 4],
 ) where
     R: Renderer
         + ImportAll
@@ -119,8 +123,10 @@ pub fn process_pending<R>(
         + Offscreen<GlesTexture>,
     <R as RendererSuper>::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
-    crate::drawing::CaptureOverlay<R>: RenderElement<R>,
-    smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>: RenderElement<R>,
+    crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >: RenderElement<R>,
 {
     // Fast path: nothing to do.
     if screencopy.pending.is_empty() {
@@ -193,9 +199,8 @@ pub fn process_pending<R>(
             &mut damage_tracker,
             renderer,
             &mut framebuffer,
-            output,
-            space,
-            overlays,
+            elements,
+            clear,
         );
         drop(framebuffer);
         match result {
@@ -261,9 +266,8 @@ pub fn process_pending<R>(
             &mut damage_tracker,
             renderer,
             &mut framebuffer,
-            output,
-            space,
-            overlays,
+            elements,
+            clear,
         );
         // Drop framebuffer before we re-borrow the renderer for copy.
         drop(framebuffer);
@@ -372,30 +376,30 @@ fn render_into<R>(
     damage_tracker: &mut OutputDamageTracker,
     renderer: &mut R,
     framebuffer: &mut R::Framebuffer<'_>,
-    output: &Output,
-    space: &Space<smithay::desktop::Window>,
-    overlays: &[crate::drawing::CaptureOverlay<R>],
+    elements: &[crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >],
+    clear: [f32; 4],
 ) -> Result<(), String>
 where
     R: Renderer + ImportAll + ImportMem,
     R::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
-    crate::drawing::CaptureOverlay<R>: RenderElement<R>,
-    smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>: RenderElement<R>,
+    crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >: RenderElement<R>,
 {
-    smithay::desktop::space::render_output::<_, crate::drawing::CaptureOverlay<R>, _, _>(
-        output,
-        renderer,
-        framebuffer,
-        1.0,
-        0,
-        [space],
-        overlays,
-        damage_tracker,
-        [0.0, 0.0, 0.0, 1.0],
-    )
-    .map(|_| ())
-    .map_err(|e| format!("{e:?}"))
+    // Render the exact same element list the scanout composites (cursor +
+    // borders on top, windows/layers, wallpaper at the bottom) into the capture
+    // framebuffer, with the same clear color — so screenshots/screencasts match
+    // the screen. The diagnostics overlay is the lone exception: the backend
+    // adds it only after this call, keeping it out of captures.
+    damage_tracker
+        .render_output(renderer, framebuffer, 0, elements, clear)
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
 }
 
 fn copy_region<R>(

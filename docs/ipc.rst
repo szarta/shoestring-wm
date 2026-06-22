@@ -177,8 +177,11 @@ Each request is a JSON object with a ``type`` discriminator:
        click and replies with ``picked_window``. Pointer/keyboard input
        is intercepted while the picker is up — left-click resolves to a
        toplevel, right-click and Escape cancel, other keys are
-       swallowed. Only one picker may be active at a time. If the
-       client disconnects mid-pick the picker is cancelled.
+       swallowed. While the picker is active the pointer shows an
+       ``xkill``-style kill cursor (a red ``×``) on every output,
+       reverting to the normal cursor once it resolves. Only one picker
+       may be active at a time. If the client disconnects mid-pick the
+       picker is cancelled.
    * - ``{"type": "close_window", "id": "..."}``
      - Send ``xdg_toplevel.close`` to the window with the given
        ``ext-foreign-toplevel-list-v1`` identifier. The client may

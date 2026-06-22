@@ -67,10 +67,15 @@ render_elements! {
     Space=smithay::desktop::space::SpaceRenderElements<R, E>,
     Pointer=PointerRenderElement<R>,
     Border=smithay::backend::renderer::element::solid::SolidColorRenderElement,
-    // F3-style diagnostics overlay (see [`crate::diag_overlay`]). On-screen
-    // only — deliberately absent from `CaptureOverlay` so it never burns into
-    // screenshots/screencasts the way the cursor and borders do.
-    Overlay=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>,
+    // Memory-backed buffer elements. Two scene roles share this variant (they're
+    // the same element type; z-order is set by position in the element Vec, not
+    // by the variant): the desktop wallpaper ([`crate::wallpaper`]), pushed LAST
+    // so it sits below every window and layer-shell surface, and the F3-style
+    // diagnostics overlay ([`crate::diag_overlay`]), inserted at index 0 so it
+    // sits on top. The wallpaper is a real scene element (shows in
+    // screenshots/screencasts); the overlay is deliberately kept out of
+    // `CaptureOverlay` so it never burns into captures.
+    Memory=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>,
 }
 
 impl<R: Renderer> std::fmt::Debug for PointerRenderElement<R> {

@@ -99,6 +99,11 @@ pub struct ShoestringWm {
     /// text buffer and its throttle/cache state; renders from `metrics`.
     pub diag_overlay: crate::diag_overlay::DiagOverlay,
 
+    /// Desktop background / wallpaper (the `[background]` config section).
+    /// Caches the composited output-sized canvas; rebuilt on output resize or
+    /// config reload. The bottom-most element of every output's scene.
+    pub wallpaper: crate::wallpaper::Wallpaper,
+
     #[cfg(feature = "tty")]
     pub udev: Option<crate::backend::udev::UdevData>,
 
@@ -413,6 +418,13 @@ pub struct ShoestringWm {
     /// when the chosen xcursor frame is unchanged across renders (the common
     /// case — static cursors stay on a single frame indefinitely).
     pub pointer_image: Option<xcursor::parser::Image>,
+    /// Cached kill-cursor (`×`) buffer for the active window picker, keyed by
+    /// the scale it was rasterized at. Built on demand while a picker is armed
+    /// and reused across frames; see [`crate::cursor::Cursor::kill_frame`].
+    pub kill_cursor: Option<(
+        u32,
+        smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    )>,
 
     /// X11 window-manager client. `None` until Xwayland sends `Ready`
     /// (and on Xwayland disconnect). See [`crate::xwayland`].
@@ -696,6 +708,7 @@ impl ShoestringWm {
             workspaces,
             window_borders: HashMap::new(),
             diag_overlay: crate::diag_overlay::DiagOverlay::default(),
+            wallpaper: crate::wallpaper::Wallpaper::default(),
             #[cfg(feature = "tty")]
             udev: None,
             compositor_state,
@@ -766,6 +779,7 @@ impl ShoestringWm {
             cursor_status: CursorImageStatus::default_named(),
             pointer_element: crate::drawing::PointerElement::default(),
             pointer_image: None,
+            kill_cursor: None,
             xwm: None,
             xdisplay: None,
             xwayland_shell_state,
@@ -1475,6 +1489,35 @@ impl ShoestringWm {
     /// nominal logical size — otherwise a 48px frame at output-scale 2 would
     /// render at 96 physical pixels.
     pub fn refresh_cursor_buffer(&mut self, scale: u32) {
+        // While a window picker is armed (shoestring-kill), every output shows
+        // the xkill-style kill cursor instead of the client's chosen sprite —
+        // an unmistakable "click to close" `×`. Build it once per scale and
+        // force the pointer element onto the buffer path so `drawing.rs` draws
+        // it. The status is resynced from `cursor_status` when the picker
+        // resolves (see `finish_picker`).
+        if self.pending_picker.is_some() {
+            let s = scale.max(1);
+            if self.kill_cursor.as_ref().map(|(cs, _)| *cs) != Some(s) {
+                let (size, pixels) = self.cursor.kill_frame(s);
+                let buffer =
+                    smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+                        &pixels,
+                        smithay::backend::allocator::Fourcc::Argb8888,
+                        (size as i32, size as i32),
+                        s as i32,
+                        smithay::utils::Transform::Normal,
+                        None,
+                    );
+                self.kill_cursor = Some((s, buffer));
+            }
+            let buffer = self.kill_cursor.as_ref().unwrap().1.clone();
+            self.pointer_element.set_buffer(buffer);
+            self.pointer_element.set_status(CursorImageStatus::Named(
+                smithay::input::pointer::CursorIcon::Default,
+            ));
+            return;
+        }
+
         // Only the named-cursor path rasterizes a theme sprite. A client
         // that committed its own cursor surface is drawn from its buffer in
         // `drawing.rs`, and `Hidden` draws nothing — in both cases there is
@@ -1515,6 +1558,14 @@ impl ShoestringWm {
         use smithay::input::pointer::CursorImageStatus;
         let pointer = self.seat.get_pointer()?;
         let location = pointer.current_location();
+        // Picker active: draw the kill cursor regardless of what the client
+        // under the pointer requested (Named, Surface, or even Hidden), with
+        // the hotspot at its center (`size/2` logical px). The buffer was set
+        // by `refresh_cursor_buffer`.
+        if self.pending_picker.is_some() {
+            let half = (self.cursor.size() / 2) as i32;
+            return Some((self.pointer_element.clone(), location, (half, half)));
+        }
         let hotspot = match &self.cursor_status {
             CursorImageStatus::Hidden => return None,
             CursorImageStatus::Named(_) => self
@@ -1556,6 +1607,32 @@ impl ShoestringWm {
                 {
                     let node = udev_id.device_id;
                     let crtc = udev_id.crtc;
+                    self.loop_handle.insert_idle(move |state| {
+                        state.render_surface(node, crtc);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Schedule an immediate render of every output. Used when something that
+    /// isn't tied to client damage changes the scene — e.g. the picker's kill
+    /// cursor arming/resolving. winit renders continuously, so this is a no-op
+    /// there; the udev backend wakes each output's CRTC via an idle callback.
+    pub fn kick_render_all(&mut self) {
+        #[cfg(feature = "tty")]
+        {
+            if self.udev.is_some() {
+                let targets: Vec<_> = self
+                    .space
+                    .outputs()
+                    .filter_map(|o| {
+                        o.user_data()
+                            .get::<crate::backend::udev::UdevOutputId>()
+                            .map(|id| (id.device_id, id.crtc))
+                    })
+                    .collect();
+                for (node, crtc) in targets {
                     self.loop_handle.insert_idle(move |state| {
                         state.render_surface(node, crtc);
                     });

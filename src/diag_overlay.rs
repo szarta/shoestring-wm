@@ -415,6 +415,49 @@ impl crate::state::ShoestringWm {
         self.diag_overlay.enabled && self.diag_overlay_output().as_ref() == Some(output)
     }
 
+    /// Rebuild the wallpaper canvas for `output` if its physical size or the
+    /// `[background]` config changed. A no-op when nothing changed, so it's
+    /// safe to call every frame. Must run *before* the renderer borrow (it
+    /// takes `&mut self`); the element is built later from the buffer. The
+    /// `self.wallpaper` / `self.config` borrows are disjoint fields, so this
+    /// needs no clone.
+    pub fn refresh_wallpaper(&mut self, output: &Output) {
+        let Some(mode) = output.current_mode() else {
+            return;
+        };
+        self.wallpaper
+            .ensure(&self.config.background, (mode.size.w, mode.size.h));
+    }
+
+    /// The output's physical mode size and logical size, for the wallpaper
+    /// element (physical selects the cached canvas; logical sizes the element).
+    /// `None` when the output has no current mode. Logical falls back to
+    /// deriving from the mode and scale when the output isn't mapped into the
+    /// space yet.
+    pub fn wallpaper_dims(
+        &self,
+        output: &Output,
+    ) -> Option<(
+        (i32, i32),
+        smithay::utils::Size<i32, smithay::utils::Logical>,
+    )> {
+        let mode = output.current_mode()?;
+        let phys = (mode.size.w, mode.size.h);
+        let logical = self
+            .space
+            .output_geometry(output)
+            .map(|g| g.size)
+            .unwrap_or_else(|| {
+                let scale = output.current_scale().fractional_scale();
+                (
+                    (mode.size.w as f64 / scale).round() as i32,
+                    (mode.size.h as f64 / scale).round() as i32,
+                )
+                    .into()
+            });
+        Some((phys, logical))
+    }
+
     /// Rebuild the overlay buffer for `output` when due (throttled, or on a
     /// scale/content change). Reads the live metrics snapshot and clips it to
     /// the output's height. A no-op when the overlay is off or nothing changed,

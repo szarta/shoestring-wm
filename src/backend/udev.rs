@@ -1485,6 +1485,17 @@ impl ShoestringWm {
             self.refresh_diag_overlay(&output);
         }
 
+        // Wallpaper: rebuild its canvas (if size/config changed) and capture the
+        // output's logical size, both before re-borrowing `self.udev` for the
+        // renderer. The element itself is built from `self.wallpaper` further
+        // down — a field disjoint from the `self.udev`-rooted renderer borrow.
+        let wallpaper_dims = if locked {
+            None
+        } else {
+            self.refresh_wallpaper(&output);
+            self.wallpaper_dims(&output)
+        };
+
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
@@ -1578,26 +1589,16 @@ impl ShoestringWm {
             )
             .collect();
 
-        // Run any pending screencopy captures for this output BEFORE the
-        // scanout render. The capture path renders the same scene into an
-        // offscreen GLES texture and reads back the requested region; doing
-        // it first means we still hold a live `&mut renderer` and aren't
-        // racing the swapchain. Reads `&self.space` and `&mut self.screencopy`
-        // — disjoint from the `self.udev`-rooted renderer borrow.
-        crate::screencopy::process_pending(
-            &mut self.screencopy,
-            &self.space,
-            &output,
-            &mut renderer,
-            &overlays,
-        );
-
+        // The composited scene, top to bottom: overlays (cursor on top, then
+        // borders), the window/layer stack, and the wallpaper at the very
+        // bottom. `self.wallpaper` is disjoint from the `self.udev`-rooted
+        // renderer borrow. The wallpaper is skipped while locked.
         let mut elements: Vec<
             crate::drawing::OutputRenderElements<
                 UdevRenderer<'_>,
                 WaylandSurfaceRenderElement<UdevRenderer<'_>>,
             >,
-        > = Vec::with_capacity(space_elements.len() + overlays.len());
+        > = Vec::with_capacity(space_elements.len() + overlays.len() + 1);
         elements.extend(
             overlays
                 .into_iter()
@@ -1608,20 +1609,43 @@ impl ShoestringWm {
                 .into_iter()
                 .map(crate::drawing::OutputRenderElements::Space),
         );
-        // Overlay on top of everything (index 0 = drawn first). Reads
+        if let Some((phys, logical)) = wallpaper_dims {
+            if let Some(el) = self.wallpaper.element(&mut renderer, phys, logical) {
+                elements.push(crate::drawing::OutputRenderElements::Memory(el));
+            }
+        }
+
+        // Clear to the configured background color (the wallpaper, if any, is
+        // composited on top above). Black while locked so no client content
+        // leaks through.
+        let clear = if locked {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            self.config.background.color_rgba()
+        };
+
+        // Run any pending screencopy captures for this output BEFORE the scanout
+        // render, feeding the same `elements` and `clear` so screenshots match
+        // the screen. Doing it first means we still hold a live `&mut renderer`
+        // and aren't racing the swapchain. Reads `&mut self.screencopy` —
+        // disjoint from the `self.udev`-rooted renderer borrow.
+        crate::screencopy::process_pending(
+            &mut self.screencopy,
+            &output,
+            &mut renderer,
+            &elements,
+            clear,
+        );
+
+        // Diagnostics overlay on top of everything (index 0 = drawn first),
+        // added after screencopy so it stays out of captures. Reads
         // `self.diag_overlay` — disjoint from the `self.udev`-rooted renderer.
         if show_overlay {
             let scale_int = (output.current_scale().fractional_scale().ceil() as i32).max(1);
             if let Some(el) = self.diag_overlay.element(&mut renderer, scale_int) {
-                elements.insert(0, crate::drawing::OutputRenderElements::Overlay(el));
+                elements.insert(0, crate::drawing::OutputRenderElements::Memory(el));
             }
         }
-
-        let clear = if locked {
-            [0.0, 0.0, 0.0, 1.0]
-        } else {
-            [0.1, 0.1, 0.1, 1.0]
-        };
         // Re-assert VRR for outputs that opted in. `use_vrr` short-circuits
         // when the pending state already matches, so this is a couple of cheap
         // lock acquisitions per frame; it only does real work after something

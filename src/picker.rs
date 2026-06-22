@@ -72,6 +72,10 @@ impl ShoestringWm {
             client,
             saved_focus,
         });
+        // Show the kill cursor right away rather than waiting for the first
+        // pointer motion — `refresh_cursor_buffer` switches to it now that
+        // `pending_picker` is set.
+        self.kick_render_all();
         Ok(())
     }
 
@@ -97,6 +101,7 @@ impl ShoestringWm {
                 kb.set_focus(self, pending.saved_focus, serial);
             }
         }
+        self.restore_cursor_after_picker();
         let _ =
             crate::ipc::write_response(&pending.client, &Response::PickedWindow { window: result });
         self.drop_ipc_client(pending.client_id);
@@ -122,6 +127,18 @@ impl ShoestringWm {
                 kb.set_focus(self, pending.saved_focus, serial);
             }
         }
+        self.restore_cursor_after_picker();
+    }
+
+    /// Resync the pointer element's render status from the live
+    /// [`cursor_status`](ShoestringWm::cursor_status) after a picker resolves,
+    /// undoing the kill-cursor override [`refresh_cursor_buffer`] applied while
+    /// the picker was armed. The next render then shows the client's real
+    /// cursor again; a render is kicked so the revert is immediate even when no
+    /// pointer motion follows.
+    fn restore_cursor_after_picker(&mut self) {
+        self.pointer_element.set_status(self.cursor_status.clone());
+        self.kick_render_all();
     }
 
     /// Build a [`WindowSummary`] for `window` using the same data the
