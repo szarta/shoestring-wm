@@ -51,6 +51,19 @@ install -Dm755 -t ~/.local/bin/ \
   target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm,mediad} \
   target/release/xdg-desktop-portal-shoestring
 
+# Screen sharing (Zoom, browsers): the portal *binary* above is not enough on
+# its own — the xdg-desktop-portal frontend also needs the routing config and
+# the *.portal descriptor, or it has no ScreenCast/Screenshot backend and screen
+# sharing silently hangs. Install both (the descriptor MUST live in a system
+# data dir; ~/.local/share is not scanned for *.portal files):
+install -Dm644 resources/shoestring-wm-portals.conf \
+  ~/.config/xdg-desktop-portal/shoestring-wm-portals.conf
+sudo install -Dm644 resources/shoestring.portal \
+  /usr/share/xdg-desktop-portal/portals/shoestring.portal
+# Then: systemctl --user restart xdg-desktop-portal
+# Full details (D-Bus activation, multi-monitor chooser): docs/portals.rst.
+# This replaces xdg-desktop-portal-wlr — do NOT install xdpw.
+
 # Bootstrap a config at ~/.config/shoestring-wm/config.toml
 shoestring-wm --write-default-config
 
@@ -107,6 +120,8 @@ cd docs && make man       # _build/man/shoestring-wm.{1,5}, etc.
   every action type.
 - [Default bindings](docs/bindings.rst) — full keymap reference.
 - [IPC](docs/ipc.rst) — protocol, types, and example clients.
+- [Portals](docs/portals.rst) — screen sharing (Zoom/browsers), the native
+  ScreenCast/Screenshot backend, and backend-routing setup.
 - [Architecture](docs/architecture.md) — source-level design notes.
 - [Portability](docs/PORTABILITY.md) — Linux-ism audit + FreeBSD status.
 

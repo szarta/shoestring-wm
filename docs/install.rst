@@ -59,6 +59,16 @@ inside it. Then generate a starter config::
    not yet in the official ports tree, so ``pkg install shoestring-wm`` does
    not resolve it. See `FreeBSD`_.
 
+   Installing **binaries only** — whether via ``cargo install --git``,
+   ``cargo install --path``, or copying ``target/release/`` somewhere — does
+   **not** lay down the data files under ``resources/`` (the portal routing
+   config and ``.portal`` descriptor, the session/``.desktop`` files, action
+   scripts). Without the portal files in particular, screen sharing
+   (Zoom/browsers) silently hangs. Either install the ``.deb`` / ``.rpm``
+   (which place everything), or copy the files from the repo's ``resources/``
+   directory by hand — see :doc:`portals` for the two screen-sharing files and
+   their exact destinations.
+
 Build
 -----
 
