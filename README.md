@@ -44,9 +44,12 @@ sudo apt install build-essential pkg-config \
 # `--workspace` rebuilds the helper crates too, not just the WM.
 cargo build --release --workspace
 
-# Drop them on $PATH — the WM and every helper / sibling it spawns.
+# Drop them on $PATH — the WM and every helper / sibling it spawns
+# (the bar, mediad, and the portal are autostarted; the rest are
+# launched on demand by keybinds and IPC).
 install -Dm755 -t ~/.local/bin/ \
-  target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
+  target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm,mediad} \
+  target/release/xdg-desktop-portal-shoestring
 
 # Bootstrap a config at ~/.config/shoestring-wm/config.toml
 shoestring-wm --write-default-config
