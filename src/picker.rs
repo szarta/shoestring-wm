@@ -18,7 +18,9 @@ use std::{cell::RefCell, rc::Rc};
 
 use shoestring_ipc::{Response, WindowSummary};
 use smithay::{
-    desktop::Window, reexports::wayland_server::protocol::wl_surface::WlSurface,
+    backend::input::{ButtonState, KeyState},
+    desktop::Window,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::SERIAL_COUNTER,
 };
 
@@ -26,6 +28,13 @@ use crate::{
     ipc::{Client, ClientId},
     state::ShoestringWm,
 };
+
+/// Linux evdev `BTN_LEFT` code (also defined in [`crate::input`] /
+/// [`crate::inject`]; kept local here so the shared resolver doesn't depend
+/// on either module).
+const BTN_LEFT: u32 = 0x110;
+/// xkb `Escape` keysym — the key that cancels an armed picker.
+const KEY_ESCAPE: u32 = 0xff1b;
 
 pub struct PendingPicker {
     pub client_id: ClientId,
@@ -105,6 +114,48 @@ impl ShoestringWm {
         let _ =
             crate::ipc::write_response(&pending.client, &Response::PickedWindow { window: result });
         self.drop_ipc_client(pending.client_id);
+    }
+
+    /// Picker-mode pointer-button handler shared by the real-input
+    /// ([`crate::input`]) and injected ([`crate::inject`]) paths so the two
+    /// can't drift. When a picker is armed, a press resolves it (left-click
+    /// picks the toplevel under the pointer; any other button cancels) and a
+    /// release is swallowed — either way the event must not reach the client
+    /// beneath. Returns `true` when the picker consumed the event (caller
+    /// returns without delivering it), `false` when no picker is armed.
+    pub(crate) fn picker_handle_button(&mut self, button: u32, state: ButtonState) -> bool {
+        if self.pending_picker.is_none() {
+            return false;
+        }
+        if state == ButtonState::Pressed {
+            let pos = self
+                .seat
+                .get_pointer()
+                .expect("seat must have pointer")
+                .current_location();
+            let target = if button == BTN_LEFT {
+                self.space.element_under(pos).map(|(w, _)| w.clone())
+            } else {
+                None
+            };
+            let summary = target.as_ref().and_then(|w| self.picker_summary(w));
+            self.finish_picker(summary);
+        }
+        true
+    }
+
+    /// Picker-mode key decision shared by the real-input and injected key
+    /// paths. Escape on press cancels the armed picker; every other key is a
+    /// no-op (the caller swallows the key regardless so it never reaches the
+    /// focused surface). `sym` is the resolved keysym value. No-op when no
+    /// picker is armed.
+    pub(crate) fn picker_resolve_key(&mut self, sym: u32, state: KeyState) {
+        if self.pending_picker.is_none() {
+            return;
+        }
+        if state == KeyState::Pressed && sym == KEY_ESCAPE {
+            self.finish_picker(None);
+        }
     }
 
     /// If the picker is owned by `client_id`, drop it without writing a

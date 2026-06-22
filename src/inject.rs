@@ -51,6 +51,16 @@ impl ShoestringWm {
         keysym_name: &str,
         modifiers: &[String],
     ) -> Result<(), InjectError> {
+        // Picker mode: an armed picker intercepts keys exactly like the
+        // real-input path — Escape cancels, everything else is swallowed.
+        // Resolve and return before touching the keymap or the focused
+        // surface so an injected Escape can cancel the picker programmatically
+        // (without this, the injected key reaches the client instead).
+        if self.pending_picker.is_some() {
+            let sym = parse_keysym_name(keysym_name)?;
+            self.picker_resolve_key(sym.raw(), KeyState::Pressed);
+            return Ok(());
+        }
         // Resolve everything up-front so a typo in any modifier aborts
         // before we've started pressing keys — half-applied chords leave
         // sticky modifiers on the focused surface.
@@ -173,6 +183,15 @@ impl ShoestringWm {
             );
             pointer.frame(self);
             self.last_pointer_focus = under;
+        }
+
+        // Picker mode: an armed picker intercepts the click exactly like the
+        // real-input path — left picks the toplevel under the (now-moved)
+        // pointer, anything else cancels. The click never reaches the client,
+        // so we skip the focus update and button dispatch entirely. Shared
+        // with the real-input path so the two can't drift.
+        if self.picker_handle_button(code, ButtonState::Pressed) {
+            return Ok(());
         }
 
         // Mirror the WM's normal click-to-focus behavior — without this,

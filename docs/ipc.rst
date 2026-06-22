@@ -181,7 +181,12 @@ Each request is a JSON object with a ``type`` discriminator:
        ``xkill``-style kill cursor (a red ``×``) on every output,
        reverting to the normal cursor once it resolves. Only one picker
        may be active at a time. If the client disconnects mid-pick the
-       picker is cancelled.
+       picker is cancelled. Synthetic input resolves the picker exactly
+       like real input: an armed picker intercepts ``inject_click``
+       (left-click picks the toplevel under the pointer, any other button
+       cancels) and ``inject_key`` (Escape cancels, other keys are
+       swallowed) before the event reaches the focused surface — so an
+       agent can arm and resolve the picker entirely over IPC.
    * - ``{"type": "close_window", "id": "..."}``
      - Send ``xdg_toplevel.close`` to the window with the given
        ``ext-foreign-toplevel-list-v1`` identifier. The client may

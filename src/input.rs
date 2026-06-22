@@ -654,26 +654,27 @@ impl ShoestringWm {
                 // swallowed so the user can't accidentally type into the
                 // window they're about to kill.
                 if self.pending_picker.is_some() {
-                    let cancel = self.seat.get_keyboard().unwrap().input::<bool, _>(
+                    // Run the key through xkb so modifier state stays
+                    // consistent, but intercept it — picker keys never reach
+                    // the focused surface. Pull the resolved keysym out and
+                    // hand it to the shared resolver (Escape cancels), which
+                    // the injected-key path also uses so the two can't drift.
+                    let sym = self.seat.get_keyboard().unwrap().input::<u32, _>(
                         self,
                         event.key_code(),
                         key_state,
                         serial,
                         time,
                         |_state, _mods, handle| {
-                            if key_state != KeyState::Pressed {
-                                return FilterResult::Intercept(false);
-                            }
-                            const KEY_ESCAPE: u32 = 0xff1b;
                             let sym = handle
                                 .raw_latin_sym_or_raw_current_sym()
                                 .map(|s| s.raw())
                                 .unwrap_or(0);
-                            FilterResult::Intercept(sym == KEY_ESCAPE)
+                            FilterResult::Intercept(sym)
                         },
                     );
-                    if cancel == Some(true) {
-                        self.finish_picker(None);
+                    if let Some(sym) = sym {
+                        self.picker_resolve_key(sym, key_state);
                     }
                     return;
                 }
@@ -922,18 +923,9 @@ impl ShoestringWm {
                 // Picker mode: a press resolves (left) or cancels (right /
                 // any other button). Releases are swallowed. The click is
                 // never delivered to the surface beneath, so the window
-                // about to be closed doesn't see a phantom click.
-                if self.pending_picker.is_some() {
-                    if button_state == ButtonState::Pressed {
-                        let pos = pointer.current_location();
-                        let target = if button == BTN_LEFT {
-                            self.space.element_under(pos).map(|(w, _)| w.clone())
-                        } else {
-                            None
-                        };
-                        let summary = target.as_ref().and_then(|w| self.picker_summary(w));
-                        self.finish_picker(summary);
-                    }
+                // about to be closed doesn't see a phantom click. Shared with
+                // the injected-click path so the two can't drift.
+                if self.picker_handle_button(button, button_state) {
                     return;
                 }
 
