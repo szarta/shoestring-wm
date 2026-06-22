@@ -877,6 +877,18 @@ pub enum Action {
     },
     /// Exit the WM cleanly.
     Quit,
+    /// Power off the machine, behind the same `shoestring-confirm` dialog as
+    /// [`Action::Quit`]. The WM owns no power policy — it shells out to the
+    /// first available of `systemctl` / `loginctl` / `shutdown(8)`. Bind to
+    /// `XF86PowerOff` to make the hardware power key prompt instead of
+    /// shutting down immediately — note `logind` handles that key itself by
+    /// default, so also set `HandlePowerKey=ignore` (see docs/install.rst).
+    PowerOff,
+    /// Reboot the machine; confirm-gated like [`Action::PowerOff`].
+    Reboot,
+    /// Suspend (sleep / S3) the machine; confirm-gated like
+    /// [`Action::PowerOff`]. Bind to `XF86Sleep` (with `HandleSuspendKey=ignore`).
+    Suspend,
     /// Re-read the config file from disk.
     ReloadConfig,
     /// Snap the focused window to the left half of its monitor's usable rect.

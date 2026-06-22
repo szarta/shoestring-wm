@@ -144,6 +144,9 @@ impl ShoestringWm {
                     state.loop_signal.stop();
                 });
             }
+            Action::PowerOff => self.confirm_power(crate::power::PowerAction::PowerOff),
+            Action::Reboot => self.confirm_power(crate::power::PowerAction::Reboot),
+            Action::Suspend => self.confirm_power(crate::power::PowerAction::Suspend),
             Action::ReloadConfig => {
                 let _ = self.reload_config_from_disk();
             }

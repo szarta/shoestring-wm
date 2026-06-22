@@ -1965,6 +1965,7 @@ impl Dispatch<XdgPopup, ()> for State {
                 if let Some(m) = state.menu.take() {
                     m.destroy();
                 }
+                state.menu_is_control = false;
             }
             _ => {}
         }
@@ -2143,7 +2144,19 @@ fn primary_press(state: &mut State, qh: &QueueHandle<State>) {
     // the clock, distinct from the tray icon cluster.
     if let Some((cx, cw)) = state.control_rect {
         if xi >= cx && xi < cx + cw {
-            state.pending_open_control = true;
+            // Same toggle behaviour as the tray icons (and wifi/bluetooth
+            // applets): clicking the applet while its menu is open closes
+            // it, rather than reopening. The popup and the bar are one
+            // client, so smithay's popup grab delivers this click without
+            // a popup_done — we close it ourselves.
+            if state.menu_is_control && state.menu.is_some() {
+                if let Some(m) = state.menu.take() {
+                    m.destroy();
+                }
+                state.menu_is_control = false;
+            } else {
+                state.pending_open_control = true;
+            }
             return;
         }
     }
@@ -2398,6 +2411,9 @@ const CTRL_LOGOUT: i32 = 4;
 const CTRL_AUDIO_MUTE: i32 = 5;
 const CTRL_MIC_MUTE: i32 = 6;
 const CTRL_CAMERA: i32 = 7;
+const CTRL_SLEEP: i32 = 8;
+const CTRL_REBOOT: i32 = 9;
+const CTRL_SHUTDOWN: i32 = 10;
 
 /// Build the control-menu rows from the current gate state. Toggles show a
 /// checkmark reflecting the live gate; lock/logout are plain items.
@@ -2459,6 +2475,12 @@ fn control_entries(state: &State) -> Vec<tray::MenuNode> {
     entries.push(separator());
     entries.push(item(CTRL_LOCK, "Lock screen", None));
     entries.push(item(CTRL_LOGOUT, "Log out", None));
+    // Power actions. All three confirm in the WM (the shoestring-confirm
+    // dialog), so an accidental click can't tear the machine down.
+    entries.push(separator());
+    entries.push(item(CTRL_SLEEP, "Sleep", None));
+    entries.push(item(CTRL_REBOOT, "Reboot", None));
+    entries.push(item(CTRL_SHUTDOWN, "Shut down", None));
     entries
 }
 
@@ -2506,6 +2528,10 @@ fn apply_control_action(state: &mut State, id: i32) {
         CTRL_AUTOMATION => ipc_client::set_automation(!state.automation_enabled),
         CTRL_LOCK => ipc_client::lock(),
         CTRL_LOGOUT => ipc_client::quit(),
+        // Power rows: each pops the WM confirm dialog before acting.
+        CTRL_SLEEP => ipc_client::suspend(),
+        CTRL_REBOOT => ipc_client::reboot(),
+        CTRL_SHUTDOWN => ipc_client::power_off(),
         // Flip the live mute (not a cached toggle): mediad re-reports the real
         // state, which updates the chip + checkmark via `media_changed`.
         CTRL_AUDIO_MUTE => {

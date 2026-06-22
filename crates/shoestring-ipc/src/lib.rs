@@ -132,6 +132,23 @@ pub enum Request {
     /// mouse-driven UI (the bar control menu) offer log-out without requiring
     /// the automation gate that `dispatch_action {"type":"quit"}` needs.
     Quit,
+    /// Power off the machine. Like [`Quit`](Self::Quit) this pops the
+    /// `confirm_action` dialog and only acts on the user's *Yes*; the reply
+    /// is [`Response::Ok`] once the dialog is shown. The WM shells out to a
+    /// fallback chain (`systemctl poweroff` → `loginctl poweroff` →
+    /// `shutdown(8)`) so systemd, elogind, and bare-init/FreeBSD systems all
+    /// work (see the systemd-is-optional policy). **Ungated** for the same
+    /// reason as `Quit`: the dialog is the authorization. Lets the bar's
+    /// control menu offer Shut down without the automation gate.
+    PowerOff,
+    /// Reboot the machine. Confirm-gated and ungated exactly like
+    /// [`PowerOff`](Self::PowerOff); fallback chain is `systemctl reboot` →
+    /// `loginctl reboot` → `shutdown -r now`.
+    Reboot,
+    /// Suspend the machine (sleep / S3). Confirm-gated and ungated exactly
+    /// like [`PowerOff`](Self::PowerOff); fallback chain is
+    /// `systemctl suspend` → `loginctl suspend` → `zzz` (FreeBSD).
+    Suspend,
     /// Toggle the runtime automation gate (see
     /// `general.automation_enabled`). Reply is [`Response::Automation`]
     /// with the new state; an [`Event::AutomationChanged`] is broadcast

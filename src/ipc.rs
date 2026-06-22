@@ -379,6 +379,26 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::PowerOff => {
+                // Ungated, like Quit: the confirm dialog is the authorization.
+                // Reply Ok once the dialog is up, not on acceptance.
+                tracing::info!("power-off requested via ipc; prompting for confirmation");
+                state.confirm_power(crate::power::PowerAction::PowerOff);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
+            Request::Reboot => {
+                tracing::info!("reboot requested via ipc; prompting for confirmation");
+                state.confirm_power(crate::power::PowerAction::Reboot);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
+            Request::Suspend => {
+                tracing::info!("suspend requested via ipc; prompting for confirmation");
+                state.confirm_power(crate::power::PowerAction::Suspend);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
             Request::SetAutomation { enabled } => {
                 let changed = state.automation_enabled != enabled;
                 // Automation is a superset of screen capture: this also opens

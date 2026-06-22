@@ -242,6 +242,42 @@ pub fn quit() -> Result<()> {
     }
 }
 
+/// Power off the machine (`Request::PowerOff`). Ungated; pops the WM's
+/// confirm dialog, so this returns once the dialog is shown — the user still
+/// has to accept it. The WM owns the actual `systemctl`/`loginctl`/`shutdown`
+/// fallback chain.
+pub fn power_off() -> Result<()> {
+    one_shot_ok(&Request::PowerOff, "power-off")
+}
+
+/// Reboot the machine (`Request::Reboot`). Same confirm-then-act flow as
+/// [`power_off`].
+pub fn reboot() -> Result<()> {
+    one_shot_ok(&Request::Reboot, "reboot")
+}
+
+/// Suspend the machine (`Request::Suspend`). Same confirm-then-act flow as
+/// [`power_off`].
+pub fn suspend() -> Result<()> {
+    one_shot_ok(&Request::Suspend, "suspend")
+}
+
+/// Send a one-shot request that expects a bare [`Response::Ok`], mapping a
+/// server-side error to an `Err`. Shared by the fire-and-confirm controls
+/// (`PowerOff`/`Reboot`/`Suspend`); `what` names the request for context.
+fn one_shot_ok(req: &Request, what: &str) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, req)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response =
+        serde_json::from_str(&line).with_context(|| format!("parse {what} response"))?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Open a streaming subscription. Sends `Request::EventStream`, reads the
 /// initial `Response::Ok`, then flips the socket to non-blocking so the
 /// caller can poll it.

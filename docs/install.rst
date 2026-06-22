@@ -325,6 +325,46 @@ FreeBSD        ``wl-clipboard`` (port: ``x11/wl-clipboard``)
 NixOS          ``wl-clipboard``
 ============== ================
 
+The hardware power / sleep keys
+-------------------------------
+
+shoestring-wm can route the physical **power** and **sleep** keys through
+its confirm dialog (the same one the bar's *Shut down* / *Sleep* menu rows
+use) — but only if you stop the *session manager* from acting on them
+first. The WM has no power policy of its own; it just reacts to the key
+once nothing else does.
+
+On a systemd system that is ``logind``: by default ``HandlePowerKey`` is
+``poweroff`` and ``HandleSuspendKey`` is ``suspend``, so a single press
+powers off / suspends **immediately, with no confirmation**, before the
+WM ever sees the key. To hand those keys to the WM, edit
+``/etc/systemd/logind.conf`` (or drop a file in
+``/etc/systemd/logind.conf.d/``)::
+
+    [Login]
+    HandlePowerKey=ignore
+    HandleSuspendKey=ignore
+
+then ``systemctl restart systemd-logind`` (note: this ends the current
+graphical session). Now bind the keys in your shoestring-wm config — the
+keysym names are ``XF86PowerOff`` and ``XF86Sleep``::
+
+    [[bindings]]
+    key = "XF86PowerOff"
+    action = "power-off"   # pops the confirm dialog, then shells out
+
+    [[bindings]]
+    key = "XF86Sleep"
+    action = "suspend"
+
+The ``power-off`` / ``reboot`` / ``suspend`` actions (and the matching bar
+menu rows) shell out to the first available of ``systemctl`` →
+``loginctl`` → ``shutdown(8)`` / ``zzz``, so they work on systemd,
+elogind, and bare-init / FreeBSD alike. On FreeBSD the power key is wired
+through ``devd`` / ``acpiconf`` rather than logind — disable the relevant
+``/etc/devd.conf`` (or ``sysctl hw.acpi.power_button_state``) handler the
+same way before binding the key here.
+
 After installing
 ----------------
 

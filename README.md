@@ -42,6 +42,13 @@ sudo apt install build-essential pkg-config \
 
 # Build (release; all workspace binaries land in target/release/).
 # `--workspace` rebuilds the helper crates too, not just the WM.
+#
+# NOTE: `cargo install --path .` is NOT enough — it installs only the WM
+# binary and silently skips the workspace helpers (shoestring-confirm,
+# -bar, -mediad, ...). A missing shoestring-confirm makes confirm-gated
+# actions (Log out / Shut down from the bar menu, Super+Shift+Q) no-op
+# with only a log line. Use the build + install below, or
+# `cargo install --path . --path crates/shoestring-confirm ...` per helper.
 cargo build --release --workspace
 
 # Drop them on $PATH — the WM and every helper / sibling it spawns

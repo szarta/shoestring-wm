@@ -32,6 +32,7 @@ mod layout;
 pub mod metrics;
 mod output_management;
 mod picker;
+mod power;
 pub mod presentation;
 mod remote_command;
 mod remote_screenshot;

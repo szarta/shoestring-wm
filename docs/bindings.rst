@@ -74,7 +74,12 @@ Binding                            Action
 
 The ``quit`` action raises a yes/no modal rendered by
 ``shoestring-confirm``; pressing Enter exits cleanly, Escape stays
-running.
+running. The ``power-off``, ``reboot``, and ``suspend`` actions use the
+same modal and then shell out to ``systemctl`` / ``loginctl`` /
+``shutdown(8)`` (the bar's control menu offers the same three). They are
+unbound by default; to route the hardware power / sleep keys through them
+you must first stop ``logind`` from handling those keys — see
+:doc:`install`.
 
 Media and brightness
 --------------------

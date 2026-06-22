@@ -255,6 +255,23 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "lock"}``
      - Spawn ``[general].lock_command``. Replies ``ok`` immediately;
        the locker drives the ``ext-session-lock-v1`` handshake itself.
+   * - ``{"type": "quit"}``
+     - Exit the WM, via the same ``confirm_action`` dialog as the
+       ``Super+Shift+Q`` keybind — the WM only quits on the user's *Yes*.
+       Replies ``ok`` once the dialog is shown (not on acceptance).
+       **Ungated**: the human confirmation *is* the authorization, so the
+       bar's control menu can offer Log out without the automation gate
+       that ``dispatch_action {"type":"quit"}`` requires.
+   * - ``{"type": "power_off"}`` / ``{"type": "reboot"}`` / ``{"type": "suspend"}``
+     - Shut down / reboot / suspend the machine. Each pops the same
+       confirm dialog as ``quit`` and only acts on *Yes*; reply is ``ok``
+       once the dialog is shown. **Ungated** for the same reason as
+       ``quit``. The WM owns no power policy — it shells out to the first
+       available tool in a fallback chain (``systemctl`` → ``loginctl`` →
+       ``shutdown(8)``/``zzz``) so systemd, elogind, and bare-init/FreeBSD
+       all work. Note this is the *menu*/IPC path; the hardware power key
+       is still handled by ``logind`` unless you set ``HandlePowerKey`` —
+       see :doc:`install`.
    * - ``{"type": "set_automation", "enabled": true}``
      - Flip the runtime automation gate. Reply is ``automation`` with
        the new state; ``automation_changed`` is broadcast to
