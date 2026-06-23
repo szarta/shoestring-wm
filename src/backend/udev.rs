@@ -393,6 +393,54 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
         })
         .map_err(|e| anyhow::anyhow!("insert session notifier: {e}"))?;
 
+    // Startup VT watchdog. When the compositor is launched mid-VT-handoff (a
+    // display manager activating the session's VT while its greeter is still
+    // foreground), `session.is_active()` is false at startup. In that state
+    // PauseSession never fires (we were never active, so its watchdog is never
+    // armed) and ActivateSession may never arrive either (logind already
+    // considers the session active, so there's no transition to signal) — and
+    // we'd sit unprivileged forever. Mirror the PauseSession watchdog: poll the
+    // foreground VT and self-activate once our home VT (XDG_VTNR) is in front.
+    // One-shot: if do_activate_session can't take master (another session owns
+    // the GPU) it stays inactive without spinning, and a later real VT switch
+    // retries.
+    if !vt_active {
+        match std::env::var("XDG_VTNR").ok().filter(|s| !s.is_empty()) {
+            Some(vtnr) => {
+                let home = format!("tty{vtnr}");
+                tracing::info!(home_vt = %home, "session inactive at startup; arming startup VT watchdog");
+                event_loop
+                    .handle()
+                    .insert_source(
+                        Timer::from_duration(Duration::from_millis(200)),
+                        move |_, _, state| {
+                            // Already active (a real ActivateSession beat us to it).
+                            if state.udev.as_ref().is_some_and(|u| u.vt_active) {
+                                return TimeoutAction::Drop;
+                            }
+                            let current = std::fs::read_to_string("/sys/class/tty/tty0/active")
+                                .map(|s| s.trim().to_string())
+                                .unwrap_or_default();
+                            // Keep waiting until our home VT is the foreground one.
+                            if current != home {
+                                return TimeoutAction::ToDuration(Duration::from_millis(200));
+                            }
+                            tracing::info!(vt = %current, "startup VT watchdog: home VT is foreground; activating");
+                            do_activate_session(state);
+                            TimeoutAction::Drop
+                        },
+                    )
+                    .map_err(|e| anyhow::anyhow!("insert startup VT watchdog: {e}"))?;
+            }
+            None => {
+                tracing::warn!(
+                    "session inactive at startup but XDG_VTNR is unset; cannot arm startup VT \
+                     watchdog (a manual VT switch will still activate the session)"
+                );
+            }
+        }
+    }
+
     // Walk every device currently visible to udev, opening the ones we can
     // and ignoring the rest. Primary first so its render node is available
     // before any other device tries to fall back to it.
@@ -1066,8 +1114,16 @@ fn do_activate_session(state: &mut ShoestringWm) {
         }
         let nodes: Vec<DrmNode> = udev.backends.keys().copied().collect();
         tracing::debug!(node_count = nodes.len(), "activating drm backends");
+        // Track whether a GPU that actually drives outputs failed to take DRM
+        // master. If so we must NOT mark the session active: doing that lets
+        // the render loop run and spin on failing atomic commits (TestFailed),
+        // which previously produced a runaway multi-hundred-MB log and a hard
+        // hang. A surface-less secondary GPU failing master is harmless (it
+        // queues no frames), so it doesn't count.
+        let mut master_failed_with_surfaces = false;
         for node in &nodes {
             if let Some(backend) = udev.backends.get_mut(node) {
+                let has_surfaces = !backend.surfaces.is_empty();
                 // Explicitly reclaim DRM master before asking smithay to
                 // activate the device.  Smithay only calls SET_MASTER when
                 // the fd is "privileged" (it acquired master at open-time),
@@ -1079,7 +1135,10 @@ fn do_activate_session(state: &mut ShoestringWm) {
                 match device_fd.acquire_master_lock() {
                     Ok(()) => tracing::info!(?node, "DRM master re-acquired"),
                     Err(e) => {
-                        tracing::warn!(?node, error = ?e, "DRM master re-acquire failed; rendering may fail")
+                        tracing::warn!(?node, error = ?e, "DRM master re-acquire failed");
+                        if has_surfaces {
+                            master_failed_with_surfaces = true;
+                        }
                     }
                 }
                 tracing::debug!(
@@ -1100,6 +1159,18 @@ fn do_activate_session(state: &mut ShoestringWm) {
                     surface.drm_output.reset_buffers();
                 }
             }
+        }
+        if master_failed_with_surfaces {
+            // Another session almost certainly still owns the GPU driving our
+            // outputs — most commonly a display manager's X greeter on a
+            // different VT (see task 166). Stay inactive and bail before
+            // rendering: a black/frozen screen beats a runaway-log hang, and a
+            // later genuine VT-switch (or the startup watchdog) will retry.
+            tracing::warn!(
+                "session activation: could not acquire DRM master on the GPU driving outputs; \
+                 staying inactive (another session likely holds the display)"
+            );
+            return;
         }
         udev.vt_active = true;
     }
