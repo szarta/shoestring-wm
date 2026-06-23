@@ -284,11 +284,20 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
             match &mut event {
                 InputEvent::DeviceAdded { device } => {
                     crate::input_config::apply(device, &state.config.input);
+                    // Record any output libinput associates with the device (a
+                    // touchscreen tagged via a udev `WL_OUTPUT` rule, say) so
+                    // touch projection can map onto it without per-session config.
+                    if let Some(output) = device.output_name() {
+                        state
+                            .touch_output_by_device
+                            .insert(device.name().to_string(), output.into_owned());
+                    }
                     if let Some(udev) = state.udev.as_mut() {
                         udev.devices.push(device.clone());
                     }
                 }
                 InputEvent::DeviceRemoved { device } => {
+                    state.touch_output_by_device.remove(device.name().as_ref());
                     if let Some(udev) = state.udev.as_mut() {
                         udev.devices.retain(|d| d != device);
                     }

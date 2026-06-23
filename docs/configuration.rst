@@ -27,7 +27,8 @@ for a pre-commit hook or a CI check on a dotfiles repo.
 
 The file's main sections — ``[general]``, ``[workspaces]``,
 ``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, ``[input]``,
-``[decorations]``, ``[background]``, and ``[debug]`` — are all optional.
+``[touch]``, ``[decorations]``, ``[background]``, and ``[debug]`` — are all
+optional.
 Missing sections take built-in defaults.
 
 The ``[general]`` section
@@ -375,6 +376,37 @@ Example — a typical laptop touchpad::
     natural_scroll = true
     disable_while_typing = true
     accel_speed = 0.3
+
+The ``[touch]`` section
+-----------------------
+
+``[touch]`` controls how touchscreen input is routed. A touchscreen reports
+each contact in its own normalized ``[0,1]²`` space; on a multi-output desktop
+that space has to be projected onto the **one** output the panel physically
+overlays, or taps land on the wrong screen. (This is separate from ``[input]``,
+which tunes libinput device knobs — here we're choosing an output, not a device
+setting.)
+
+The WM picks the touch output in this order: the explicit ``map_to_output``
+below, then any output libinput reports for the device (only set when a udev
+rule tags it, e.g. ``WL_OUTPUT``), then the first output. So a single-output
+machine needs nothing here, and the common laptop-plus-monitor case is one line.
+
+::
+
+    [touch]
+    map_to_output = "eDP-1"
+
+``map_to_output``
+    Connector name of the output every touchscreen maps onto — as listed by
+    ``shoestring-ctl outputs`` (e.g. ``"eDP-1"``, ``"HDMI-A-1"``). Unset by
+    default (touch stays on the libinput-reported or first output). Read fresh
+    on each contact, so ``reload-config`` retargets touch immediately. A name
+    that matches no current output (an unplugged monitor) is ignored and the
+    WM falls back as if it were unset, so touch is never dropped. One global
+    mapping covers all touch devices; independent per-touchscreen mapping is
+    not supported (uncommon, and udev ``WL_OUTPUT`` tagging handles it when
+    needed).
 
 Bindings
 --------

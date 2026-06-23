@@ -1151,17 +1151,59 @@ impl ShoestringWm {
         }
     }
 
-    /// Project a touch event's normalized position onto the desktop, the same
-    /// way `PointerMotionAbsolute` maps the pointer — touch and the cursor then
-    /// share one logical coordinate space. (No output-transform inversion yet;
-    /// see task 107.)
+    /// Project a touch event's normalized position onto the desktop. A
+    /// touchscreen reports each contact in its own `[0,1]²` space, which maps
+    /// onto the single output the panel physically overlays — so, unlike the
+    /// pointer (one global cursor), touch has to choose an output. We pick, in
+    /// order: an explicit `[touch].map_to_output`, the output libinput reports
+    /// for this device, then the first output (correct for a single-output
+    /// desktop, and the historical behaviour). Within that output the mapping is
+    /// the same `position_transformed` the absolute pointer path uses, so touch
+    /// and cursor share one logical coordinate space. (No output-transform
+    /// inversion yet; see task 107.)
     fn touch_location<I: InputBackend, E: AbsolutePositionEvent<I>>(
         &self,
         evt: &E,
     ) -> Option<Point<f64, Logical>> {
-        let output = self.space.outputs().next()?;
-        let output_geo = self.space.output_geometry(output)?;
+        let output = self.touch_output(&evt.device().name())?;
+        let output_geo = self.space.output_geometry(&output)?;
         Some(evt.position_transformed(output_geo.size) + output_geo.loc.to_f64())
+    }
+
+    /// Resolve which output a touch device projects onto (see [`Self::touch_location`]
+    /// for the precedence). Returns the first output when nothing more specific
+    /// matches, so single-output setups need no configuration.
+    fn touch_output(&self, device_name: &str) -> Option<Output> {
+        let present: Vec<String> = self.space.outputs().map(|o| o.name()).collect();
+        // 1. Explicit per-session override, read fresh so a hot-reload retargets.
+        let configured = self.config.touch.map_to_output.as_deref();
+        // 2. The output libinput associates with this device (udev-tagged).
+        let associated = self
+            .touch_output_by_device
+            .get(device_name)
+            .map(|s| s.as_str());
+        let chosen = Self::pick_touch_output_name(&present, configured, associated)?;
+        self.space.outputs().find(|o| o.name() == chosen).cloned()
+    }
+
+    /// Pure precedence rule behind [`Self::touch_output`], split out so it can be
+    /// unit-tested without a live compositor: the first of `configured` then
+    /// `associated` that names a *present* output wins; otherwise the first
+    /// present output (or `None` when there are no outputs at all). A configured
+    /// or associated name that matches no current output is skipped, not an
+    /// error — so a stale mapping degrades to the fallback instead of dropping
+    /// touch input.
+    fn pick_touch_output_name<'a>(
+        present: &'a [String],
+        configured: Option<&str>,
+        associated: Option<&str>,
+    ) -> Option<&'a str> {
+        for candidate in [configured, associated].into_iter().flatten() {
+            if let Some(found) = present.iter().find(|n| n.as_str() == candidate) {
+                return Some(found.as_str());
+            }
+        }
+        present.first().map(|s| s.as_str())
     }
 
     /// A finger touched down. Routes the contact to whatever surface sits under
@@ -1544,4 +1586,63 @@ fn edges_for_pointer(rect: Rectangle<i32, Logical>, pos: Point<f64, Logical>) ->
         edges = ResizeEdge::BOTTOM_RIGHT;
     }
     edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShoestringWm;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn touch_output_falls_back_to_first_when_unmapped() {
+        let outs = names(&["eDP-1", "HDMI-A-1"]);
+        assert_eq!(
+            ShoestringWm::pick_touch_output_name(&outs, None, None),
+            Some("eDP-1")
+        );
+    }
+
+    #[test]
+    fn touch_output_configured_wins_over_association_and_first() {
+        let outs = names(&["eDP-1", "HDMI-A-1"]);
+        assert_eq!(
+            ShoestringWm::pick_touch_output_name(&outs, Some("HDMI-A-1"), Some("eDP-1")),
+            Some("HDMI-A-1")
+        );
+    }
+
+    #[test]
+    fn touch_output_uses_libinput_association_when_unconfigured() {
+        let outs = names(&["eDP-1", "HDMI-A-1"]);
+        assert_eq!(
+            ShoestringWm::pick_touch_output_name(&outs, None, Some("HDMI-A-1")),
+            Some("HDMI-A-1")
+        );
+    }
+
+    #[test]
+    fn touch_output_skips_a_mapping_to_an_absent_output() {
+        let outs = names(&["eDP-1", "HDMI-A-1"]);
+        // Configured output is gone (unplugged); fall through to the association.
+        assert_eq!(
+            ShoestringWm::pick_touch_output_name(&outs, Some("DP-3"), Some("HDMI-A-1")),
+            Some("HDMI-A-1")
+        );
+        // Both stale → first output, never None while outputs exist.
+        assert_eq!(
+            ShoestringWm::pick_touch_output_name(&outs, Some("DP-3"), Some("DP-4")),
+            Some("eDP-1")
+        );
+    }
+
+    #[test]
+    fn touch_output_none_when_no_outputs() {
+        assert_eq!(
+            ShoestringWm::pick_touch_output_name(&[], Some("eDP-1"), None),
+            None
+        );
+    }
 }

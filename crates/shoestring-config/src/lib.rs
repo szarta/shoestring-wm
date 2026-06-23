@@ -96,6 +96,8 @@ pub struct Config {
     #[serde(default)]
     pub input: Input,
     #[serde(default)]
+    pub touch: Touch,
+    #[serde(default)]
     pub portal: Portal,
     #[serde(default)]
     pub decorations: Decorations,
@@ -570,6 +572,25 @@ pub struct Input {
     /// Middle-button emulation (left+right chord → middle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub middle_emulation: Option<bool>,
+}
+
+/// `[touch]` — touchscreen routing. Separate from `[input]` because this is a
+/// compositor-level routing decision, not a libinput per-device knob: a
+/// touchscreen reports contacts in its own normalized `[0,1]²` space, and on a
+/// multi-output desktop that space has to be projected onto the *one* output the
+/// panel physically overlays. We pick that output as: this explicit mapping if
+/// set, else the output libinput reports for the device (when a udev rule tagged
+/// it), else the first output (correct for the common single-output case).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Touch {
+    /// Connector name of the output every touchscreen maps onto (e.g.
+    /// `"eDP-1"`, `"HDMI-A-1"`, as listed by ``shoestring-ctl outputs``). Unset
+    /// (the default) leaves touch on the libinput-reported or first output. Read
+    /// fresh per contact, so a hot-reload retargets touch immediately. A name
+    /// that matches no current output falls back as if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_to_output: Option<String>,
 }
 
 /// Which physical button each tap maps to (libinput `TapButtonMap`).
@@ -1343,6 +1364,7 @@ impl Config {
             outputs: BTreeMap::new(),
             diagnostics: Diagnostics::default(),
             input: Input::default(),
+            touch: Touch::default(),
             portal: Portal::default(),
             decorations: Decorations::default(),
             background: Background::default(),
@@ -1890,6 +1912,24 @@ middle_emulation = true
     #[test]
     fn input_unknown_enum_value_rejected() {
         assert!(toml::from_str::<Config>("[input]\naccel_profile = \"turbo\"\n").is_err());
+    }
+
+    #[test]
+    fn touch_defaults_to_no_mapping() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.touch, Touch::default());
+        assert!(cfg.touch.map_to_output.is_none());
+    }
+
+    #[test]
+    fn touch_map_to_output_parses() {
+        let cfg: Config = toml::from_str("[touch]\nmap_to_output = \"eDP-1\"\n").unwrap();
+        assert_eq!(cfg.touch.map_to_output.as_deref(), Some("eDP-1"));
+    }
+
+    #[test]
+    fn touch_rejects_unknown_key() {
+        assert!(toml::from_str::<Config>("[touch]\nmap_to_region = \"0,0 1x1\"\n").is_err());
     }
 
     #[test]

@@ -226,6 +226,15 @@ pub struct ShoestringWm {
     pub lock_session: Option<crate::handlers::session_lock::LockState>,
 
     pub seat: Seat<Self>,
+    /// Output association for touch devices, keyed by libinput device name and
+    /// holding the connector name libinput reports for that device (set by a
+    /// udev rule, e.g. `WL_OUTPUT`). Populated from the udev `DeviceAdded`/
+    /// `DeviceRemoved` seam, where the concrete `libinput::Device` is available;
+    /// empty on the winit backend. Consulted by touch projection when
+    /// `[touch].map_to_output` is unset — see `touch_location` in
+    /// [`crate::input`]. Usually empty (libinput rarely tags an output without
+    /// an explicit udev rule), which is why the config override exists.
+    pub touch_output_by_device: HashMap<String, String>,
     /// `zwp_pointer_constraints_v1`: lets a focused client lock the pointer in
     /// place or confine it to a region — pointer-lock for FPS games and
     /// RDP/VNC clients. Held only to keep the global registered; enforcement
@@ -763,6 +772,7 @@ impl ShoestringWm {
             idle_inhibitors: Vec::new(),
             lock_session: None,
             seat,
+            touch_output_by_device: HashMap::new(),
             pointer_constraints,
             relative_pointer,
             tablet_manager,
