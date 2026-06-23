@@ -186,6 +186,45 @@ These controls are reachable three ways, like the other privacy gates: the
 bar control menu, a keybind (``toggle-audio-mute`` / ``toggle-mic-mute``),
 and IPC (``shoestring-ctl media …``).
 
+Input methods and on-screen keyboards
+-------------------------------------
+
+The WM advertises the three cooperating globals an input method (IME) or
+on-screen keyboard (OSK) needs, always on and with no configuration:
+
+- ``zwp_text_input_manager_v3`` — the application/toolkit side that wants
+  text (GTK, Qt, Chromium…).
+- ``zwp_input_method_manager_v2`` — the IME side that composes and commits
+  it (``fcitx5``, ``ibus`` with its Wayland front-end).
+- ``zwp_virtual_keyboard_manager_v1`` — the side that *injects* keystrokes:
+  an IME's latin pass-through, or an OSK turning taps into key events.
+
+**IMEs** (CJK and other composed input) work out of the box: smithay bridges
+text-input and input-method on keyboard focus, and the WM draws the candidate
+popup on the normal window-popup path, anchored to the client's reported
+text-cursor rectangle. The WM's keybind filter runs *before* the IME keyboard
+grab, so ``Super`` binds keep working while an IME is active. Launch your IME
+daemon from ``[general].autostart`` (above) like any other companion process.
+
+**On-screen keyboards** — ``squeekboard``, ``wvkbd`` and similar — bind
+``zwp_virtual_keyboard_v1`` to inject and ``zwlr_layer_shell_v1`` to place
+themselves. Two behaviours make them work without any OSK-specific config:
+
+- *Injection reaches the app, not the WM.* Virtual-keyboard input is routed
+  straight to the surface that holds keyboard focus, **bypassing the WM's
+  keybind filter**. An OSK types into the focused application and cannot
+  accidentally trip ``Super`` binds; conversely the WM never swallows what it
+  injects.
+- *The keyboard doesn't steal focus.* An OSK maps as a layer surface with
+  ``keyboard_interactivity = none``; the WM only ever transfers keyboard focus
+  to a layer surface that asks for it (``exclusive``), so the keyboard stays
+  visible while the application underneath keeps focus and receives the keys.
+  A layer surface with an exclusive zone (an OSK anchored to the bottom edge)
+  also reserves its space in the layout, so tiled windows resize around it.
+
+There is nothing to enable: any client that binds these globals — an OSK, an
+IME, or an automation tool — works against a running session immediately.
+
 Quitting
 --------
 
