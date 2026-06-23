@@ -1,496 +1,575 @@
-# shoestring-wm — Architecture (v1)
+# shoestring-wm — Architecture
 
-This document is the architecture for shoestring-wm based on research of
-Smithay (the framework we'll build on) and niri (the most polished
-real-world Smithay consumer).
+shoestring-wm is a lightweight, low-dependency Wayland compositor built on
+[Smithay](https://github.com/Smithay/smithay). It replaces an Openbox/X11
+desktop with a floating, manually-snapped workflow, and ships with a small
+fleet of single-purpose companion binaries (a bar, launcher, locker,
+notifier, screenshot tools, an IPC client, and a desktop portal).
 
-See `research/notes/smithay.md` and `research/notes/niri.md` for the
-underlying research.
+This document describes the architecture **as it stands approaching
+v1.0.0**: the shape of the system, the decisions that produced it, and the
+reasoning behind those decisions — so future changes can be weighed against
+the same goals instead of rediscovering them. It is deliberately *not* a
+changelog or a milestone history; what matters here is *why* the code is
+shaped the way it is.
 
-**Resolved decisions** (from initial Q&A — see § 11 for details):
-- Workspaces are **shared/global** across all monitors (16 total)
-- Config format: **TOML**
-- IPC: **unix socket + JSON line-delimited**
-- XWayland: deferred at start, **now shipped** (forced by GIMP); see `src/xwayland.rs`
-- Tile-half: **operates on current monitor only**
-- Focus: **configurable**, default **click-to-focus**
-- New windows: **centered on active monitor**
+> Where this prose and the diagrams in §0 disagree, trust the diagrams;
+> where either disagrees with the source, trust the source — and please fix
+> the doc. The canonical references for the surfaces this file summarizes
+> are `docs/ipc.rst` (the IPC contract) and `docs/configuration.rst` (the
+> config schema).
+
+## Guiding principles
+
+These are the yardsticks every decision below answers to. A change that
+erodes one of these should be treated as a regression, not a feature:
+
+1. **Lightweight & low-dependency.** Small binary, small dependency tree,
+   no async runtime. New dependencies are resisted; the few exceptions are
+   deliberate and named (§2).
+2. **Floating, Openbox-style ergonomics.** Floating windows with
+   manual half-tile/maximize snaps and Super+drag move/resize. No tiling
+   tree, no scrolling layout, no mandatory decorations.
+3. **Observable & automatable.** The IPC surface is load-bearing, not an
+   afterthought: the running compositor can be queried, scripted, and
+   driven over a socket. This is what lets the WM (and the apps inside it)
+   be tested and automated.
+4. **Opt-in for anything invasive.** Screen capture, input automation, and
+   idle tracking default *off* and are discoverable only when enabled, so a
+   normal session can't be observed or poked by anything that reaches a
+   socket (§11).
+5. **Portable & systemd-optional.** Linux is the primary target, but every
+   OS touchpoint degrades to a no-op when its facility is absent, so
+   non-systemd Linux and the BSDs stay first-class.
+6. **Spec-correct over bespoke.** Lean on smithay and standard protocols
+   rather than hand-rolling. Where smithay is spec-correct but a conformance
+   test disagrees, that is upstream's to fix — we do not fork (§13).
 
 ---
 
-## 1. Project Goals (Recap)
+## 0. System Overview
 
-**What we're building:** A Rust Wayland window manager that replaces the
-user's current Openbox/X11 setup. Lightweight, low dependencies,
-Openbox-inspired ergonomics.
+shoestring-wm is one compositor process surrounded by small single-purpose
+companion binaries. Almost everything is wired together over just two
+sockets the WM owns — the **Wayland socket** (standard compositor
+protocols) and the **IPC socket** (newline-delimited JSON, see
+`docs/ipc.rst`) — plus a couple of D-Bus / PipeWire side channels.
 
-**Hard requirements (must work on day one of daily-driver use):**
-- Floating windows (no tiling tree; tmux handles tiling-within-terminal)
-- Snap-to-half (Super+E/W), maximize (Super+M), minimize (Super+D)
-- Super+drag for move/resize
-- 16 virtual workspaces with keybind switching
-- Multi-monitor
-- No window decorations by default
-- Rich keybinding system (config-driven)
+### Process & protocol map
 
-**Explicit non-goals (v1):**
-- Animations / fancy transitions
-- Window decoration polish
-- Built-in bar / status panel (separate companion project)
-- Wayland gimmicks (gestures, etc.)
+Who talks to the WM, and over which channel:
+
+```mermaid
+flowchart LR
+    cfg[("~/.config/shoestring-wm/<br/>config.toml")]
+
+    subgraph session["Hardware / session"]
+      libinput["libinput devices"]
+      drm["DRM outputs · GPU"]
+    end
+
+    subgraph wm["shoestring-wm  ·  the compositor"]
+      backend["Backend<br/>winit (dev) / udev-drm (native)"]
+      state["ShoestringWm state<br/>space · workspaces · outputs · focus"]
+      wlsock(["Wayland socket"])
+      ipcsock(["IPC socket<br/>newline-JSON"])
+      backend --> state
+      state --- wlsock
+      state --- ipcsock
+    end
+
+    libinput --> backend
+    drm --- backend
+    cfg -->|"parsed via shoestring-config"| state
+
+    subgraph wlclients["Wayland clients (layer-shell + xdg)"]
+      apps["Apps · XWayland"]
+      helpers["bar · menu · confirm · kill<br/>region · screenshot · lock · notify"]
+    end
+    wlsock --- apps
+    wlsock --- helpers
+
+    subgraph ipcclients["IPC clients (link shoestring-ipc)"]
+      ctl["shoestring-ctl"]
+      baripc["bar · kill · menu"]
+      mediad["shoestring-mediad"]
+    end
+    ipcsock --- ctl
+    ipcsock --- baripc
+    ipcsock --- mediad
+
+    portal["xdg-desktop-portal-shoestring"] -->|"zwlr_screencopy_v1"| wlsock
+```
+
+Note that a few helpers use **both** channels: `shoestring-bar` and
+`shoestring-kill` draw via Wayland *and* consume the IPC stream (window
+lists, workspace/focus events). `shoestring-notify` and the portal also
+serve D-Bus interfaces; `shoestring-mediad` and the portal talk to
+PipeWire.
+
+### Crate dependency graph
+
+The two dependency anchors are tiny **`serde`-only** library crates that
+let companions speak the WM's wire/config formats without pulling in
+smithay:
+
+```mermaid
+flowchart TD
+    ipc["shoestring-ipc<br/><i>wire types · serde only</i>"]
+    config["shoestring-config<br/><i>config types · serde only</i>"]
+
+    ipc --> wm["shoestring-wm<br/><i>compositor · smithay</i>"]
+    config --> wm
+    ipc --> ctl["shoestring-ctl"]
+    ipc --> bar["shoestring-bar"]
+    ipc --> kill["shoestring-kill"]
+    ipc --> menu["shoestring-menu"]
+    ipc --> mediad["shoestring-mediad"]
+    config --> portal["xdg-desktop-portal-shoestring"]
+
+    standalone["confirm · region · screenshot<br/>lock · notify<br/><i>wayland-client only, no shared crate</i>"]
+```
+
+(Arrows read *"is used by"*. `wlcs-shoestring`, the WLCS test plugin, is
+excluded from the workspace and depends on `shoestring-wm` itself.)
+
+### Internal event & render loop
+
+Inside the compositor, input, IPC, and rendering converge on the single
+mutable state:
+
+```mermaid
+flowchart LR
+    inev["libinput / winit<br/>input event"] --> filter{"keybind<br/>match?"}
+    filter -->|yes| action["dispatch_action"]
+    filter -->|no| forward["forward to<br/>focused client"]
+    ipcreq["IPC request"] --> action
+    action --> state["mutate state<br/>layout · workspace · focus"]
+    state --> render["render_output<br/>(damage-tracked)"]
+    render --> present["submit + send_frame"]
+    state --> events["broadcast<br/>IPC events"]
+```
+
+---
+
+## 1. Goals & Non-Goals
+
+**Hard requirements** — the floor for daily-driver use:
+
+- Floating windows (no tiling tree; tmux handles tiling-within-terminal).
+- Snap-to-half (Super+E/W), maximize (Super+M), minimize (Super+D),
+  fullscreen.
+- Super+drag for move/resize (compositor-initiated, Openbox-style).
+- A configurable number of global virtual workspaces (default 16) with
+  keybind switching.
+- Multi-monitor with hotplug.
+- No window decorations by default.
+- A rich, config-driven keybinding system.
+- A scriptable IPC surface (principle 3).
+
+**Non-goals** (and why they stay out):
+
+- **Animations / fancy transitions** — cost without serving the floating
+  workflow.
+- **Window-decoration polish** — server-side decorations exist (borders are
+  configurable, off by default) but theming is not a focus.
+- **A tiling layout engine** — fundamentally incompatible with the manual
+  floating model (see Appendix A).
+
+The companion bar, menu, and notifier are **not** non-goals: they live in
+this repository's workspace (`crates/`) and are built by one
+`cargo build --workspace`. They remain separate *processes* (and the bar
+stays coupled to the WM's IPC, by design), but they are no longer separate
+projects.
 
 ---
 
 ## 2. Stack & Dependencies
 
-**Core:**
-- `smithay` (git pinned, with default-features off and selective features)
-- `calloop` (event loop — re-exported from smithay)
-- `xkbcommon` (re-exported from smithay)
-- `wayland-server` / `wayland-protocols` (re-exported)
+**Core.** Everything compositor-side is built on a single git-pinned
+Smithay revision (`default-features = false`, features `wayland_frontend`,
+`desktop`, `xwayland`). The heavy backend features are pulled in through our
+own Cargo features rather than always-on:
 
-**Smithay features (initial):**
-- `wayland_frontend` — required
-- `desktop` — for `Space`, `Window`, `LayerMap`
-- `backend_winit` — dev/test
-- `renderer_gl` — paired with winit
-- `backend_libinput` — for real hardware later
-- `backend_drm`, `backend_gbm`, `backend_session_libseat`, `backend_udev` —
-  added in milestone 7 for native TTY operation
-- `xwayland` — added when GIMP forced X11 support
-- *Not enabled:* `backend_vulkan`, `renderer_multi`, `renderer_pixman`
+- `winit` → `smithay/backend_winit` (+ `renderer_gl`): the nested
+  development backend.
+- `tty` → `backend_libinput`, `backend_udev`, `backend_drm`, `backend_gbm`,
+  `backend_egl`, `backend_session_libseat`, `renderer_gl`, `renderer_multi`,
+  plus `smithay-drm-extras`: the real session backend.
+- `default = ["winit", "tty"]`. `gl` is a marker feature so the headless
+  WLCS harness (which renders with smithay's dummy renderer) can still
+  compile the GL-only capture helpers.
+- `profile-with-tracy` (optional) compiles in a `tracing-tracy` layer; it is
+  a complete no-op when off, so a normal build pays nothing.
 
-**Beyond smithay (kept deliberately small):**
-- `tracing` + `tracing-subscriber` — logging (matches smithay convention)
-- `thiserror` / `anyhow` — error handling
-- `serde` + a config format crate — see § 11 open Q on format choice
-- `notify` — config hot-reload (milestone 9+)
+`calloop`, `xkbcommon`, and the `wayland-*` crates are consumed through
+smithay's re-exports, so their versions can never skew. **There is no tokio
+or async runtime** — smithay is synchronous and the event loop is calloop;
+IPC and subprocess plumbing ride calloop sources directly.
 
-**No tokio / async runtime.** Smithay is sync; we use calloop's futures
-adapter (`event_loop.adapt_io()`) for IPC like niri does.
+**Beyond smithay**, the dependency set is kept deliberately short: `clap`
+(CLI), `tracing`(+`-subscriber`), `anyhow`/`thiserror`, `bitflags`,
+`xcursor`, `notify` (config hot-reload), `regex` (window rules), `libc`, and
+`serde_json`.
+
+**Accepted low-dependency exceptions.** Image rendering is the one place we
+took on weight on purpose: `fontdue` (the diagnostics-overlay text
+rasterizer, also used by the client crates), `png`, and `resvg` (wallpaper
+and icon decoding). These exist because the WM and bar must render themed
+icons, SVG/PNG wallpapers, and overlay text without dragging in
+fontconfig/freetype or a browser-sized graphics stack. `resvg` is the
+heaviest single dependency; it is linked unconditionally but only exercised
+when a wallpaper image is configured.
 
 ---
 
 ## 3. Crate Layout
 
-A small workspace, designed so a future companion bar can depend on the
-`shoestring-ipc` types crate without pulling in Smithay.
+The workspace is a compositor binary plus its companions. The split exists
+so that **companions can speak the WM's wire and config formats without
+linking smithay** — see the dependency graph in §0. The two anchor crates,
+`shoestring-ipc` (Request/Response/Event wire types) and `shoestring-config`
+(config schema + parser), depend on nothing but `serde`. Everything else
+either links those (the IPC clients) or is a standalone `wayland-client`
+helper.
 
 ```
-shoestring-wm/                  (workspace root)
-├── Cargo.toml                  (workspace + main binary)
-├── src/                        (the WM binary)
-│   ├── main.rs
-│   ├── state.rs                (State, ShoestringWm)
-│   ├── backend/                (mod.rs, winit.rs; udev.rs later)
-│   ├── handlers/               (Smithay protocol handler impls)
-│   │   ├── mod.rs              (delegate_*! macros, small handlers)
-│   │   ├── compositor.rs
-│   │   ├── xdg_shell.rs
-│   │   ├── layer_shell.rs
-│   │   └── foreign_toplevel.rs (milestone 8)
-│   ├── input.rs                (process_input_event, key filter)
-│   ├── grabs/                  (move_grab.rs, resize_grab.rs)
-│   ├── layout.rs               (tile/maximize/minimize positioning)
-│   ├── workspace.rs            (workspace data + switching)
-│   ├── output.rs               (per-output state, hotplug)
-│   ├── config/                 (parse, watch, types)
-│   ├── ipc.rs                  (M9 — server; newline-JSON over unix socket)
-│   └── util.rs
-├── crates/
-│   ├── shoestring-ipc/         (Request/Response/Event wire types)
-│   │   ├── Cargo.toml
-│   │   └── src/lib.rs
-│   ├── shoestring-ctl/         (reference CLI client; M9)
-│   │   ├── Cargo.toml
-│   │   └── src/main.rs
-│   └── shoestring-config/      (config types, parser; depends on serde only)
-│       ├── Cargo.toml
-│       └── src/lib.rs
-├── docs/
-│   └── architecture.md         (this file)
-└── research/                   (gitignored — Smithay + niri clones, notes)
+shoestring-wm/                  (workspace root + the WM binary)
+├── src/                        (the compositor)
+│   ├── main.rs                 (CLI, backend selection, event loop)
+│   ├── state.rs                (ShoestringWm — the whole compositor state)
+│   ├── backend/                (winit.rs, udev.rs, shared output helpers)
+│   ├── handlers/               (one file per Smithay protocol handler)
+│   ├── input.rs, binds.rs      (input pipeline + keybind table)
+│   ├── grabs/                  (move / resize / popup-touch grabs)
+│   ├── layout.rs, workspace.rs (window geometry + 16 global workspaces)
+│   ├── ipc.rs, metrics.rs      (IPC server + diagnostics registry)
+│   ├── screencopy.rs, ext_screencopy.rs, remote_screenshot.rs, ...
+│   └── (cursor, wallpaper, decorations, scale, xwayland, …)
+└── crates/
+    ├── shoestring-ipc/             (wire types — serde only)
+    ├── shoestring-config/          (config types — serde only)
+    ├── shoestring-ctl/             (reference IPC client)
+    ├── shoestring-bar/             (status bar; Wayland + IPC)
+    ├── shoestring-menu/            (launcher)
+    ├── shoestring-{confirm,kill,region,screenshot,lock,notify}/  (helpers)
+    ├── shoestring-mediad/          (PipeWire media-privacy monitor)
+    ├── xdg-desktop-portal-shoestring/  (ScreenCast + Screenshot backend)
+    └── wlcs-shoestring/            (WLCS test plugin; excluded from workspace)
 ```
 
-**Why split `shoestring-config` into its own crate?** Lets `shoestring-ipc`
-or a future bar depend on config types (e.g., for displaying current
-keybindings) without pulling in the WM. Cost is small — one extra Cargo.toml.
-
-**Why `shoestring-ipc`?** A future companion bar (the tint2 replacement) is
-a separate binary. It needs to deserialize WM events. Keeping the types in
-their own zero-dep crate (just serde) makes that clean.
+`wlcs-shoestring` is excluded from the workspace on purpose: it instantiates
+a second copy of smithay (with `renderer_test`) and is only ever built by
+the dedicated WLCS CI job, so it must not burden a plain
+`cargo build`/`clippy`/`--workspace` run.
 
 ---
 
 ## 4. State Model
 
-Mirror niri's `State { backend, wm }` outer pattern, but rename for our
-domain. The outer struct is what calloop carries; the inner `ShoestringWm`
-is the bulk of the WM.
+The compositor is a single struct, **`ShoestringWm`**, carried by the
+calloop event loop (`EventLoop<'static, ShoestringWm>`). There is no outer
+`State { backend, wm }` wrapper: the loop's data *is* the WM. The TTY/udev
+backend keeps its device state as a `#[cfg(feature = "tty")]
+udev: Option<UdevData>` field on the struct; the winit backend installs its
+own calloop sources at startup and keeps its handle outside the struct.
+`ShoestringWm` is the type parameter for every Smithay generic
+(`Seat<Self>`, `SeatState<Self>`, the handler delegates).
 
-```rust
-pub struct State {
-    pub backend: Backend,       // Winit / Udev (later)
-    pub wm: ShoestringWm,
-}
+The struct's fields fall into a few groups:
 
-pub struct ShoestringWm {
-    // ── Wayland / Smithay plumbing ──
-    pub display_handle: DisplayHandle,
-    pub loop_signal: LoopSignal,
-    pub start_time: Instant,
-    pub socket_name: OsString,
+- **Plumbing** — `display_handle`, `loop_handle`/`loop_signal`, the
+  monotonic `clock` backing `wp_presentation`, the socket name.
+- **Config** — the parsed `Config`, its source path, the compiled
+  `BindingTable`, and the hot-reload watcher + debounce token.
+- **Domain state** — the single `Space<Window>` (§5), `PopupManager`,
+  `LayoutManager`, `WorkspaceManager`, `Wallpaper`, and the diagnostics
+  overlay.
+- **Smithay protocol states** — one per protocol (§11). Many are held only
+  to keep their global registered for the session and are marked
+  `#[allow(dead_code)]`; the load-bearing ones (keyboard-shortcuts-inhibit,
+  the foreign-toplevel/ext-workspace hand-wired states, the gated capture
+  states) are mutated by their handlers.
+- **Input** — the `Seat`, cursor state, and per-device touch→output mapping.
+- **Side channels & gates** — the optional `ipc::Server`, the `metrics`
+  registry, and the runtime gates (`automation_enabled`,
+  `screen_capture_enabled` and its shared `Arc<AtomicBool>` mirror).
+- **In-flight operations** — maps of pending screenshots, pending
+  `run_command` children, the armed window picker, and the modal confirm
+  dialog, each keyed so the SIGCHLD/IPC completion can find its request.
+- **Bookkeeping sets** — `sticky`, `always_on_top`, `rules_applied`,
+  `pending_initial_center`, plus the XWayland WM handle.
 
-    // ── Smithay protocol states ──
-    pub compositor_state: CompositorState,
-    pub xdg_shell_state: XdgShellState,
-    pub shm_state: ShmState,
-    pub output_manager_state: OutputManagerState,
-    pub seat_state: SeatState<Self>,
-    pub data_device_state: DataDeviceState,
-    pub layer_shell_state: WlrLayerShellState,           // M5+
-    pub foreign_toplevel_list_state: ForeignToplevelListState, // M8+
-
-    // ── Domain state ──
-    pub seat: Seat<Self>,
-    pub space: Space<Window>,           // single global Space; see § 5
-    pub workspaces: WorkspaceManager,   // 16 workspaces (see § 6)
-    pub outputs: OutputManager,         // per-output state, active wsp
-    pub config: Rc<RefCell<Config>>,    // hot-reloadable
-    pub bindings: BindingTable,         // compiled from config
-    pub popups: PopupManager,
-
-    // ── IPC (M9+) ──
-    pub ipc: Option<IpcServer>,
-}
-```
-
-`State` is the type parameter for all Smithay generics: `Seat<State>`,
-`SeatState<State>`, etc.
+Two constructors exist: `new` (opens a listening Wayland socket — the real
+path) and `new_headless` (no socket; WLCS injects clients directly). They
+share `new_inner`, so conformance runs against the exact same global setup
+the real session uses.
 
 ---
 
-## 5. Window Storage: Single `Space<Window>`
+## 5. Window Storage: a Single `Space<Window>`
 
-**Decision:** Use one `Space<Window>` for all windows across all workspaces
-and outputs. Workspace and minimize state are stored per-window in metadata
-(`UserDataMap` on the Window, or a side `HashMap<Window, WindowState>`).
+**Decision:** one `Space<Window>` holds every *currently visible* window
+across all outputs. Per-window state that isn't "where is it on screen
+right now" lives beside the `Space`:
 
-**Rationale:**
-- A `Space` per workspace (16 total) would be 16× the bookkeeping for
-  output mapping (each Space needs every output mapped) and complicate
-  multi-monitor window movement.
-- `Space` is cheap to filter — we can render only windows whose
-  `WindowState::workspace == active_workspace_for(output)`.
-- Niri uses a similar model (single `global_space: Space<Window>`).
+- `LayoutManager` owns each window's `LayoutState` (floating with a saved
+  rect, half-tiled left/right, maximized, fullscreen) and the minimized set
+  with the geometry to restore.
+- `WorkspaceManager` owns which workspace a window belongs to and per-
+  workspace focus history.
+- Small `HashSet`s track orthogonal flags: `sticky`, `always_on_top`,
+  `rules_applied`, `pending_initial_center`.
 
-**Per-window state:**
-```rust
-pub struct WindowState {
-    pub workspace: WorkspaceId,
-    pub output: Option<OutputId>,         // last output it lived on
-    pub layout: LayoutState,              // see below
-    pub minimized: bool,
-}
+**Why one Space, not one-per-workspace?** Sixteen Spaces would mean mapping
+every output into every Space and reconciling them on every monitor change —
+16× the bookkeeping for no gain. Instead the invariant is simple: **the
+windows mapped in the `Space` are exactly the windows on the active
+workspace** (plus sticky windows, which are re-pinned to whatever workspace
+becomes active). Switching a workspace unmaps the old set and maps the new
+one. Off-workspace and minimized windows live only in the managers, not the
+`Space`, which keeps rendering a plain "draw what's mapped" pass.
 
-pub enum LayoutState {
-    Floating { saved_rect: Rectangle<i32, Logical> },
-    TiledLeft,
-    TiledRight,
-    Maximized,
-}
-```
-
-`saved_rect` lets `Super+M` toggle back to the previous floating position.
+Window stacking (raise/lower, always-on-top) is expressed through smithay's
+z-index on the `Space`, not a separate ordered list; always-on-top sits
+between ordinary windows and the layer-shell top layer so bars and menus
+stay reachable above it.
 
 ---
 
 ## 6. Workspaces
 
-**16 workspaces, shared/global across all monitors.** Switching workspace
-changes what's visible on every monitor at once. A window belongs to a
-workspace (not to a monitor + workspace).
+Workspaces are **global across all monitors** (default 16, configurable). A
+window belongs to a workspace, not to a monitor+workspace pair; switching
+the active workspace changes what every monitor shows at once. Each window
+separately remembers the output it last lived on, so windows reappear on the
+monitor they came from.
 
-```rust
-pub struct WorkspaceManager {
-    pub workspaces: [Workspace; 16],
-    pub active: WorkspaceId,              // global active wsp
-}
+`WorkspaceManager` holds the workspace array, the global active id, and per-
+workspace focus MRU. Switching workspace:
 
-pub struct Workspace {
-    pub id: WorkspaceId,                  // 0..16
-    pub name: Option<String>,             // user-named via config or IPC
-}
-```
+1. updates the active id,
+2. unmaps the outgoing workspace's windows and maps the incoming set
+   (sticky windows are exempt and simply reassigned),
+3. restores focus to the new workspace's most-recently-focused window,
+4. emits the IPC `workspace_changed` event and updates the `ext-workspace-v1`
+   handles standard bars read.
 
-A window's monitor is tracked separately on `WindowState` (the output it
-was last placed on). When workspace switches, *every* monitor swaps to
-showing windows of the new workspace; per-window monitor assignment is
-preserved so windows reappear on the monitor they came from.
-
-Switching workspaces:
-1. Update `workspaces.active = new_id`
-2. Re-render every output (filter elements by
-   `window_state.workspace == new_id && !minimized`)
-3. Move focus to last-focused window in new workspace (per workspace MRU)
-4. Emit IPC event `WorkspaceChanged`
-
-**Moving a window to another workspace** = set `WindowState::workspace`
-and re-render the affected outputs.
+Moving a window to another workspace is just reassigning its workspace id and
+re-running the map/unmap for the affected outputs.
 
 ---
 
 ## 7. Outputs & Multi-Monitor
 
-```rust
-pub struct OutputManager {
-    pub outputs: Vec<TrackedOutput>,
-    pub focused: Option<OutputId>,        // which monitor has focus
-}
+Outputs are smithay `Output`s mapped into the `Space`. Per-output data that
+the rest of the WM (and the IPC layer) needs — the damage tracker, resolved
+scale/transform, VRR state — is stashed in the `Output`'s user-data map so
+it can be read without reaching into a feature-gated backend.
 
-pub struct TrackedOutput {
-    pub output: smithay::output::Output,
-    pub id: OutputId,
-    pub damage_tracker: OutputDamageTracker,
-    pub last_redraw: Instant,
-}
-```
+- **winit backend:** exactly one output, the nested window. Scale is pinned
+  to integer 1 (winit's HiDPI guess otherwise breaks tiling math in nested
+  dev sessions).
+- **udev backend:** real connectors, created/destroyed on hotplug. New
+  windows orphaned by an output going away migrate to a surviving output.
 
-Workspaces are global (see § 6), so there's no per-output active-workspace
-field. The focused output determines where new windows spawn and where
-tile-half operates.
-
-On hotplug (M7 once on DRM):
-1. Backend reports new connector → create `Output`, add to OutputManager
-2. Assign a default workspace
-3. Migrate orphaned windows (whose last `output` is gone) to primary
-
-For v1 (winit), only one "output" exists — the winit window. Multi-monitor
-only becomes meaningful after the DRM backend lands (milestone 7).
+Because workspaces are global (§6) there is no per-output active-workspace
+field; the *focused* output is what determines where new windows spawn and
+where half-tiling operates. HiDPI is handled through `wp_viewporter` +
+`wp_fractional_scale_manager_v1`, so clients render crisp at the exact
+fractional scale while legacy `wl_output.scale` clients see the rounded
+integer.
 
 ---
 
 ## 8. Input & Keybindings
 
-### Keyboard pipeline
+Input arrives from libinput (TTY) or winit and runs through
+`process_input_event`. The keyboard pipeline reuses Smithay's
+`keyboard.input()` filter: a closure runs on every key **before** the event
+is forwarded to the focused client, matches it against the compiled
+`BindingTable`, and either intercepts (dispatching an `Action`) or forwards.
 
-Reuse Smithay's `keyboard.input()` filter pattern. The filter closure runs
-on every keypress before the event is forwarded to the focused client:
+Two subtleties are load-bearing and easy to break:
 
-```rust
-keyboard.input::<(), _>(
-    self,
-    key_code,
-    state,
-    serial,
-    time,
-    |state, modifiers, keysyms| {
-        if let Some(action) = state.bindings.match_bind(modifiers, keysyms) {
-            state.dispatch_action(action);
-            FilterResult::Intercept(())   // do NOT send to client
-        } else {
-            FilterResult::Forward
-        }
-    },
-);
-```
+- The keybind filter runs *before* smithay installs the input-method
+  keyboard grab, so Super-binds keep working while an IME (fcitx5/ibus) is
+  active.
+- Bindings match on the pre-modifier keysym (the raw level), so
+  `Shift`-letter binds resolve correctly instead of matching the shifted
+  symbol.
 
-### Binding table
+A focused client can ask, via `zwp_keyboard_shortcuts_inhibit_v1`, for the
+WM to *stop* intercepting binds so every key reaches it — needed by nested
+compositors, VMs, and remote-desktop viewers. We grant every request but only
+ever activate the inhibitor on the surface that currently holds keyboard
+focus.
 
-```rust
-pub struct BindingTable {
-    pub global: Vec<Binding>,
-}
-
-pub struct Binding {
-    pub modifiers: ModifierMask,           // Super, Ctrl, Shift, Alt
-    pub keysym: Keysym,
-    pub action: Action,
-}
-
-pub enum Action {
-    Spawn { command: String, args: Vec<String> },
-    TileLeft, TileRight,
-    Maximize, Minimize,
-    FocusWorkspace(WorkspaceId),
-    MoveWindowToWorkspace(WorkspaceId),
-    Close,
-    Quit,
-    ReloadConfig,
-    // ...
-}
-```
-
-### Pointer / Super+drag
-
-Two pointer grabs, mirroring smallvil:
-- `MoveSurfaceGrab` — Super+Left-drag triggers; sets cursor, updates
-  position on motion, releases on button up
-- `ResizeSurfaceGrab` — Super+Right-drag triggers; picks the closest
-  window edge and resizes accordingly
-
-We initiate grabs from `process_input_event` (not from xdg-shell move/
-resize requests, since Openbox-style is compositor-initiated, not
-client-initiated).
+**Pointer.** Move and resize are **compositor-initiated** grabs triggered by
+Super+left/right-drag (`grabs/`), not client-initiated xdg-shell requests —
+this is the Openbox model. The pointer path also drives touch, tablet/stylus
+(`zwp_tablet_manager_v2`), touchpad gestures, and pointer
+lock/confinement + relative motion (for games and remote desktop).
 
 ---
 
-## 9. Window Operations (the 4 core actions)
+## 9. Window Operations
 
-Given the active window's output's usable rectangle `r`:
+Geometry lives in `layout.rs`. Given the active window's output usable
+rectangle `r` (which accounts for layer-shell exclusive zones such as the
+bar), the core actions are:
 
-| Action | New position | New size | Saves prev rect? |
+| Action | Position | Size | Notes |
 |---|---|---|---|
-| `TileLeft` | `(r.x, r.y)` | `(r.w/2, r.h)` | yes (if from Floating) |
-| `TileRight` | `(r.x + r.w/2, r.y)` | `(r.w/2, r.h)` | yes |
-| `Maximize` | `(r.x, r.y)` | `(r.w, r.h)` | yes (toggle on re-press) |
-| `Minimize` | unchanged | unchanged | `minimized = true` |
+| Tile-left | `(r.x, r.y)` | `(r.w/2, r.h)` | saves prior floating rect |
+| Tile-right | `(r.x + r.w/2, r.y)` | `(r.w/2, r.h)` | saves prior floating rect |
+| Maximize | `(r.x, r.y)` | `(r.w, r.h)` | toggles back on re-press |
+| Fullscreen | output rect | output rect | bypasses layers (§11) |
+| Minimize | unchanged | unchanged | unmapped from the `Space` |
 
-Implementation in `layout.rs`:
-```rust
-pub fn apply_action(wm: &mut ShoestringWm, window: &Window, action: WindowAction) {
-    let output = wm.output_of(window);
-    let r = wm.usable_rect(&output);    // accounts for layer-shell exclusive
-    // ... compute new geometry, update window via space.map_element() and
-    //     send configure via window.toplevel().with_pending_state() + send_configure()
-}
-```
+Re-pressing maximize/tile while already in that state restores the saved
+floating rectangle — the Openbox feel. `arrange`/`set_layout`/`apply_geometry`
+compute the target rect, map the element, and send the `xdg_toplevel`
+configure. The tiling math is covered by property tests (`proptest`) over
+`arrange_rects`.
 
-Re-pressing `Maximize`/`TileLeft`/`TileRight` while already in that state
-toggles back to the saved floating rect — matches the Openbox feel.
+Half-tiling operates on the focused window's **current monitor only**, never
+spanning outputs.
 
 ---
 
-## 10. Backends & Render Loop
+## 10. Backends & the Render Loop
 
-**Milestone 1-6:** Winit backend only. Faster iteration, no root, no VT.
-Develop & test inside an existing X11 or Wayland session.
+The backend is chosen once at startup by `BackendKind` in `main.rs`: `winit`
+when `WAYLAND_DISPLAY`/`DISPLAY` is set (nested dev), otherwise `tty`
+(udev/DRM, the real session). Each backend wires its own calloop sources;
+there is **no `Backend` trait or dispatch enum on the hot path** — two
+backends don't justify the abstraction, so the divergence is confined to
+startup and the per-frame submit. Only the `tty` backend integrates with the
+surrounding session (pushing `WAYLAND_DISPLAY`/`DISPLAY` into the systemd
+user manager); the nested winit backend must not clobber the session it runs
+inside.
 
-**Milestone 7:** Add Udev/DRM backend. This is the big one — it's where
-multi-monitor, hotplug, and "real" usage become meaningful. Pattern after
-anvil's `udev.rs` but trim aggressively (no multi-GPU, no fractional scale,
-no XWayland).
+Per-output render pass:
 
-Backend abstraction (custom enum, like niri):
-```rust
-pub enum Backend {
-    Winit(WinitBackend),
-    Udev(UdevBackend),         // M7+
-}
-impl Backend {
-    pub fn render(&mut self, wm: &mut ShoestringWm, output: &Output) { ... }
-}
-```
+1. collect render elements — active-workspace windows (z-ordered by the
+   `Space`), the output's layer-shell surfaces, the wallpaper as the
+   bottom-most element, the cursor, and optionally borders / the diagnostics
+   overlay;
+2. damage-tracked `render_output` (smithay handles damage and z-order);
+3. submit (winit GL swap, or DRM page-flip);
+4. `send_frame` to the rendered surfaces;
+5. schedule the next redraw (winit `request_redraw`, or the DRM vblank).
 
-No common trait — we just match on the enum. Two backends don't justify
-trait abstraction overhead.
+Wayland clients are **flushed eagerly** after every dispatch, not only at
+render time, so headless/SSH dev sessions and not-yet-visible nested windows
+still get their replies. The one exception is the headless WLCS harness,
+where eager flushing would send a `wl_display.sync` reply before injected
+fake input has been applied — there, flushing is deferred to the end of the
+loop iteration (matching smithay's `wlcs_anvil`).
 
-**Render loop per output:**
-1. `bind()` framebuffer
-2. Collect render elements: windows whose `workspace == active_workspace`
-   and not `minimized`, plus layer-shell surfaces for the output
-3. `space::render_output(...)` (Smithay handles damage tracking and z-order)
-4. `submit(damage)`
-5. `window.send_frame(...)` to all rendered windows
-6. Schedule next redraw (winit's `request_redraw`, or vblank on DRM)
-
----
-
-## 11. Resolved Design Decisions
-
-The following questions were settled during initial planning:
-
-| # | Question | Decision |
-|---|---|---|
-| Q1 | Workspaces per-monitor or shared? | **Shared/global** across all monitors. Switching workspace changes every monitor. |
-| Q2 | Config format? | **TOML** via serde. Lean, plain-text, sufficient for binds/rules. Migrate later if syntax pressure justifies. |
-| Q3 | IPC protocol? | **Unix socket + JSON line-delimited**, modeled after niri. EventStream upgrade for live events. |
-| Q4 | XWayland? | **Plan the integration point, defer implementation.** Stub the seam in `backend/` but don't wire xwayland feature in v1. |
-| Q5 | Tile-half scope? | **Current monitor only.** Half-tiles within the focused window's monitor usable rect. |
-| Q6 | Focus model? | **Configurable**, default **click-to-focus**. Support focus-follows-mouse and sloppy focus as opt-in. |
-| Q7 | New window placement? | **Centered on active monitor** with small offset per subsequent stacked window. |
-
-These are not contracts — if any decision turns out wrong during
-implementation, we revisit. But they're the baseline assumptions for the
-task DB.
+`wp_presentation` timestamps come from hardware vblank on udev and from
+submit time (best-effort) on winit.
 
 ---
 
-## 12. Milestone Plan
+## 11. Protocol Surface & Capability Gating
 
-These will be the seeds for the task DB once the architecture is agreed.
+The compositor advertises a broad set of Wayland protocols — far more than
+the four core actions — because "observable and integrable" is a goal. They
+fall into three tiers by how they are exposed:
 
-1. **Skeleton** — workspace crates set up, winit backend, wayland socket
-   listens, can spawn weston-terminal and see it draw. (smallvil-equivalent)
-2. **Basic input forwarding** — keyboard + pointer events reach the focused
-   client. Click-to-focus.
-3. **Pointer grabs** — Super+left-drag moves window. Super+right-drag
-   resizes.
-4. **Keybinding system** — config file parse, binding table, key filter
-   closure, dispatch actions (spawn, quit).
-5. **Window actions** — tile-left, tile-right, maximize (toggle), minimize.
-   Per-output usable rect.
-6. **Workspaces** — 16 workspaces, switch via binds, move-window-to-wsp,
-   render filtering.
-7. **DRM/udev backend** — TTY operation, real outputs, hotplug.
-8. **Layer-shell + foreign-toplevel-list** — bar can attach (without us
-   shipping a bar yet).
-9. **IPC server** — `shoestring-ipc` crate + socket. Query workspaces /
-   windows / outputs; subscribe to events; trigger actions.
-10. **Per-app window rules** — match on app_id/title, set workspace,
-    floating geometry, etc. Config hot-reload.
+- **Always-on standard client protocols.** xdg-shell (+ decoration forced
+  server-side, + activation, + foreign), wlr-layer-shell, the
+  foreign-toplevel *list* and the hand-wired *management* protocol,
+  `ext-workspace-v1`, wlr-virtual-pointer, cursor-shape, viewporter +
+  fractional-scale, pointer-constraints/relative-pointer, tablet, pointer
+  gestures, keyboard-shortcuts-inhibit, primary selection, the input-method
+  trio (text-input/input-method/virtual-keyboard), and the XWayland shell.
+  These are ordinary client capabilities, so they are unconditional.
+- **Opt-in via config.** `ext_idle_notify_v1` and its companion
+  `zwp_idle_inhibit_manager_v1` are created only when
+  `idle_notifications_enabled` is set — inhibiting idle is meaningless with
+  nothing advertising it, so the two are gated together.
+- **Runtime-gated, default-off (the privacy stance).** Anything that can
+  observe or drive the session without the user's active participation is
+  off until explicitly enabled, and *absent* (not merely inert) while off:
+  - The **screen-capture gate** controls whether the `zwlr_screencopy_v1`
+    and `ext-image-copy-capture`/`ext-image-capture-source` manager globals
+    are advertised at all. While off, a client cannot even discover the
+    capability. A shared `Arc<AtomicBool>` mirror lets the ext-image globals'
+    visibility filters track the gate without a `&self` borrow.
+  - The **automation gate** guards the IPC input-synthesis and
+    capture/exec methods (`inject_key`/`type`/`click`, `move_mouse`,
+    `dispatch_action`, `screenshot`, `run_command`). Read-only IPC queries
+    are never gated.
 
-Stretch / "maybe v1.1":
-- XWayland (if Q4 says we need it)
-- Decoration toggle (server-side decorations via xdg-decoration)
-- Output configuration (resolution, scale, transform) at runtime
+Both gates are **runtime-only**: flipping one over IPC never writes to disk,
+so the config file stays the source of truth at the next start. This is the
+same pattern for both, by design (principle 4). DRM-only facilities
+(wlr-gamma-control) and dmabuf import exist only on the `tty` backend.
 
----
-
-## 13. Risks & Mitigations
-
-- **Smithay's API churn:** Smithay is pre-1.0 (currently 0.7). We pin to a
-  specific git rev (like niri does) and bump intentionally.
-- **DRM backend complexity:** This is where most compositors break. Plan to
-  spend a full milestone on it; lean on anvil's code as direct reference.
-- **Maintainers warn against LLM code generation** (AI.md). We'll model on
-  smallvil, write our own code, and keep architecture deliberate. No
-  "translate this Smithay code with AI" shortcuts.
-- **Scope creep:** Every Wayland protocol is tempting. Defer aggressively;
-  the 4 hard requirements are the only v1 bar.
+The IPC server itself (`ipc.rs`) is newline-delimited JSON over a unix
+socket, served on a calloop `Generic` source per connection, with drop-on-
+backpressure event subscribers. It is the contract the bar, `ctl`, and
+automation all speak — see `docs/ipc.rst`.
 
 ---
 
-## Appendix A — Why not just use niri?
+## 12. Design Decisions
+
+The decisions that shape the codebase, with the reasoning kept so they can be
+revisited deliberately rather than by accident:
+
+| Decision | Rationale |
+|---|---|
+| **Global workspaces** (not per-monitor) | Switching changes every monitor at once; matches the user's mental model and avoids per-output active-workspace state. |
+| **Single `Space<Window>`** | "Mapped == on the active workspace" is a simple, cheap invariant; per-workspace Spaces would multiply output bookkeeping. |
+| **TOML config** via serde | Lean, plain-text, enough for binds/rules; hot-reloaded via `notify` with a trailing-edge debounce. |
+| **Unix-socket + line-JSON IPC** | Trivial to script from any language; the EventStream upgrade carries live events. The surface is a first-class goal, not a debug aid. |
+| **`serde`-only anchor crates** | Companions deserialize WM wire/config types without linking smithay. |
+| **Monorepo for siblings** | Bar/menu/notify build with `--workspace`; one version, one CI. They stay separate processes (the bar stays IPC-coupled on purpose). |
+| **Backend chosen at startup, no trait** | Only two backends (winit dev, udev session); a trait/enum on the hot path would be overhead for no reuse. |
+| **Capability gates default-off, runtime-only** | Capture/automation can't be enabled by anything that merely reaches a socket; the config file remains the source of truth. |
+| **Compositor-initiated move/resize** | Openbox-style Super+drag, not client-initiated xdg-shell requests. |
+| **Click-to-focus default** | Focus model is configurable (focus-follows-mouse / sloppy opt-in); click-to-focus is the safe default. |
+| **Pinned smithay rev, never forked** | Smithay is pre-1.0 and churns; we bump intentionally. Spec-correct-but-failing conformance cases are upstream's, tracked as known-xfail (§13). |
+| **New windows centered on the active monitor** | With a per-window stacking offset, matching Openbox placement. |
+
+---
+
+## 13. Risks & Ongoing Constraints
+
+- **Smithay API churn.** Smithay is pre-1.0. We pin a single git rev (shared
+  by the WM and `smithay-drm-extras`) and bump deliberately, reading the diff
+  rather than tracking `main`.
+- **No forking smithay.** When a WLCS conformance test fails because of
+  smithay-core behavior that is itself spec-correct (anvil fails the same
+  test identically), we record it as known-xfail and do **not** patch or
+  fork. Forking would forfeit upstream fixes for marginal gain. Genuine bugs
+  go upstream as PRs.
+- **DRM/udev complexity.** This is where compositors break; the udev backend
+  is the most intricate code and leans directly on anvil's patterns.
+- **Low-dependency pressure.** Every protocol and every crate is tempting.
+  New dependencies must justify themselves against principle 1; the image-
+  rendering exceptions (§2) are the documented precedent for what "justified"
+  looks like.
+- **Portability gaps.** PAM (the locker) and some `/proc`-based metrics are
+  Linux-shaped; the BSD path cfg-gates them (see `third_party/pam-client2`).
+  New OS touchpoints must degrade gracefully when their facility is absent.
+
+---
+
+## Appendix A — Why not fork niri?
 
 niri is a scrolling tiler. Its layout model is fundamentally incompatible
-with the user's floating + manual-snap workflow. Forking niri would mean
-either ripping out most of its layout code (more work than starting fresh)
-or contorting our workflow to fit. Starting from smallvil is cleaner.
+with a floating + manual-snap workflow. Forking it would mean either ripping
+out most of its layout code (more work than starting fresh) or contorting the
+workflow to fit. Starting from a small smithay base was cleaner — but niri
+remains the best real-world reference for how to drive smithay at scale.
 
 ## Appendix B — Why not Sway?
 
-Sway is i3-like manual tiling, C-based, and pulls in wlroots (which is
-fine, but more than we want). Also: not Rust, doesn't match the user's
-language preference for this project.
-
-## Appendix C — File budget estimate
-
-Rough projection of source size at MVP (M1-M6, winit only):
-
-| Module | ~LoC |
-|---|---|
-| main.rs | 80 |
-| state.rs | 250 |
-| backend/winit.rs | 200 |
-| handlers/* | 500 |
-| input.rs | 250 |
-| grabs/* | 400 |
-| layout.rs | 200 |
-| workspace.rs | 150 |
-| output.rs | 150 |
-| config/* | 300 |
-| **MVP total** | **~2500** |
-
-DRM backend (M7) likely doubles that. We're aiming for ~5-7k LoC at v1,
-versus niri's ~50k. Shoestring achieved.
+Sway is i3-style manual tiling, C-based, and built on wlroots — more runtime
+and a different language than this project wants. The floating model and the
+Rust/Smithay foundation are deliberate choices, not incidental ones.
