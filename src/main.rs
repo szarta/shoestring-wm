@@ -77,6 +77,14 @@ struct Cli {
     /// runtime.
     #[arg(long)]
     enable_automation: bool,
+
+    /// Log the Wayland wire protocol (every request from and event to each
+    /// client) to stderr — the built-in equivalent of `WAYLAND_DEBUG=server`.
+    /// Equivalent to `[debug].protocol_trace = true` in the config; either
+    /// turns it on. Must be set at startup; an explicit `WAYLAND_DEBUG` in the
+    /// environment takes precedence. Very verbose — for debugging only.
+    #[arg(long)]
+    protocol_trace: bool,
 }
 
 /// Initialise tracing. Writes to stderr by default; if `SHOESTRING_WM_LOG`
@@ -118,6 +126,29 @@ fn init_tracing() {
     registry.init();
 }
 
+/// Turn on the built-in Wayland protocol trace when requested via `--protocol-trace`
+/// or `[debug].protocol_trace`. The wayland backend reads `WAYLAND_DEBUG` exactly
+/// once, when the `Display` is created, and prints each client's requests/events to
+/// stderr — so we set the env var here, before `Display::new()`. An explicit
+/// `WAYLAND_DEBUG` from the surrounding environment is left untouched (the user's
+/// choice — `client`/`1`/unset — wins over our toggle).
+fn maybe_enable_protocol_trace(enabled: bool) {
+    if !enabled {
+        return;
+    }
+    if let Some(existing) = std::env::var_os("WAYLAND_DEBUG") {
+        tracing::info!(
+            wayland_debug = ?existing,
+            "protocol trace requested, but WAYLAND_DEBUG is already set in the environment; leaving it as-is"
+        );
+        return;
+    }
+    // SAFETY: single-threaded here — main() has not spawned the event loop or
+    // any backend threads yet, so there is no concurrent getenv/setenv.
+    std::env::set_var("WAYLAND_DEBUG", "server");
+    tracing::info!("Wayland protocol trace enabled (WAYLAND_DEBUG=server); messages go to stderr");
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -140,6 +171,10 @@ fn main() -> Result<()> {
         Some(p) => tracing::info!(path = %p.display(), "loaded config"),
         None => tracing::info!("no config file found; using built-in defaults"),
     }
+
+    // Opt-in Wayland protocol trace. The backend latches WAYLAND_DEBUG when the
+    // Display is created below, so this must run first.
+    maybe_enable_protocol_trace(cli.protocol_trace || config.debug.protocol_trace);
 
     let mut event_loop: EventLoop<'static, ShoestringWm> = EventLoop::try_new()?;
     let display: Display<ShoestringWm> = Display::new()?;

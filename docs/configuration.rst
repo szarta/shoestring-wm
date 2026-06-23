@@ -784,20 +784,23 @@ restart needed.
 The ``[debug]`` section
 -----------------------
 
-``[debug]`` collects runtime toggles for diagnosing the render path without a
-recompile. They turn off the DRM/KMS plane optimizations that, when a driver or
-a client misbehaves, cause the hardest bugs to reason about — glitched
-direct-scanout content, or a hardware cursor that tears, ghosts, or sticks. If
-you hit such an artifact, flipping one of these to ``true`` and reloading is a
-quick way to confirm whether a plane is to blame.
+``[debug]`` collects runtime toggles for diagnosing the compositor without a
+recompile. The ``disable_*`` flags turn off the DRM/KMS plane optimizations
+that, when a driver or a client misbehaves, cause the hardest bugs to reason
+about — glitched direct-scanout content, or a hardware cursor that tears,
+ghosts, or sticks. If you hit such an artifact, flipping one of these to
+``true`` and reloading is a quick way to confirm whether a plane is to blame.
 
-These flags are honored **only on the DRM/KMS (TTY) backend**. The nested winit
-backend has no hardware planes, so it always composites everything and ignores
-this section. Each flag is re-read on every frame, so ``reload-config`` applies
-a change on the next frame — no restart needed.
+The ``disable_*`` flags are honored **only on the DRM/KMS (TTY) backend**. The
+nested winit backend has no hardware planes, so it always composites everything
+and ignores them. Each is re-read on every frame, so ``reload-config`` applies a
+change on the next frame — no restart needed. ``protocol_trace`` is the
+exception: it is an observability toggle, works on both backends, and is read
+**once at startup** (so a restart is needed to change it).
 
-Every flag defaults to ``false`` (the optimization stays on — normal, fastest
-operation). Leave the section out entirely unless you are actively debugging.
+Every flag defaults to ``false`` (the optimization stays on, or the trace stays
+off — normal operation). Leave the section out entirely unless you are actively
+debugging.
 
 ::
 
@@ -805,6 +808,7 @@ operation). Leave the section out entirely unless you are actively debugging.
     disable_direct_scanout = false
     disable_overlay_planes = false
     disable_cursor_plane = false
+    protocol_trace = false
 
 ``disable_direct_scanout``
     Force every window's content through GL composition instead of letting a
@@ -823,6 +827,19 @@ operation). Leave the section out entirely unless you are actively debugging.
     plane. Turn on when chasing cursor-plane artifacts (wrong scale, ghosting, a
     cursor that lags or sticks). The software cursor is slower but takes the KMS
     cursor plane out of the picture.
+
+``protocol_trace``
+    Log the Wayland wire protocol — every request dispatched from a client and
+    every event sent to one, per client — to **stderr** (``<- interface@id.msg``
+    for requests, ``-> …`` for events). This is the built-in equivalent of
+    starting the compositor with ``WAYLAND_DEBUG=server`` (which it sets under
+    the hood), and the same thing the ``--protocol-trace`` command-line flag
+    turns on. An explicit ``WAYLAND_DEBUG`` in the environment always wins.
+    Read once at startup and effective on both backends. Extremely verbose — a
+    busy session emits thousands of lines a second — so leave it off except when
+    actively tracing a client's protocol exchange. The trace goes to stderr, not
+    to ``$SHOESTRING_WM_LOG`` (which only redirects the WM's own ``tracing``
+    output); capture it with a shell redirect or from the journal.
 
 Pointer bindings
 ----------------

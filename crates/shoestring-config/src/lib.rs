@@ -414,12 +414,14 @@ impl Background {
 /// bugs to reason about (glitched scanout, a stuck or torn hardware cursor).
 ///
 /// Every flag defaults `false` (the optimization stays on — normal operation).
-/// All are honored **only on the DRM/KMS (TTY) backend**: the nested winit
-/// backend has no hardware planes, so it composites everything regardless and
-/// ignores this section. Because the flags are read fresh on every frame, a
-/// config hot-reload (`reload-config`) applies them on the next frame — no
-/// restart needed, which is the point of having them in config rather than a
-/// build flag.
+/// The render-path flags (`disable_*`) are honored **only on the DRM/KMS (TTY)
+/// backend**: the nested winit backend has no hardware planes, so it composites
+/// everything regardless and ignores them. Because those flags are read fresh on
+/// every frame, a config hot-reload (`reload-config`) applies them on the next
+/// frame — no restart needed, which is the point of having them in config
+/// rather than a build flag. The one exception is
+/// [`protocol_trace`](Debug::protocol_trace), an observability toggle latched
+/// once at startup and active on both backends (see its own note).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Debug {
@@ -442,6 +444,18 @@ pub struct Debug {
     /// KMS cursor plane out of the picture.
     #[serde(default)]
     pub disable_cursor_plane: bool,
+    /// Log the Wayland wire protocol: every request dispatched from a client and
+    /// every event sent to one, per client, to **stderr** (`<- interface@id.msg`
+    /// for requests, `-> …` for events). The built-in equivalent of running with
+    /// `WAYLAND_DEBUG=server`, which is exactly what this turns on under the hood.
+    ///
+    /// Unlike the scanout flags above this is **read once at startup** (the
+    /// protocol backend latches it when the display is created), so it is *not*
+    /// hot-reloadable and applies on both backends. An explicit `WAYLAND_DEBUG`
+    /// in the environment always wins. Leave off for normal use — a busy session
+    /// logs thousands of lines a second.
+    #[serde(default)]
+    pub protocol_trace: bool,
 }
 
 /// Expand a leading `~` (home) and `$VAR` / `${VAR}` environment references in a
@@ -1648,6 +1662,7 @@ actions = {}
         assert!(!cfg.debug.disable_direct_scanout);
         assert!(!cfg.debug.disable_overlay_planes);
         assert!(!cfg.debug.disable_cursor_plane);
+        assert!(!cfg.debug.protocol_trace);
     }
 
     #[test]
@@ -1658,6 +1673,14 @@ actions = {}
         assert!(cfg.debug.disable_direct_scanout);
         assert!(!cfg.debug.disable_overlay_planes);
         assert!(cfg.debug.disable_cursor_plane);
+    }
+
+    #[test]
+    fn debug_protocol_trace_override() {
+        let cfg: Config = toml::from_str("[debug]\nprotocol_trace = true\n").unwrap();
+        assert!(cfg.debug.protocol_trace);
+        // Independent of the render-path flags.
+        assert!(!cfg.debug.disable_direct_scanout);
     }
 
     #[test]

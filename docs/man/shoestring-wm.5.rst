@@ -245,12 +245,13 @@ own rectangle (so it never bleeds onto an adjacent tile) and is focus-aware.
 [debug] keys
 ------------
 
-Runtime toggles for diagnosing the render path without a recompile. Each turns
-off a DRM/KMS plane optimization so you can tell whether a plane is behind a
-visual glitch. Honored **only on the DRM/KMS (TTY) backend** (the nested winit
-backend has no hardware planes and ignores them), re-read every frame so
-``reload-config`` applies a change on the next frame. Every flag defaults to
-``false`` — leave the section out unless actively debugging.
+Runtime toggles for diagnosing the compositor without a recompile. The
+``disable_*`` flags turn off a DRM/KMS plane optimization so you can tell
+whether a plane is behind a visual glitch; they are honored **only on the
+DRM/KMS (TTY) backend** (the nested winit backend has no hardware planes and
+ignores them), re-read every frame so ``reload-config`` applies a change on the
+next frame. Every flag defaults to ``false`` — leave the section out unless
+actively debugging.
 
 **disable_direct_scanout** (bool, default ``false``)
     Force window content through GL composition instead of scanning an opaque
@@ -263,6 +264,14 @@ backend has no hardware planes and ignores them), re-read every frame so
 **disable_cursor_plane** (bool, default ``false``)
     Composite the cursor into the frame instead of using a hardware cursor
     plane.
+
+**protocol_trace** (bool, default ``false``)
+    Log the Wayland wire protocol — every per-client request and event — to
+    stderr; the built-in equivalent of ``WAYLAND_DEBUG=server`` (set under the
+    hood) and the same as the ``--protocol-trace`` flag to **shoestring-wm**\(1).
+    Unlike the ``disable_*`` flags it is read **once at startup** and works on
+    both backends. An explicit ``WAYLAND_DEBUG`` in the environment wins. Very
+    verbose; for debugging only.
 
 Examples
 --------

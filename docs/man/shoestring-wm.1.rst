@@ -4,7 +4,7 @@ shoestring-wm
 Synopsis
 --------
 
-| **shoestring-wm** [**-c** *FILE*] [**-b** winit|tty] [**-C** *CMD*] [**--enable-automation**]
+| **shoestring-wm** [**-c** *FILE*] [**-b** winit|tty] [**-C** *CMD*] [**--enable-automation**] [**--protocol-trace**]
 | **shoestring-wm** **--write-default-config** [**--force**] [**-c** *FILE*]
 | **shoestring-wm** **--check-config** [**-c** *FILE*]
 | **shoestring-wm** **-V** | **--version**
@@ -68,6 +68,15 @@ Options
     ``screenshot`` / ``run_command`` / ``dispatch_action``) refuse to fire while it is
     off. The runtime IPC ``set_automation`` request can still flip the
     gate; the config file remains the source of truth at next start.
+
+**--protocol-trace**
+    Log the Wayland wire protocol — every request from and event to each
+    client — to stderr, the built-in equivalent of ``WAYLAND_DEBUG=server``
+    (which it sets internally before the display is created). Equivalent to
+    ``[debug].protocol_trace = true`` in the config; either turns it on. An
+    explicit ``WAYLAND_DEBUG`` in the environment takes precedence and is left
+    untouched. Very verbose — for debugging only. The trace goes to stderr, not
+    ``$SHOESTRING_WM_LOG``.
 
 **-V**, **--version**
     Print version information.
