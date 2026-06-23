@@ -8,6 +8,13 @@ for the event-stream request, the server keeps the connection open and
 pushes ``Event`` objects forever (one per line) until the client
 disconnects.
 
+The connection is **one request per connection**: after it writes the one
+response, the server closes the connection (the streaming requests
+``event_stream`` and ``metrics_stream`` are the exception — they stay open and
+push). So a client issues each request on a fresh connection, exactly as
+``shoestring-ctl`` opens one connection per invocation. This is intentional —
+it keeps the server's per-client state trivial and bounds it.
+
 Socket location
 ---------------
 
@@ -23,6 +30,32 @@ Clients should:
 The reference client (``shoestring-ctl``) and the bar both use the
 ``shoestring-ipc`` crate's ``client_socket_path()`` helper which
 implements this fallback.
+
+.. _ipc-client-libraries:
+
+Client libraries
+----------------
+
+Besides the Rust ``shoestring-ipc`` crate and the ``shoestring-ctl`` CLI, the
+repository ships thin, dependency-free client libraries for **Python**, **Go**,
+and **TypeScript/Node** under `clients/ <https://github.com/szarta/shoestring-wm/tree/main/clients>`__
+(see ``clients/README.md``). Each one implements the socket discovery above, the
+one-request-per-connection round-trip, and an event-stream iterator, with
+ergonomic wrappers for every request (``workspaces()``, ``windows()``,
+``find_windows(...)``, ``inject_key(...)``, …).
+
+The libraries return responses as the language's native JSON value rather than
+a generated schema, so they ride the additive protocol changes described below
+for free. They are the non-Rust analogue of the i3/Sway ``i3ipc`` bindings.
+
+.. code-block:: python
+
+   import shoestring_ipc
+
+   wm = shoestring_ipc.Client()           # auto-discovers the socket
+   print(wm.workspaces()["active"])
+   for event in wm.events():              # blocks, one event per line
+       print(event)
 
 .. _ipc-stability:
 

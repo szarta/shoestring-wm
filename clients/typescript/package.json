@@ -1,0 +1,21 @@
+{
+  "name": "shoestring-ipc",
+  "version": "0.5.0",
+  "description": "Thin Node/TypeScript client for the shoestring-wm IPC socket",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/shoestring-ipc.js",
+  "types": "dist/shoestring-ipc.d.ts",
+  "files": [
+    "shoestring-ipc.ts",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "example": "tsc && node dist/example.js"
+  },
+  "devDependencies": {
+    "@types/node": ">=18",
+    "typescript": ">=5"
+  }
+}
