@@ -246,6 +246,15 @@ pub enum Request {
     /// [`Response::Ok`] on a successful send, [`Response::Error`] if
     /// no window matches.
     CloseWindow { id: String },
+    /// Force-kill the toplevel matching `id` — the SIGKILL to
+    /// [`CloseWindow`]'s polite request. Instead of asking the client to
+    /// close, the WM terminates the owning process outright (peer-credential
+    /// pid for Wayland clients; the real X client pid via XRes for X11
+    /// windows, *not* XWayland's). Use for windows that ignore a close
+    /// request (mid-session games, hung apps) — `shoestring-kill -f`. Reply
+    /// is [`Response::Ok`] once the kill is issued, [`Response::Error`] if no
+    /// window matches or the owning pid can't be resolved.
+    KillWindow { id: String },
     /// Focus the toplevel matching `id`. The WM unminimizes the window
     /// if needed, switches to its workspace if it lives elsewhere, and
     /// then takes the same focus/raise/activate path as a click. Reply
@@ -1580,6 +1589,12 @@ mod tests {
         assert_eq!(s, r#"{"type":"close_window","id":"abc"}"#);
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Request::CloseWindow { id } if id == "abc"));
+
+        let kill = Request::KillWindow { id: "abc".into() };
+        let s = serde_json::to_string(&kill).unwrap();
+        assert_eq!(s, r#"{"type":"kill_window","id":"abc"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Request::KillWindow { id } if id == "abc"));
 
         let focus = Request::FocusWindow { id: "abc".into() };
         let s = serde_json::to_string(&focus).unwrap();

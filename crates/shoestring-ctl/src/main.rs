@@ -199,6 +199,14 @@ enum Command {
         /// FT identifier of the window to close.
         id: String,
     },
+    /// Force-kill a window by its `ext-foreign-toplevel-list-v1` identifier.
+    /// Unlike `close-window`, the WM terminates the owning process (SIGKILL)
+    /// instead of asking it to close — for windows that ignore a close
+    /// request. Backs `shoestring-kill -f`.
+    KillWindow {
+        /// FT identifier of the window to kill.
+        id: String,
+    },
     /// Focus a window by its `ext-foreign-toplevel-list-v1` identifier.
     /// Unminimizes if needed, switches workspaces if needed.
     FocusWindow {
@@ -415,6 +423,7 @@ fn main() -> Result<()> {
         Command::ReloadConfig => Request::ReloadConfig,
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
+        Command::KillWindow { id } => Request::KillWindow { id },
         Command::FocusWindow { id } => Request::FocusWindow { id },
         Command::RaiseWindow { id } => Request::RaiseWindow { id },
         Command::LowerWindow { id } => Request::LowerWindow { id },

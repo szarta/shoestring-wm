@@ -236,6 +236,46 @@ impl ShoestringWm {
         Err(format!("no window with id {id:?}"))
     }
 
+    /// Force-kill the toplevel matching `id` by terminating its owning
+    /// process — the SIGKILL counterpart to [`Self::close_window_by_id`]'s
+    /// polite request, for windows that ignore a close (mid-session games,
+    /// hung apps). Backs `shoestring-kill -f`.
+    ///
+    /// The owning pid differs by window kind: a Wayland client's
+    /// peer-credential pid *is* the app, but an X11 window's wl_surface
+    /// belongs to XWayland — so killing the peer pid would take down every X
+    /// app. For X11 we ask the X server for the window's real local client
+    /// pid (XRes `LOCAL_CLIENT_PID`), falling back to `_NET_WM_PID`.
+    pub fn kill_window_by_id(&self, id: &str) -> Result<(), String> {
+        let window = self
+            .foreign_toplevels
+            .iter()
+            .find(|(_, h)| h.identifier() == id)
+            .map(|(w, _)| w.clone())
+            .ok_or_else(|| format!("no window with id {id:?}"))?;
+
+        let pid = if let Some(x11) = window.x11_surface() {
+            x11.get_client_pid()
+                .ok()
+                .filter(|&p| p > 0)
+                .or_else(|| x11.pid())
+        } else {
+            crate::ipc::window_pid(self, &window).map(|p| p as u32)
+        };
+        let Some(pid) = pid.filter(|&p| p > 0) else {
+            return Err(format!("kill_window {id:?}: could not resolve owning pid"));
+        };
+
+        // SIGKILL the owning process. kill(2) with a positive pid signals
+        // exactly that process; we run as the user that owns it.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } != 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(format!("kill_window {id:?}: kill(pid={pid}) failed: {err}"));
+        }
+        tracing::info!(window = id, pid, "force-killed window via SIGKILL");
+        Ok(())
+    }
+
     /// Focus the toplevel whose FT identifier matches `id`. Restores it
     /// from the minimized stack if needed, switches to its workspace
     /// if it lives elsewhere, then runs the same focus/raise/activate

@@ -225,6 +225,14 @@ Each request is a JSON object with a ``type`` discriminator:
        ``ext-foreign-toplevel-list-v1`` identifier. The client may
        still surface a save-prompt rather than exiting immediately.
        Returns ``error`` if no window matches.
+   * - ``{"type": "kill_window", "id": "..."}``
+     - Force-kill that window — the SIGKILL to ``close_window``'s polite
+       request. The WM terminates the *owning process* rather than asking
+       the client to close: the peer-credential pid for a Wayland client,
+       or the window's real X client pid (XRes ``LOCAL_CLIENT_PID``, **not**
+       XWayland's) for an X11 window. For windows that ignore a close
+       (mid-session games, hung apps). Backs ``shoestring-kill -f``. Returns
+       ``error`` if no window matches or the owning pid can't be resolved.
    * - ``{"type": "focus_window", "id": "..."}``
      - Focus the window with the given identifier. Unminimizes it if
        needed and switches to its workspace if it lives elsewhere,
@@ -881,6 +889,7 @@ subcommand maps to one request:
     $ shoestring-ctl pick-window        # blocks until user clicks
     {"type":"picked_window","window":{"id":"...","title":"...", ...}}
     $ shoestring-ctl close-window <id>  # ask that toplevel to close
+    $ shoestring-ctl kill-window <id>   # SIGKILL the owning process
     $ shoestring-ctl focus-window <id>  # focus + raise + switch workspace
 
     $ shoestring-ctl find-windows --app-id '^Alacritty$'
@@ -905,8 +914,10 @@ subcommand maps to one request:
 
 A higher-level binary, ``shoestring-kill`` (xkill equivalent), chains
 the two: it sends ``pick_window``, then forwards the resulting ``id``
-to ``close_window`` on success. Bind it via the WM config or invoke it
-from a menu.
+to ``close_window`` on success — or to ``kill_window`` when run with
+``-f`` / ``--force``, which force-kills the owning process instead of
+asking it to close (use it on a window that ignores a close). Bind it via
+the WM config or invoke it from a menu.
 
 Flags:
 

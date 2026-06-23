@@ -594,6 +594,14 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::KillWindow { id: window_id } => {
+                let resp = match state.kill_window_by_id(&window_id) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::FocusWindow { id: window_id } => {
                 let resp = match state.focus_window_by_id(&window_id) {
                     Ok(()) => Response::Ok,

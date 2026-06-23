@@ -4,7 +4,7 @@ shoestring-kill
 Synopsis
 --------
 
-| **shoestring-kill**
+| **shoestring-kill** [**-f**\|\ **--force**]
 
 Description
 -----------
@@ -17,11 +17,22 @@ surface a save-prompt rather than exit immediately).
 It is a thin wrapper over the WM's IPC ``pick-window`` / ``close-window``
 requests — see **shoestring-ctl**\(1) for the underlying surface.
 
-Takes no arguments.
+Options
+-------
+
+**-f**, **--force**
+    Force-kill instead of politely closing: the WM **SIGKILL**\s the
+    window's owning process (the peer-credential pid for a Wayland client,
+    or the real X client pid for an X11 window — not XWayland's). Use it
+    for a window that ignores a close request, such as a mid-session game
+    or a hung app. Sends ``kill_window`` rather than ``close_window``.
+
+**-h**, **--help**
+    Print usage and exit.
 
 Usage:
 
-- **Left-click** a window — close it (exit ``0``);
+- **Left-click** a window — close it, or force-kill it under ``-f`` (exit ``0``);
 - **Escape** or **right-click** — cancel (exit ``1``).
 
 Environment
