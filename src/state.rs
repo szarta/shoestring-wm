@@ -1065,9 +1065,10 @@ impl ShoestringWm {
     /// Matches both xdg and X11 windows via [`crate::window_ext::matches_surface`].
     pub fn focused_window(&self) -> Option<Window> {
         let focused = self.seat.get_keyboard()?.current_focus()?;
+        let surface = focused.surface()?;
         self.space
             .elements()
-            .find(|w| crate::window_ext::matches_surface(w, &focused))
+            .find(|w| crate::window_ext::matches_surface(w, &surface))
             .cloned()
     }
 
@@ -1104,8 +1105,8 @@ impl ShoestringWm {
         self.space.raise_element(window, true);
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {
-            if let Some(surface) = crate::window_ext::focus_surface(window) {
-                kb.set_focus(self, Some(surface), serial);
+            if let Some(target) = crate::window_ext::keyboard_focus(window) {
+                kb.set_focus(self, Some(target), serial);
             }
         }
         let target = window.clone();
@@ -1135,8 +1136,8 @@ impl ShoestringWm {
         use smithay::utils::SERIAL_COUNTER;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {
-            if let Some(surface) = crate::window_ext::focus_surface(window) {
-                kb.set_focus(self, Some(surface), serial);
+            if let Some(target) = crate::window_ext::keyboard_focus(window) {
+                kb.set_focus(self, Some(target), serial);
             }
         }
         let target = window.clone();
@@ -1355,7 +1356,11 @@ impl ShoestringWm {
         use smithay::utils::SERIAL_COUNTER;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(kb) = self.seat.get_keyboard() {
-            kb.set_focus(self, Option::<WlSurface>::None, serial);
+            kb.set_focus(
+                self,
+                Option::<crate::focus::KeyboardFocusTarget>::None,
+                serial,
+            );
         }
         self.space.elements().for_each(|w| {
             w.set_activated(false);

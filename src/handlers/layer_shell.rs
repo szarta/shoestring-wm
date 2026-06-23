@@ -83,6 +83,7 @@ impl WlrLayerShellHandler for ShoestringWm {
             .seat
             .get_keyboard()
             .and_then(|kb| kb.current_focus())
+            .and_then(|f| f.surface())
             .as_ref()
             == Some(surface.wl_surface());
 
@@ -170,11 +171,13 @@ pub fn handle_commit(state: &mut ShoestringWm, surface: &WlSurface) -> bool {
     // committing after the lock must not steal it out from under the
     // locker's password prompt.
     if interactivity == KeyboardInteractivity::Exclusive && !state.is_locked() {
+        // Layer surfaces are always Wayland.
+        let target = crate::focus::KeyboardFocusTarget::Wayland(surface.clone());
         if let Some(kb) = state.seat.get_keyboard() {
-            let already = kb.current_focus().as_ref() == Some(surface);
+            let already = kb.current_focus().as_ref() == Some(&target);
             if !already {
                 let serial = SERIAL_COUNTER.next_serial();
-                kb.set_focus(state, Some(surface.clone()), serial);
+                kb.set_focus(state, Some(target), serial);
             }
         }
     }

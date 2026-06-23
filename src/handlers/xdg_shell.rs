@@ -172,15 +172,16 @@ impl XdgShellHandler for ShoestringWm {
     }
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
         // Wire the popup grab so menus (tray dbusmenus, app context menus)
-        // dismiss on click-outside and route keyboard/pointer correctly. Our
-        // keyboard/pointer focus type is `WlSurface`, so the popup's root
-        // surface (window or layer surface) IS the focus target — no enum
-        // mapping needed. Mirrors anvil's XdgShellHandler::grab.
+        // dismiss on click-outside and route keyboard/pointer correctly. The
+        // popup's root surface (window or layer surface) is the grab's focus;
+        // wrap it as the Wayland variant of our keyboard-focus enum (see
+        // [`crate::focus`]). Mirrors anvil's XdgShellHandler::grab.
         let seat: Seat<Self> = Seat::from_resource(&seat).unwrap();
         let kind = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&kind) else {
             return;
         };
+        let root = crate::focus::KeyboardFocusTarget::Wayland(root);
         let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else {
             return;
         };

@@ -20,7 +20,6 @@ use shoestring_ipc::{Response, WindowSummary};
 use smithay::{
     backend::input::{ButtonState, KeyState},
     desktop::Window,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::SERIAL_COUNTER,
 };
 
@@ -44,7 +43,7 @@ pub struct PendingPicker {
     /// input — without this, any key the user was holding (notably the
     /// Enter that launched `shoestring-kill`) would auto-repeat in the
     /// surface forever because it never sees a release.
-    pub saved_focus: Option<WlSurface>,
+    pub saved_focus: Option<crate::focus::KeyboardFocusTarget>,
 }
 
 impl ShoestringWm {
@@ -72,7 +71,11 @@ impl ShoestringWm {
         let saved_focus = self.seat.get_keyboard().and_then(|kb| {
             let focus = kb.current_focus();
             let serial = SERIAL_COUNTER.next_serial();
-            kb.set_focus(self, Option::<WlSurface>::None, serial);
+            kb.set_focus(
+                self,
+                Option::<crate::focus::KeyboardFocusTarget>::None,
+                serial,
+            );
             focus
         });
         tracing::debug!(?client_id, "picker armed");

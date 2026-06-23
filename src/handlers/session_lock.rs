@@ -39,7 +39,7 @@ pub struct LockState {
     /// path to know which surface to draw on each output.
     pub surfaces: HashMap<Output, LockSurface>,
     /// Keyboard focus at the moment we locked, restored on unlock.
-    pub saved_focus: Option<WlSurface>,
+    pub saved_focus: Option<crate::focus::KeyboardFocusTarget>,
 }
 
 impl SessionLockHandler for ShoestringWm {
@@ -59,7 +59,11 @@ impl SessionLockHandler for ShoestringWm {
         // input; the lock client gets focus once it creates a surface.
         if let Some(kb) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
-            kb.set_focus(self, Option::<WlSurface>::None, serial);
+            kb.set_focus(
+                self,
+                Option::<crate::focus::KeyboardFocusTarget>::None,
+                serial,
+            );
         }
         // An in-flight window picker would otherwise stay armed across
         // the lock; resolve it as cancelled so the client can move on.
@@ -148,11 +152,13 @@ impl ShoestringWm {
         let Some(surface) = surface else {
             return;
         };
+        // Lock surfaces are always Wayland.
+        let target = crate::focus::KeyboardFocusTarget::Wayland(surface);
         if let Some(kb) = self.seat.get_keyboard() {
-            let already = kb.current_focus().as_ref() == Some(&surface);
+            let already = kb.current_focus().as_ref() == Some(&target);
             if !already {
                 let serial = SERIAL_COUNTER.next_serial();
-                kb.set_focus(self, Some(surface), serial);
+                kb.set_focus(self, Some(target), serial);
             }
         }
     }

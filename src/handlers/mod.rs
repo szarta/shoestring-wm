@@ -39,6 +39,7 @@ use smithay::wayland::selection::primary_selection::{
 };
 use smithay::wayland::selection::SelectionHandler;
 
+use crate::focus::KeyboardFocusTarget;
 use crate::state::ShoestringWm;
 
 impl ForeignToplevelListHandler for ShoestringWm {
@@ -96,7 +97,11 @@ impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandl
         // Grant every request (single-user WM — no privilege model), but only
         // arm it if its surface already holds keyboard focus. Otherwise it
         // stays dormant until `focus_changed` activates it on focus entry.
-        let focused = self.seat.get_keyboard().and_then(|kb| kb.current_focus());
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|kb| kb.current_focus())
+            .and_then(|f| f.surface());
         if focused.as_ref() == Some(inhibitor.wl_surface()) {
             inhibitor.activate();
             self.active_shortcuts_inhibitor = Some(inhibitor);
@@ -156,7 +161,10 @@ impl smithay::wayland::input_method::InputMethodHandler for ShoestringWm {
 }
 
 impl SeatHandler for ShoestringWm {
-    type KeyboardFocus = WlSurface;
+    // Keyboard focus is an enum (not the bare WlSurface used for pointer/touch)
+    // so X11 windows route through smithay's X11Surface KeyboardTarget, which
+    // is what emits XSetInputFocus / WM_TAKE_FOCUS — see [`crate::focus`].
+    type KeyboardFocus = crate::focus::KeyboardFocusTarget;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -173,9 +181,13 @@ impl SeatHandler for ShoestringWm {
         self.pointer_element.set_status(image);
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocusTarget>) {
+        // Everything below keys off the underlying wl_surface (the data-device
+        // client, the shortcuts inhibitor). For an X11 focus target that's the
+        // XWayland-side surface.
+        let surface = focused.and_then(|f| f.wl_surface());
         let dh = &self.display_handle;
-        let client = focused.and_then(|s| dh.get_client(s.id()).ok());
+        let client = surface.as_ref().and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
 
@@ -184,7 +196,9 @@ impl SeatHandler for ShoestringWm {
         // whatever we had armed, then arm the newly-focused surface's inhibitor
         // (if any). The `active`/`inactive` events tell the client whether its
         // shortcuts are actually being passed through right now.
-        let next = focused.and_then(|s| seat.keyboard_shortcuts_inhibitor_for_surface(s));
+        let next = surface
+            .as_ref()
+            .and_then(|s| seat.keyboard_shortcuts_inhibitor_for_surface(s));
         if self.active_shortcuts_inhibitor != next {
             if let Some(prev) = self.active_shortcuts_inhibitor.take() {
                 prev.inactivate();

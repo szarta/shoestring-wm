@@ -27,6 +27,23 @@ pub fn focus_surface(window: &Window) -> Option<WlSurface> {
     window.wl_surface().map(|s| s.into_owned())
 }
 
+/// The [`KeyboardFocusTarget`] for `window`, used wherever we move keyboard
+/// focus. X11 windows resolve to the [`X11Surface`] variant so smithay drives
+/// `XSetInputFocus` / `WM_TAKE_FOCUS` — focusing only the bare `wl_surface`
+/// leaves an X client with no keyboard input (see [`crate::focus`]).
+///
+/// [`KeyboardFocusTarget`]: crate::focus::KeyboardFocusTarget
+/// [`X11Surface`]: smithay::xwayland::X11Surface
+pub fn keyboard_focus(window: &Window) -> Option<crate::focus::KeyboardFocusTarget> {
+    use crate::focus::KeyboardFocusTarget;
+    if let Some(x11) = window.x11_surface() {
+        return Some(KeyboardFocusTarget::X11(x11.clone()));
+    }
+    window
+        .wl_surface()
+        .map(|s| KeyboardFocusTarget::Wayland(s.into_owned()))
+}
+
 /// Push a pending configure to `window` (xdg-only). X11 surfaces ack
 /// their configure synchronously inside the XwmHandler request, so
 /// there's nothing to flush here.

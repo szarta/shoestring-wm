@@ -159,14 +159,18 @@ impl XWaylandShellHandler for ShoestringWm {
 }
 
 impl XWaylandKeyboardGrabHandler for ShoestringWm {
-    fn keyboard_focus_for_xsurface(&self, surface: &WlSurface) -> Option<WlSurface> {
+    fn keyboard_focus_for_xsurface(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<crate::focus::KeyboardFocusTarget> {
         // X11 apps that request a keyboard grab on a child surface (popup
         // menus, etc.) need focus to follow the grab. Match the toplevel
-        // window owning `surface` and return its wl_surface.
+        // window owning `surface` and return its keyboard-focus target (the
+        // X11 variant, so X input focus is driven correctly).
         self.space
             .elements()
             .find(|w| w.wl_surface().is_some_and(|s| &*s == surface))
-            .and_then(|w| w.wl_surface().map(|s| s.into_owned()))
+            .and_then(crate::window_ext::keyboard_focus)
     }
 }
 
@@ -388,7 +392,7 @@ impl XwmHandler for ShoestringWm {
         let Some(kb) = self.seat.get_keyboard() else {
             return false;
         };
-        let Some(focused) = kb.current_focus() else {
+        let Some(focused) = kb.current_focus().and_then(|f| f.surface()) else {
             return false;
         };
         self.space.elements().any(|w| {

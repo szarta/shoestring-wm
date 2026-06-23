@@ -533,8 +533,8 @@ impl ShoestringWm {
         // Raise + focus so the dragged window comes to the front.
         self.space.raise_element(window, true);
         if let Some(kb) = self.seat.get_keyboard() {
-            if let Some(surface) = crate::window_ext::focus_surface(window) {
-                kb.set_focus(self, Some(surface), serial);
+            if let Some(target) = crate::window_ext::keyboard_focus(window) {
+                kb.set_focus(self, Some(target), serial);
             }
         }
         self.space.elements().for_each(|w| {
