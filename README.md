@@ -173,6 +173,12 @@ Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
 - FreeBSD smoke-test of the winit build.
 - BSD branches for the `shoestring-brightness-*` helper scripts.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, run, and test the
+project, and [`docs/architecture.md`](docs/architecture.md) for the design
+and the reasoning behind it.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
