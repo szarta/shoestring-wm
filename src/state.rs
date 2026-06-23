@@ -168,6 +168,11 @@ pub struct ShoestringWm {
     pub data_device_state: DataDeviceState,
     pub output_management: crate::output_management::OutputManagementState,
     pub screencopy: crate::screencopy::ScreencopyState,
+    /// `ext-image-copy-capture-v1` + `ext-image-capture-source-v1` — the
+    /// standardized successor to wlr-screencopy, advertised alongside it.
+    /// Gated by the same screen-capture flag (`capture_gate`). See
+    /// [`crate::ext_screencopy`].
+    pub ext_screencopy: crate::ext_screencopy::ExtScreencopyState,
     /// wlr-virtual-pointer manager: lets clients (wlrctl, remote desktop)
     /// emulate a physical pointer. Always-on and backend-agnostic; the per
     /// resource event batching lives in [`crate::virtual_pointer`]. Held only
@@ -327,6 +332,12 @@ pub struct ShoestringWm {
     /// Never written back to disk; the config file is the source of truth at
     /// next start.
     pub screen_capture_enabled: bool,
+    /// Shared live mirror of [`Self::screen_capture_enabled`] read by the
+    /// `ext-image-copy-capture` manager globals' visibility filters (which
+    /// outlive a single `&self` borrow). Updated in lockstep by
+    /// [`Self::set_screen_capture`] so those globals appear/disappear with the
+    /// gate just like the wlr manager does.
+    pub capture_gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Throttle for [`shoestring_ipc::Event::ScreenCaptured`]: the
     /// `Instant` of the last emitted live-capture event. `None` until the
     /// first capture. Keeps a high-FPS cast from flooding subscribers.
@@ -540,6 +551,14 @@ impl ShoestringWm {
             }),
             pending: Vec::new(),
         };
+        // ext-image-copy-capture / ext-image-capture-source: the standardized
+        // successor to wlr-screencopy, gated by the same capture flag. Its two
+        // manager globals are registered once with a visibility filter reading
+        // `capture_gate`, so they only appear to clients while the gate is on.
+        let capture_gate =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(screen_capture_enabled));
+        let ext_screencopy =
+            crate::ext_screencopy::ExtScreencopyState::new::<Self>(&dh, capture_gate.clone());
         // wlr-virtual-pointer: advertise the manager (v2) unconditionally so
         // pointer-injection clients (wlrctl, remote desktop) work out of the
         // box, the way wlroots does. Unlike the WM's own IPC inject path, this
@@ -730,6 +749,7 @@ impl ShoestringWm {
             data_device_state,
             output_management,
             screencopy,
+            ext_screencopy,
             virtual_pointer,
             dmabuf_state: DmabufState::new(),
             #[cfg(feature = "tty")]
@@ -759,6 +779,7 @@ impl ShoestringWm {
             session_integration: false,
             automation_enabled,
             screen_capture_enabled,
+            capture_gate,
             last_screen_capture_event: None,
             media: None,
             pending_screenshots: HashMap::new(),
@@ -1674,6 +1695,10 @@ impl ShoestringWm {
     /// logging / `ScreenCaptureChanged` event (mirrors the automation gate).
     pub fn set_screen_capture(&mut self, enabled: bool) {
         self.screen_capture_enabled = enabled;
+        // Mirror into the shared flag the ext-image-copy-capture globals' filters
+        // read, so they appear/disappear from new clients' registries in step.
+        self.capture_gate
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
         let dh = self.display_handle.clone();
         if enabled {
             if self.screencopy.manager_global.is_none() {
@@ -1687,6 +1712,15 @@ impl ShoestringWm {
             }
             for frame in self.screencopy.pending.drain(..) {
                 frame.failed();
+            }
+            // ext-image-copy-capture: dropping the owned sessions sends `stopped`
+            // (and fails their in-flight frames); also fail anything already
+            // queued for a render pass so no client hangs waiting on a capture
+            // the gate just revoked.
+            self.ext_screencopy.sessions.clear();
+            for p in self.ext_screencopy.pending.drain(..) {
+                p.frame
+                    .fail(crate::ext_screencopy::CaptureFailureReason::Stopped);
             }
         }
     }
@@ -1747,6 +1781,59 @@ impl ShoestringWm {
             .into_iter()
             .filter(|fourcc| formats.iter().any(|f| f.code == *fourcc))
             .collect()
+    }
+
+    /// Buffer constraints to advertise for an `ext-image-copy-capture` session
+    /// targeting `output`: the output's full pixel size, the shm formats we can
+    /// read back into, and — on KMS — the dmabuf formats/modifiers our renderer
+    /// can scan the scene straight into. Returns `None` if the output has no
+    /// current mode. Mirrors the buffer kinds offered by the wlr path.
+    pub fn ext_capture_constraints_for_output(
+        &self,
+        output: &smithay::output::Output,
+    ) -> Option<crate::ext_screencopy::BufferConstraints> {
+        use smithay::reexports::wayland_server::protocol::wl_shm;
+        let mode = output.current_mode()?;
+        let size: smithay::utils::Size<i32, smithay::utils::Buffer> =
+            (mode.size.w, mode.size.h).into();
+        // Both layouts are byte-identical to our ARGB readback; offering Xrgb
+        // too lets opaque consumers (screencast) avoid an alpha channel.
+        let shm = vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888];
+        Some(crate::ext_screencopy::BufferConstraints {
+            size,
+            shm,
+            #[cfg(feature = "tty")]
+            dma: self.ext_dmabuf_constraints(),
+        })
+    }
+
+    /// dmabuf format/modifier constraints for ext-image-copy-capture, grouped by
+    /// fourcc. `None` on winit (no dmabuf export) or before the dmabuf global is
+    /// up. Offers only formats the primary GPU's renderer can actually import,
+    /// opaque first (screencast streams are opaque).
+    #[cfg(feature = "tty")]
+    pub fn ext_dmabuf_constraints(&self) -> Option<crate::ext_screencopy::DmabufConstraints> {
+        use smithay::backend::allocator::Fourcc;
+        let node = self.udev.as_ref()?.primary_render_node();
+        let formats = self.dmabuf_formats.as_ref()?;
+        let mut grouped = Vec::new();
+        for code in [Fourcc::Xrgb8888, Fourcc::Argb8888] {
+            let modifiers: Vec<_> = formats
+                .iter()
+                .filter(|f| f.code == code)
+                .map(|f| f.modifier)
+                .collect();
+            if !modifiers.is_empty() {
+                grouped.push((code, modifiers));
+            }
+        }
+        if grouped.is_empty() {
+            return None;
+        }
+        Some(crate::ext_screencopy::DmabufConstraints {
+            node,
+            formats: grouped,
+        })
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from

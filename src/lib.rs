@@ -16,6 +16,7 @@ mod cursor;
 pub mod decorations;
 pub mod diag_overlay;
 pub mod drawing;
+mod ext_screencopy;
 mod ext_workspace;
 mod foreign_toplevel_mgmt;
 #[cfg(feature = "tty")]

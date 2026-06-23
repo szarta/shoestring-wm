@@ -159,6 +159,12 @@ impl UdevData {
             }
         }
     }
+
+    /// The primary GPU node, advertised to ext-image-copy-capture clients as the
+    /// device their dmabuf capture buffers should be allocated on.
+    pub fn primary_render_node(&self) -> DrmNode {
+        self.primary_gpu
+    }
 }
 
 /// Explicit-sync (`wp_linux_drm_syncobj_v1`) routes through the udev backend:
@@ -1631,6 +1637,15 @@ impl ShoestringWm {
         // disjoint from the `self.udev`-rooted renderer borrow.
         crate::screencopy::process_pending(
             &mut self.screencopy,
+            &output,
+            &mut renderer,
+            &elements,
+            clear,
+        );
+        // Same for the modern ext-image-copy-capture path (disjoint field, same
+        // element list — so both protocols capture exactly what scans out).
+        crate::ext_screencopy::process_pending(
+            &mut self.ext_screencopy,
             &output,
             &mut renderer,
             &elements,

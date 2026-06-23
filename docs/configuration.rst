@@ -117,8 +117,10 @@ The ``[general]`` section
        to read the screen. Off by default: unlike
        X11, Wayland isolates clients, so leaving it off means a stray or
        malicious client simply cannot capture the screen. When ``false``
-       the ``zwlr_screencopy_manager_v1`` global is not advertised and any
-       capture is refused. The runtime IPC ``set_screen_capture`` (and
+       neither the ``zwlr_screencopy_manager_v1`` global nor the modern
+       ``ext-image-copy-capture-v1`` / ``ext-image-capture-source-v1``
+       managers are advertised, and any capture is refused. The runtime
+       IPC ``set_screen_capture`` (and
        ``shoestring-ctl screen-capture on``) override it without writing
        to disk. Independent of the ``screenshot`` IPC request, which is
        behind ``automation_enabled``.

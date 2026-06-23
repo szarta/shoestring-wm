@@ -270,6 +270,17 @@ pub fn init_winit(
                         &elements,
                         clear,
                     );
+                    // ext-image-copy-capture (shm only under winit — no dmabuf
+                    // export here). Same offscreen-bind-before-render ordering as
+                    // the wlr path, so it must precede the window framebuffer's
+                    // final bind below.
+                    crate::ext_screencopy::process_pending(
+                        &mut state.ext_screencopy,
+                        &output,
+                        renderer,
+                        &elements,
+                        clear,
+                    );
 
                     // Diagnostics overlay on top of everything (index 0 = drawn
                     // first), added after screencopy so it stays out of captures.

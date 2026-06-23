@@ -181,7 +181,9 @@ Implemented today:
   automation gate).
 - HiDPI / output-scale handling (integer and fractional).
 - wlr-screencopy + region picker (``shoestring-screenshot`` +
-  ``shoestring-region``).
+  ``shoestring-region``), plus the standardized successor
+  ``ext-image-copy-capture-v1`` / ``ext-image-capture-source-v1`` for
+  output capture. Both are gated by the runtime screen-capture gate.
 - ``ext-session-lock-v1`` + PAM unlock via ``shoestring-lock``, with an
   xscreensaver-style maze-2d screensaver rendered behind the prompt.
 - TOML config hot-reload via filesystem watcher (and an explicit

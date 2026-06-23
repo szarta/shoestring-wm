@@ -1,5 +1,6 @@
 mod compositor;
 mod dmabuf;
+mod ext_screencopy;
 mod ext_workspace;
 mod foreign_toplevel_mgmt;
 #[cfg(feature = "tty")]

@@ -372,7 +372,7 @@ fn send_ready(frame: &ZwlrScreencopyFrameV1) {
     );
 }
 
-fn render_into<R>(
+pub(crate) fn render_into<R>(
     damage_tracker: &mut OutputDamageTracker,
     renderer: &mut R,
     framebuffer: &mut R::Framebuffer<'_>,
@@ -402,7 +402,7 @@ where
         .map_err(|e| format!("{e:?}"))
 }
 
-fn copy_region<R>(
+pub(crate) fn copy_region<R>(
     renderer: &mut R,
     framebuffer: &R::Framebuffer<'_>,
     region: Rectangle<i32, BufferCoord>,
