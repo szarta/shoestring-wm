@@ -31,8 +31,10 @@ Tagged releases ship a Debian/Ubuntu ``.deb`` and a Fedora ``.rpm`` on the
 `GitHub releases page <https://github.com/szarta/shoestring-wm/releases>`_.
 Each bundles every binary (WM plus helpers), the man pages, a session
 wrapper, and the Wayland **session file** — so once installed,
-shoestring-wm shows up in your display manager's session menu (GDM / SDDM /
-LightDM) at the login screen. Pick it there and log in.
+shoestring-wm shows up in your login screen's session menu. Pick it there
+and log in — **but only with a Wayland-capable greeter**; see
+:ref:`greeter` below, because an X11-based greeter (notably LightDM's
+default) will offer the session and then fail to launch it.
 
 Debian / Ubuntu::
 
@@ -364,6 +366,85 @@ elogind, and bare-init / FreeBSD alike. On FreeBSD the power key is wired
 through ``devd`` / ``acpiconf`` rather than logind — disable the relevant
 ``/etc/devd.conf`` (or ``sysctl hw.acpi.power_button_state``) handler the
 same way before binding the key here.
+
+.. _greeter:
+
+Logging in: pick a Wayland-capable greeter
+------------------------------------------
+
+shoestring-wm is a **Wayland session**, so the greeter that launches it must
+hand the seat off to it: the compositor opens the GPU and input devices
+through the seat manager (``logind`` on systemd Linux, ``seatd`` elsewhere),
+and that only works if the greeter starts the session as the **seat-active**
+session. A Wayland-native greeter does this; an **X11 greeter does not**.
+
+The most common pitfall is **LightDM with its default GTK greeter**
+(``lightdm-gtk-greeter``), which runs an X server. It *will* list
+shoestring-wm in the session menu, but when you pick it the compositor comes
+up in the right logind session yet is never told the seat is active, so it
+can't take DRM master and you get a **black screen**. This is a LightDM
+limitation, not specific to shoestring — the reference compositor
+(``weston``) fails to launch under it too. (shoestring fails *recoverably*: a
+denied seat leaves a black screen you can escape with ``Ctrl+Alt+F2``, not a
+hung machine.)
+
+**Use a Wayland-capable greeter instead.** Any of these hand off correctly:
+
+- **greetd** — minimal and the best fit here: it sits directly on the same
+  seat manager shoestring already uses (``logind`` on Linux, ``seatd`` on the
+  BSDs), so it's consistent across platforms and pulls in almost nothing.
+- **GDM** or **SDDM** (with its Wayland greeter) — heavier, but work out of
+  the box.
+
+greetd on Debian/Ubuntu
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Install greetd (its built-in ``agreety`` greeter needs no extra package),
+point it at shoestring-wm, and switch the active display manager:
+
+.. code-block:: console
+
+    # sudo apt install greetd
+
+Write ``/etc/greetd/config.toml``:
+
+.. code-block:: toml
+
+    [terminal]
+    # Use a VT that has no getty. vt 1 collides with getty@tty1 on Debian/
+    # Ubuntu (two readers on one tty = garbled keyboard); 7 is free (it's
+    # where the old X display manager lived) and is the package default.
+    vt = 7
+
+    [default_session]
+    # agreety prompts for login on the VT, then execs the WM as a fresh
+    # seat-active session — the clean handoff LightDM doesn't do.
+    command = "agreety --cmd shoestring-wm"
+    # The greeter's own unprivileged user. On Debian/Ubuntu the greetd
+    # package creates `_greetd`; some distros use `greeter`. Check with
+    # `getent passwd _greetd greeter`.
+    user = "_greetd"
+
+Then make greetd the display manager and reboot:
+
+.. code-block:: console
+
+    # sudo systemctl disable lightdm.service
+    # sudo systemctl enable greetd.service
+    # sudo reboot
+
+At greetd's ``login:`` prompt (agreety looks like a plain text login), log in
+normally and shoestring launches. For a nicer login UI, install
+``greetd-tuigreet`` and use ``command = "tuigreet --cmd shoestring-wm"``
+instead.
+
+No greeter at all
+~~~~~~~~~~~~~~~~~
+
+On a single-user machine you can skip the greeter entirely: log in on a text
+VT and launch the compositor directly (or from your shell profile / a getty
+autologin). A bare TTY login is already a seat-active session, so the handoff
+is never in question. See :doc:`running`.
 
 After installing
 ----------------
