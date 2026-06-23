@@ -131,6 +131,7 @@ mod tests {
             portal: Default::default(),
             decorations: Default::default(),
             background: Default::default(),
+            debug: Default::default(),
         }
     }
 

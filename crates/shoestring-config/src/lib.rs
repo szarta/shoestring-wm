@@ -101,6 +101,8 @@ pub struct Config {
     pub decorations: Decorations,
     #[serde(default)]
     pub background: Background,
+    #[serde(default)]
+    pub debug: Debug,
 }
 
 /// `[portal]` — settings for the `xdg-desktop-portal-shoestring` screen-sharing
@@ -404,6 +406,42 @@ impl Background {
             Vec::new()
         }
     }
+}
+
+/// `[debug]` — runtime debug toggles for diagnosing the render path without a
+/// recompile. Niri exposes a similar block; the knobs here turn off the
+/// DRM/KMS plane optimizations that, when they misbehave, produce the hardest
+/// bugs to reason about (glitched scanout, a stuck or torn hardware cursor).
+///
+/// Every flag defaults `false` (the optimization stays on — normal operation).
+/// All are honored **only on the DRM/KMS (TTY) backend**: the nested winit
+/// backend has no hardware planes, so it composites everything regardless and
+/// ignores this section. Because the flags are read fresh on every frame, a
+/// config hot-reload (`reload-config`) applies them on the next frame — no
+/// restart needed, which is the point of having them in config rather than a
+/// build flag.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Debug {
+    /// Force every window's content through GL composition instead of letting a
+    /// fullscreen/opaque surface be scanned out directly from a primary or
+    /// overlay plane. Turn on to rule out direct-scanout as the cause of a
+    /// visual glitch (at the cost of the power/latency win scanout buys).
+    /// Implies [`disable_overlay_planes`](Self::disable_overlay_planes).
+    #[serde(default)]
+    pub disable_direct_scanout: bool,
+    /// Disable only *overlay*-plane scanout, leaving primary-plane (fullscreen)
+    /// scanout in place. A narrower cut than
+    /// [`disable_direct_scanout`](Self::disable_direct_scanout) for isolating
+    /// overlay-plane-specific issues.
+    #[serde(default)]
+    pub disable_overlay_planes: bool,
+    /// Composite the cursor into the frame instead of using a hardware cursor
+    /// plane. Turn on when chasing cursor-plane artifacts (wrong scale, ghosting,
+    /// a cursor that lags or sticks); the software cursor is slower but takes the
+    /// KMS cursor plane out of the picture.
+    #[serde(default)]
+    pub disable_cursor_plane: bool,
 }
 
 /// Expand a leading `~` (home) and `$VAR` / `${VAR}` environment references in a
@@ -1294,6 +1332,7 @@ impl Config {
             portal: Portal::default(),
             decorations: Decorations::default(),
             background: Background::default(),
+            debug: Debug::default(),
         }
     }
 }
@@ -1600,6 +1639,32 @@ actions = {}
         assert!(!cfg.diagnostics.enabled);
         assert_eq!(cfg.diagnostics.sample_interval_ms, 5000);
         assert_eq!(cfg.diagnostics.fd_warn_fraction, 0.9);
+    }
+
+    #[test]
+    fn debug_defaults_all_off() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.debug, Debug::default());
+        assert!(!cfg.debug.disable_direct_scanout);
+        assert!(!cfg.debug.disable_overlay_planes);
+        assert!(!cfg.debug.disable_cursor_plane);
+    }
+
+    #[test]
+    fn debug_user_override() {
+        let cfg: Config =
+            toml::from_str("[debug]\ndisable_direct_scanout = true\ndisable_cursor_plane = true\n")
+                .unwrap();
+        assert!(cfg.debug.disable_direct_scanout);
+        assert!(!cfg.debug.disable_overlay_planes);
+        assert!(cfg.debug.disable_cursor_plane);
+    }
+
+    #[test]
+    fn debug_rejects_unknown_key() {
+        // deny_unknown_fields guards against typo'd debug knobs silently no-op'ing.
+        let err = toml::from_str::<Config>("[debug]\ndisable_scanout = true\n");
+        assert!(err.is_err());
     }
 
     #[test]

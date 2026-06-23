@@ -27,8 +27,8 @@ for a pre-commit hook or a CI check on a dotfiles repo.
 
 The file's main sections — ``[general]``, ``[workspaces]``,
 ``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, ``[input]``,
-``[decorations]``, and ``[background]`` — are all optional. Missing sections
-take built-in defaults.
+``[decorations]``, ``[background]``, and ``[debug]`` — are all optional.
+Missing sections take built-in defaults.
 
 The ``[general]`` section
 -------------------------
@@ -780,6 +780,49 @@ restart needed.
     ``tile``          Repeat the image at its native size from the
                       top-left to fill the output.
     ================  ===============================================
+
+The ``[debug]`` section
+-----------------------
+
+``[debug]`` collects runtime toggles for diagnosing the render path without a
+recompile. They turn off the DRM/KMS plane optimizations that, when a driver or
+a client misbehaves, cause the hardest bugs to reason about — glitched
+direct-scanout content, or a hardware cursor that tears, ghosts, or sticks. If
+you hit such an artifact, flipping one of these to ``true`` and reloading is a
+quick way to confirm whether a plane is to blame.
+
+These flags are honored **only on the DRM/KMS (TTY) backend**. The nested winit
+backend has no hardware planes, so it always composites everything and ignores
+this section. Each flag is re-read on every frame, so ``reload-config`` applies
+a change on the next frame — no restart needed.
+
+Every flag defaults to ``false`` (the optimization stays on — normal, fastest
+operation). Leave the section out entirely unless you are actively debugging.
+
+::
+
+    [debug]
+    disable_direct_scanout = false
+    disable_overlay_planes = false
+    disable_cursor_plane = false
+
+``disable_direct_scanout``
+    Force every window's content through GL composition instead of letting a
+    fullscreen or opaque surface be scanned out directly from a primary or
+    overlay plane. Turn on to rule out direct-scanout as the cause of a visual
+    glitch, at the cost of the power and latency savings scanout buys. Implies
+    ``disable_overlay_planes``.
+
+``disable_overlay_planes``
+    Disable only *overlay*-plane scanout, leaving primary-plane (fullscreen)
+    scanout in place — a narrower cut than ``disable_direct_scanout`` for
+    isolating overlay-plane-specific issues.
+
+``disable_cursor_plane``
+    Composite the cursor into the frame instead of using a hardware cursor
+    plane. Turn on when chasing cursor-plane artifacts (wrong scale, ghosting, a
+    cursor that lags or sticks). The software cursor is slower but takes the KMS
+    cursor plane out of the picture.
 
 Pointer bindings
 ----------------

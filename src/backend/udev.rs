@@ -1671,11 +1671,29 @@ impl ShoestringWm {
             }
         }
 
+        // Start from the full set of plane optimizations and subtract whatever
+        // the `[debug]` block has switched off. Read fresh each frame so a
+        // config hot-reload takes effect on the next render without a restart.
+        let mut frame_flags = FrameFlags::DEFAULT;
+        let dbg = &self.config.debug;
+        if dbg.disable_direct_scanout {
+            frame_flags.remove(
+                FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT
+                    | FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY
+                    | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT,
+            );
+        }
+        if dbg.disable_overlay_planes {
+            frame_flags.remove(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT);
+        }
+        if dbg.disable_cursor_plane {
+            frame_flags.remove(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
+        }
+
         let render_start = std::time::Instant::now();
-        let result =
-            surface
-                .drm_output
-                .render_frame(&mut renderer, &elements, clear, FrameFlags::DEFAULT);
+        let result = surface
+            .drm_output
+            .render_frame(&mut renderer, &elements, clear, frame_flags);
         let frame_us = render_start.elapsed().as_micros() as u64;
 
         let (rendered, render_states) = match result {

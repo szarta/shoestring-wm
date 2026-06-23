@@ -242,6 +242,28 @@ own rectangle (so it never bleeds onto an adjacent tile) and is focus-aware.
 **unfocused_color** (string, default ``#4c566a``)
     Border color of unfocused windows, same format.
 
+[debug] keys
+------------
+
+Runtime toggles for diagnosing the render path without a recompile. Each turns
+off a DRM/KMS plane optimization so you can tell whether a plane is behind a
+visual glitch. Honored **only on the DRM/KMS (TTY) backend** (the nested winit
+backend has no hardware planes and ignores them), re-read every frame so
+``reload-config`` applies a change on the next frame. Every flag defaults to
+``false`` — leave the section out unless actively debugging.
+
+**disable_direct_scanout** (bool, default ``false``)
+    Force window content through GL composition instead of scanning an opaque
+    or fullscreen surface out from a primary/overlay plane. Implies
+    **disable_overlay_planes**.
+
+**disable_overlay_planes** (bool, default ``false``)
+    Disable only overlay-plane scanout, leaving primary-plane scanout in place.
+
+**disable_cursor_plane** (bool, default ``false``)
+    Composite the cursor into the frame instead of using a hardware cursor
+    plane.
+
 Examples
 --------
 
