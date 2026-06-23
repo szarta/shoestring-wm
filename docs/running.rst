@@ -90,6 +90,32 @@ from inside it with the bound keys (``Super+Return`` for a terminal,
 
 Quit with ``Super+Shift+Q``.
 
+Profiling with Tracy
+--------------------
+
+For diagnosing frame drops and render-loop stalls, the WM ships an optional
+`Tracy <https://github.com/wolfpld/tracy>`_ profiler integration behind the
+``profile-with-tracy`` Cargo feature. It is **off by default and compiled out
+entirely** — a normal build carries no extra dependency and no per-frame cost;
+the instrumentation macros become no-ops.
+
+Build with the feature and run under a Tracy capture::
+
+    cargo build --release --features profile-with-tracy
+    ./target/release/shoestring-wm        # then connect tracy-profiler
+
+The integration adds a ``tracing-tracy`` layer that forwards the WM's spans to
+Tracy, a zone for each render step (``render_surface`` / ``render_frame`` on
+the TTY backend, ``render_output`` under winit), and a frame mark on every
+*drawn* frame — empty no-damage polls don't mark, so Tracy's frame timeline
+tracks real presented frames, matching the ``render.fps`` metric. The Tracy
+layer captures ``info,shoestring_wm=trace`` by default (so it sees the profile
+zones without smithay/calloop trace spam); override it with the
+``SHOESTRING_WM_TRACY`` environment variable, which takes the same syntax as
+``RUST_LOG``. This complements the always-on metrics subsystem (``render.fps``,
+frame-time gauges over IPC): metrics give you the numbers in production, Tracy
+gives you the per-zone flame graph when you need to find *where* a frame went.
+
 Running on a TTY (daily driver)
 -------------------------------
 

@@ -1427,6 +1427,7 @@ impl ShoestringWm {
 
     /// Compose `space` onto `crtc` and queue the resulting frame.
     pub(crate) fn render_surface(&mut self, node: DrmNode, crtc: crtc::Handle) {
+        crate::profile_scope!("render_surface");
         // Read session state before taking any borrows. If the session is
         // paused (we switched to a TTY), all reschedule paths must be skipped
         // — rescheduling while paused builds up a storm of pending timers that
@@ -1691,9 +1692,12 @@ impl ShoestringWm {
         }
 
         let render_start = std::time::Instant::now();
-        let result = surface
-            .drm_output
-            .render_frame(&mut renderer, &elements, clear, frame_flags);
+        let result = {
+            crate::profile_scope!("render_frame");
+            surface
+                .drm_output
+                .render_frame(&mut renderer, &elements, clear, frame_flags)
+        };
         let frame_us = render_start.elapsed().as_micros() as u64;
 
         let (rendered, render_states) = match result {
@@ -1770,6 +1774,10 @@ impl ShoestringWm {
         // `&mut self.metrics`.
         if rendered {
             self.metrics.record_frame(frame_us);
+            // One Tracy frame boundary per drawn frame (no-op without the
+            // feature). Empty polls don't mark, so the frame timeline tracks
+            // real presented frames like `render.fps` does.
+            crate::profiling::frame_mark();
         }
 
         // Keep wp_fractional_scale clients on this output in sync with its

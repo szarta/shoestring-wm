@@ -292,15 +292,20 @@ pub fn init_winit(
                         }
                     }
                     let render_start = std::time::Instant::now();
-                    let result = damage_tracker
-                        .render_output(renderer, &mut framebuffer, 0, &elements, clear)
-                        .unwrap();
+                    let result = {
+                        crate::profile_scope!("render_output");
+                        damage_tracker
+                            .render_output(renderer, &mut framebuffer, 0, &elements, clear)
+                            .unwrap()
+                    };
                     state
                         .metrics
                         .record_frame(render_start.elapsed().as_micros() as u64);
                     result.states
                 };
                 backend.submit(Some(&[damage])).unwrap();
+                // Tracy frame boundary (no-op without the feature).
+                crate::profiling::frame_mark();
 
                 // wp_presentation, best effort: the nested winit backend has no
                 // hardware vblank, so mark the frame presented at submit time

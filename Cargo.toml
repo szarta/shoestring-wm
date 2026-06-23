@@ -70,6 +70,12 @@ tty = [
     "smithay/renderer_multi",
     "dep:smithay-drm-extras",
 ]
+# Opt-in Tracy profiler integration. Off by default and compiled out entirely
+# when absent — the `profile_scope!` macro and `frame_mark()` become no-ops, so
+# there is zero cost (and no extra dependency) in a normal build. When on, a
+# `tracing-tracy` layer forwards our spans to a running Tracy capture for
+# frame-drop diagnosis. See src/profiling.rs and docs/running.rst.
+profile-with-tracy = ["dep:tracing-tracy"]
 
 [dependencies]
 shoestring-ipc = { path = "crates/shoestring-ipc" }
@@ -97,6 +103,11 @@ fontdue = "0.9"
 # linked unconditionally.
 png = "0.17"
 resvg = { version = "0.45", default-features = false }
+# Tracy profiler tracing layer; only linked behind the `profile-with-tracy`
+# feature. We depend on `tracing-tracy` alone and reach the Tracy client through
+# its `tracing_tracy::client` re-export, so the tracy-client version can never
+# skew from the layer's.
+tracing-tracy = { version = "0.11", optional = true }
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"

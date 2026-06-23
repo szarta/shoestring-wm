@@ -88,6 +88,11 @@ Environment
     If set, tracing output is appended to this file instead of stderr.
     Useful when running on a TTY.
 
+``SHOESTRING_WM_TRACY``
+    Filter for the Tracy profiler layer (same syntax as ``RUST_LOG``;
+    default ``info,shoestring_wm=trace``). Only effective in a build
+    compiled with the ``profile-with-tracy`` feature; ignored otherwise.
+
 ``WAYLAND_DISPLAY``
     Set by **shoestring-wm** for child processes before any client is
     spawned.

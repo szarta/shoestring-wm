@@ -14,7 +14,9 @@ use smithay::reexports::{
     calloop::{generic::Generic, EventLoop, Interest, LoopHandle, Mode, PostAction},
     wayland_server::Display,
 };
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 use shoestring_wm::state::ShoestringWm;
 use shoestring_wm::{backend, binds, import_systemd_env, metrics};
@@ -83,23 +85,37 @@ struct Cli {
 /// the TTY backend, where stderr scrolls past on the console.
 fn init_tracing() {
     let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    match std::env::var_os("SHOESTRING_WM_LOG") {
+    // The stderr/file log layer, carrying the usual env filter. Boxed so both
+    // the file and stderr arms have one type; the env filter rides as a
+    // per-layer filter so a profiling layer added below can keep its own.
+    let fmt_layer = match std::env::var_os("SHOESTRING_WM_LOG") {
         Some(path) => {
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
                 .expect("open SHOESTRING_WM_LOG path");
-            tracing_subscriber::fmt()
-                .with_env_filter(env)
+            tracing_subscriber::fmt::layer()
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(file))
-                .init();
+                .with_filter(env)
+                .boxed()
         }
-        None => {
-            tracing_subscriber::fmt().with_env_filter(env).init();
-        }
-    }
+        None => tracing_subscriber::fmt::layer().with_filter(env).boxed(),
+    };
+
+    let registry = tracing_subscriber::registry().with(fmt_layer);
+
+    // With `profile-with-tracy`, attach a Tracy layer with its own filter so
+    // Tracy captures the profile spans without the stderr log following them.
+    // Without the feature this whole block is compiled out (see profiling.rs).
+    #[cfg(feature = "profile-with-tracy")]
+    let registry = registry.with(
+        shoestring_wm::profiling::tracy_layer()
+            .with_filter(shoestring_wm::profiling::tracy_filter()),
+    );
+
+    registry.init();
 }
 
 fn main() -> Result<()> {
