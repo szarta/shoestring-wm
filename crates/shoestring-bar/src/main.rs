@@ -251,6 +251,11 @@ struct State {
     /// True while the pointer is over the open tray menu (vs the bar), so
     /// the button handler routes the click correctly.
     pointer_on_menu: bool,
+    /// Which menu level the pointer is physically inside (set on `Enter`,
+    /// cleared on `Leave`). Used for hover routing + hover-to-open submenus —
+    /// distinct from the menu's *active* level, which a just-opened child can
+    /// advance ahead of the pointer.
+    pointer_menu_level: Option<usize>,
     /// (x_start, width, tray item index) for each rendered tray icon from
     /// the last redraw, in logical coords. Hit-tested to open a menu.
     tray_icon_rects: Vec<(i32, i32, usize)>,
@@ -319,7 +324,12 @@ fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            // `.init()` bridges the `log` crate into tracing, so resvg/usvg's
+            // per-icon parser chatter (e.g. WARN "marker-* 'none'" on Adwaita
+            // symbolic icons) would otherwise spam the bar's stderr. Pin those
+            // crates to `error` in the default; an explicit RUST_LOG still wins.
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,usvg=error,resvg=error")),
         )
         .init();
 
@@ -536,6 +546,7 @@ fn run_session() -> Result<()> {
         touch: None,
         pointer_y: None,
         pointer_on_menu: false,
+        pointer_menu_level: None,
         tray_icon_rects: Vec::new(),
         control_rect: None,
         menu: None,
@@ -896,6 +907,35 @@ fn event_loop(
                 }
             }
         }
+        // 5. Live-update an open tray menu whose dbusmenu layout changed
+        //    (LayoutUpdated/ItemsPropertiesUpdated) — re-fetch its open levels in
+        //    place so toggles/labels update without a close+reopen.
+        let layout_dirty = tray
+            .as_mut()
+            .map(|t| t.take_layout_dirty())
+            .unwrap_or_default();
+        if !layout_dirty.is_empty() && !state.menu_is_control {
+            if let Some(ti) = state.menu.as_ref().map(|m| m.tray_idx) {
+                if layout_dirty.contains(&ti) {
+                    let fs = state.cfg.font_size;
+                    let n = state.menu.as_ref().map(|m| m.level_count()).unwrap_or(0);
+                    for d in 0..n {
+                        let path = state
+                            .menu
+                            .as_ref()
+                            .map(|m| m.path_to(d))
+                            .unwrap_or_default();
+                        let entries = tray.as_mut().and_then(|t| t.fetch_level(ti, &path));
+                        if let (Some(entries), Some(m)) = (entries, state.menu.as_mut()) {
+                            if m.refresh_level_rows(d, &entries, &state.font, fs) {
+                                state.menu_dirty = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if state.menu_dirty {
             state.menu_dirty = false;
             render_menu(state, qh);
@@ -2066,14 +2106,17 @@ impl Dispatch<WlPointer, ()> for State {
             } => {
                 state.pointer_x = Some(surface_x);
                 state.pointer_y = Some(surface_y);
-                // Which menu level (if any) did we enter? Make it active.
+                // Which menu level (if any) did we enter? Make it active + record
+                // it as the pointer's level for hover routing.
                 let lvl = state.menu.as_ref().and_then(|m| m.surface_level(&surface));
                 state.pointer_on_menu = lvl.is_some();
+                state.pointer_menu_level = lvl;
                 if let (Some(m), Some(i)) = (state.menu.as_mut(), lvl) {
                     m.set_active(Some(i));
                     if m.hover_at(i, surface_y) {
                         state.menu_dirty = true;
                     }
+                    menu_hover_follow(state, i);
                 }
             }
             wl_pointer::Event::Motion {
@@ -2083,14 +2126,14 @@ impl Dispatch<WlPointer, ()> for State {
             } => {
                 state.pointer_x = Some(surface_x);
                 state.pointer_y = Some(surface_y);
-                if state.pointer_on_menu {
-                    if let Some((m, i)) = state.menu.as_mut().and_then(|m| {
-                        let i = m.active()?;
-                        Some((m, i))
-                    }) {
-                        if m.hover_at(i, surface_y) {
-                            state.menu_dirty = true;
-                        }
+                if let Some(i) = state.pointer_menu_level {
+                    if state
+                        .menu
+                        .as_mut()
+                        .is_some_and(|m| m.hover_at(i, surface_y))
+                    {
+                        state.menu_dirty = true;
+                        menu_hover_follow(state, i);
                     }
                 }
             }
@@ -2098,6 +2141,7 @@ impl Dispatch<WlPointer, ()> for State {
                 state.pointer_x = None;
                 state.pointer_y = None;
                 state.pointer_on_menu = false;
+                state.pointer_menu_level = None;
             }
             wl_pointer::Event::Button {
                 button,
@@ -2279,6 +2323,36 @@ impl Dispatch<WlKeyboard, ()> for State {
         {
             if let Some(action) = state.menu.as_mut().map(|m| m.key(key)) {
                 apply_menu_action(state, action, qh);
+                state.menu_dirty = true;
+            }
+        }
+    }
+}
+
+/// Hover-to-open: after the hover in `level` changed, open the hovered submenu
+/// as a child (queued — the fetch needs the D-Bus conn in the loop), or collapse
+/// a now-stale child when the hover moved onto a leaf row of `level`. Applies to
+/// the tray menu; the control menu has no submenus so this is a no-op there.
+fn menu_hover_follow(state: &mut State, level: usize) {
+    let Some(menu) = state.menu.as_ref() else {
+        return;
+    };
+    match menu.hovered_submenu(level) {
+        Some(label) => {
+            // Hovering a submenu parent row: open it unless already open.
+            if !menu.child_open_for(level, &label) {
+                if let Some(m) = state.menu.as_mut() {
+                    m.truncate_to(level);
+                }
+                state.pending_menu_nav = Some((level, label));
+            }
+        }
+        None => {
+            // Hovering a leaf/separator: collapse any open child of this level.
+            if menu.has_deeper_than(level) {
+                if let Some(m) = state.menu.as_mut() {
+                    m.truncate_to(level);
+                }
                 state.menu_dirty = true;
             }
         }

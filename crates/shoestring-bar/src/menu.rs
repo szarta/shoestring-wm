@@ -328,6 +328,68 @@ impl Menu {
         }
     }
 
+    /// Number of open levels (root + any submenus).
+    pub fn level_count(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// For hover-to-open: the label of the enabled submenu row currently hovered
+    /// in `level`, or `None` for a leaf/disabled/separator/no hover.
+    pub fn hovered_submenu(&self, level: usize) -> Option<String> {
+        let l = self.levels.get(level)?;
+        match l.hover.and_then(|i| l.rows.get(i)).map(|r| &r.kind) {
+            Some(RowKind::Entry {
+                submenu: true,
+                enabled: true,
+                label,
+                ..
+            }) => Some(label.clone()),
+            _ => None,
+        }
+    }
+
+    /// Is a child of `level` already open showing submenu `label`?
+    pub fn child_open_for(&self, level: usize, label: &str) -> bool {
+        self.levels.get(level + 1).and_then(|l| l.label.as_deref()) == Some(label)
+    }
+
+    /// Is any level open deeper than `level`?
+    pub fn has_deeper_than(&self, level: usize) -> bool {
+        self.levels.len() > level + 1
+    }
+
+    /// Swap `level`'s rows for freshly-decoded `entries` — used for live
+    /// `LayoutUpdated` refresh while the menu is open. An `xdg_popup` can't
+    /// resize without a reposition, so this only applies when the recomputed
+    /// size is unchanged (toggle-state / enabled / label edits); a size change
+    /// (items added/removed) is left to correct itself on the next open.
+    /// Returns true when applied (→ re-render).
+    pub fn refresh_level_rows(
+        &mut self,
+        level: usize,
+        entries: &[MenuNode],
+        font: &Font,
+        font_size: f32,
+    ) -> bool {
+        let Some(l) = self.levels.get_mut(level) else {
+            return false;
+        };
+        let mut min_w = 0;
+        let (rows, want_size) = compute_layout(entries, font, font_size, &mut min_w);
+        if want_size != l.want_size {
+            return false;
+        }
+        l.rows = rows;
+        // Keep the hover on a valid, selectable row.
+        let keep = l
+            .hover
+            .is_some_and(|h| l.rows.get(h).is_some_and(|r| row_selectable(&r.kind)));
+        if !keep {
+            l.hover = first_selectable_in(&l.rows);
+        }
+        true
+    }
+
     /// Resolve the hovered row in the active level to an [`Action`].
     pub fn activate_active(&self) -> Action {
         let Some(l) = self.active.and_then(|i| self.levels.get(i)) else {

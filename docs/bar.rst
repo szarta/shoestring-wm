@@ -2,11 +2,12 @@ shoestring-bar
 ==============
 
 shoestring-bar is the status bar that ships alongside shoestring-wm. It
-is a pure ``wayland-client`` program (no Smithay, no GTK, no system
-bus): it uses ``zwlr_layer_shell_v1`` to attach itself to the bottom
-edge of an output, ``ext-foreign-toplevel-list-v1`` to track the open
-windows, and the shoestring-wm IPC stream for the active workspace and
-the currently focused window.
+is a ``wayland-client`` program (no Smithay, no GTK toolkit): it uses
+``zwlr_layer_shell_v1`` to attach itself to the bottom edge of an
+output, ``ext-foreign-toplevel-list-v1`` to track the open windows, and
+the shoestring-wm IPC stream for the active workspace and the currently
+focused window. When a session D-Bus is present it additionally hosts a
+:ref:`system tray <bar-system-tray>`; without one it runs trayless.
 
 The bar lives in the shoestring-wm workspace at
 ``crates/shoestring-bar/`` (it used to be a standalone sibling repo;
@@ -146,6 +147,34 @@ below ``critical_threshold`` it paints red. Both thresholds are only
 applied while discharging — a charging or full battery stays in the
 normal foreground color even at low capacity.
 
+.. _bar-system-tray:
+
+System tray
+-----------
+
+When a session D-Bus is reachable, the bar becomes a
+``org.kde.StatusNotifierWatcher`` + host and shows tray icons on the
+right, just left of the clock cluster. If another process already owns
+the watcher, the bar bows out and runs trayless — it never fights an
+existing tray. There is no configuration; the tray appears whenever
+items register.
+
+Icons resolve in two ways:
+
+- **Themed name** (``IconName``): appindicator/ayatana apps (nm-applet,
+  blueman) advertise a freedesktop icon *name*, resolved against the
+  active icon theme (PNG or SVG) — crisp and theme-following.
+- **Raw pixmap** (``IconPixmap``): KDE/Qt apps that ship ARGB32 pixmaps
+  instead of a name are blitted directly. The name path wins when an
+  item offers both.
+
+Left-clicking an item opens its ``com.canonical.dbusmenu`` context menu
+as a cascade of popups; items without a menu get an ``Activate`` call
+(the StatusNotifier left-click default) instead. In the menu, hovering a
+row with a submenu arrow opens it, and the menu live-updates while open
+when the application changes its layout. Keyboard navigation (arrows /
+Enter / Esc) works alongside the pointer.
+
 Limitations (v1)
 ----------------
 
@@ -154,4 +183,3 @@ Limitations (v1)
 - Only horizontal bars are supported. Vertical (left/right) bars are
   not planned.
 - Only one monitor is rendered to. Multi-output is on the roadmap.
-- There is no system-tray support and no plan to add one.

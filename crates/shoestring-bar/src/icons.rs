@@ -187,12 +187,58 @@ fn render_png(bytes: &[u8], size: u16) -> Option<tiny_skia::Pixmap> {
         premul[i * 4 + 3] = a as u8;
     }
     let src_pixmap = tiny_skia::Pixmap::from_vec(premul, tiny_skia::IntSize::from_wh(w, h)?)?;
+    scale_pixmap(src_pixmap, size)
+}
 
+/// Decode a StatusNotifierItem `IconPixmap` entry — **ARGB32 in network byte
+/// order** (big-endian: each pixel is `[A, R, G, B]`, *straight* / un-premultiplied
+/// alpha, as Qt's `QImage::Format_ARGB32` serialises it) at `width`×`height` —
+/// into a premultiplied BGRA [`Icon`] scaled to `size`. This is the fast path
+/// for KDE/Qt tray items, which ship pixmaps instead of a themeable `IconName`.
+pub fn decode_argb32(width: i32, height: i32, argb_be: &[u8], size: u16) -> Option<Icon> {
+    let w: u32 = width.try_into().ok()?;
+    let h: u32 = height.try_into().ok()?;
+    let px = (w as usize).checked_mul(h as usize)?;
+    if w == 0 || h == 0 || argb_be.len() < px * 4 {
+        return None;
+    }
+    // ARGB32(BE, straight) -> premultiplied RGBA (tiny-skia's in-memory layout).
+    let mut premul = vec![0u8; px * 4];
+    for i in 0..px {
+        let a = argb_be[i * 4] as u16;
+        let r = argb_be[i * 4 + 1] as u16;
+        let g = argb_be[i * 4 + 2] as u16;
+        let b = argb_be[i * 4 + 3] as u16;
+        premul[i * 4] = ((r * a + 127) / 255) as u8;
+        premul[i * 4 + 1] = ((g * a + 127) / 255) as u8;
+        premul[i * 4 + 2] = ((b * a + 127) / 255) as u8;
+        premul[i * 4 + 3] = a as u8;
+    }
+    let src = tiny_skia::Pixmap::from_vec(premul, tiny_skia::IntSize::from_wh(w, h)?)?;
+    Some(pixmap_to_icon(scale_pixmap(src, size)?))
+}
+
+/// Pick the best `IconPixmap` entry for a `target`-px slot: the smallest entry
+/// at least `target` wide (downscale a crisp source), else the largest entry
+/// available (upscale the closest we have). `None` if the list is empty.
+pub fn best_pixmap(pixmaps: &[(i32, i32, Vec<u8>)], target: u16) -> Option<&(i32, i32, Vec<u8>)> {
+    let t = target as i32;
+    pixmaps
+        .iter()
+        .filter(|(w, _, _)| *w >= t)
+        .min_by_key(|(w, _, _)| *w)
+        .or_else(|| pixmaps.iter().max_by_key(|(w, _, _)| *w))
+}
+
+/// Scale a premultiplied-RGBA `src` into a square `size`×`size` target,
+/// aspect-preserved and centered (bilinear). A `src` already at the target size
+/// is returned untouched.
+fn scale_pixmap(src: tiny_skia::Pixmap, size: u16) -> Option<tiny_skia::Pixmap> {
+    let (w, h) = (src.width(), src.height());
     let target = size.max(1) as u32;
     if w == target && h == target {
-        return Some(src_pixmap);
+        return Some(src);
     }
-    // Scale into a square target, aspect-preserved + centered, bilinear.
     let mut dst = tiny_skia::Pixmap::new(target, target)?;
     let scale = (target as f32 / w as f32).min(target as f32 / h as f32);
     let dx = (target as f32 - w as f32 * scale) / 2.0;
@@ -204,7 +250,7 @@ fn render_png(bytes: &[u8], size: u16) -> Option<tiny_skia::Pixmap> {
     dst.draw_pixmap(
         0,
         0,
-        src_pixmap.as_ref(),
+        src.as_ref(),
         &paint,
         tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy),
         None,
@@ -486,6 +532,55 @@ mod tests {
         let c = ((4 * 8 + 4) * 4) as usize;
         assert_eq!(icon.bgra[c + 3], 255, "centre opaque");
         assert!(icon.bgra[c] > 200, "centre blue");
+    }
+
+    /// IconPixmap path: ARGB32(BE, straight) → premultiplied BGRA at target.
+    #[test]
+    fn decode_argb32_premultiplies_and_scales() {
+        // 2×2, opaque red. ARGB32 big-endian = [A,R,G,B] = [255,255,0,0] per px.
+        let argb: Vec<u8> = std::iter::repeat_n([255u8, 255, 0, 0], 4)
+            .flatten()
+            .collect();
+        let icon = decode_argb32(2, 2, &argb, 8).expect("argb decodes");
+        assert_eq!((icon.width, icon.height), (8, 8));
+        assert_eq!(icon.bgra.len(), 8 * 8 * 4);
+        // Opaque red in premultiplied BGRA is [0,0,255,255]; centre is solid.
+        let c = ((4 * 8 + 4) * 4) as usize;
+        assert_eq!(icon.bgra[c + 3], 255, "centre opaque");
+        assert!(icon.bgra[c + 2] > 200, "centre red");
+        assert!(icon.bgra[c] < 40 && icon.bgra[c + 1] < 40, "no blue/green");
+    }
+
+    /// Straight (un-premultiplied) alpha must be folded in: a half-alpha white
+    /// pixel becomes ~half-grey premultiplied, not full white.
+    #[test]
+    fn decode_argb32_folds_straight_alpha() {
+        // 1×1, white at 50% alpha: ARGB32 BE = [128,255,255,255].
+        let argb = [128u8, 255, 255, 255];
+        let icon = decode_argb32(1, 1, &argb, 1).expect("argb decodes");
+        // premul channel = round(255*128/255) = 128.
+        assert_eq!(icon.bgra[3], 128, "alpha preserved");
+        assert_eq!(icon.bgra[0], 128, "blue premultiplied");
+        assert_eq!(icon.bgra[2], 128, "red premultiplied");
+    }
+
+    #[test]
+    fn decode_argb32_rejects_short_buffer() {
+        // Claims 4×4 but only carries one pixel.
+        assert!(decode_argb32(4, 4, &[0, 0, 0, 0], 8).is_none());
+        assert!(decode_argb32(0, 0, &[], 8).is_none());
+    }
+
+    /// Best-pixmap selection: prefer the smallest entry ≥ target, else largest.
+    #[test]
+    fn best_pixmap_prefers_smallest_at_least_target() {
+        let pm = |w: i32| (w, w, vec![0u8; (w * w * 4) as usize]);
+        let set = vec![pm(16), pm(22), pm(32), pm(48)];
+        assert_eq!(best_pixmap(&set, 24).map(|p| p.0), Some(32));
+        assert_eq!(best_pixmap(&set, 16).map(|p| p.0), Some(16));
+        // Target larger than anything available → upscale the largest.
+        assert_eq!(best_pixmap(&set, 64).map(|p| p.0), Some(48));
+        assert_eq!(best_pixmap(&[], 24), None);
     }
 
     /// Size ranking: a Fixed dir matching the target beats a far one.

@@ -80,6 +80,10 @@ struct Item {
     icon_name: String,
     /// Item-private icon dirs from `IconThemePath`, searched first.
     theme_dirs: Vec<std::path::PathBuf>,
+    /// `IconPixmap` entries `(w, h, ARGB32-BE bytes)`, fetched only when the item
+    /// gives no `IconName` (KDE/Qt items ship pixmaps). Blitted directly via
+    /// [`crate::icons::decode_argb32`] — no theme lookup.
+    icon_pixmaps: Vec<(i32, i32, Vec<u8>)>,
     /// `com.canonical.dbusmenu` object path from the item's `Menu` property,
     /// if it exposes one. Drives the click-to-open context menu.
     menu_path: Option<String>,
@@ -97,6 +101,11 @@ pub struct Tray {
     /// Set when the item set / an icon changed; [`Tray::dispatch`] returns and
     /// clears it so the bar knows to repaint.
     dirty: bool,
+    /// Item indices whose `com.canonical.dbusmenu` layout changed since the last
+    /// drain (from `LayoutUpdated`/`ItemsPropertiesUpdated`). The bar re-fetches
+    /// an *open* menu for these so it live-updates. Drained by
+    /// [`Tray::take_layout_dirty`].
+    layout_dirty: Vec<usize>,
 }
 
 impl Tray {
@@ -134,6 +143,8 @@ impl Tray {
         // NameOwnerChanged so we can drop an item when its app exits.
         for rule in [
             format!("type='signal',interface='{ITEM_IFACE}'"),
+            // dbusmenu layout/property changes drive live-update of an open menu.
+            format!("type='signal',interface='{DBUSMENU_IFACE}'"),
             "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged'".to_string(),
         ] {
             if send(&mut rpc, &mut standard_messages::add_match(&rule)).is_err() {
@@ -154,6 +165,7 @@ impl Tray {
             items: Vec::new(),
             theme: crate::icons::IconTheme::detect(),
             dirty: false,
+            layout_dirty: Vec::new(),
         })
     }
 
@@ -218,10 +230,30 @@ impl Tray {
                     "NewStatus" => self.dirty = true,
                     _ => {}
                 }
+                continue;
+            }
+            // The item's context menu changed shape/state → flag it so an open
+            // menu re-fetches (the menu owner is the same bus name as the item).
+            if iface == DBUSMENU_IFACE
+                && matches!(member, "LayoutUpdated" | "ItemsPropertiesUpdated")
+            {
+                let sender = sig.dynheader.sender.clone().unwrap_or_default();
+                if let Some(idx) = self.items.iter().position(|it| it.service == sender) {
+                    if !self.layout_dirty.contains(&idx) {
+                        self.layout_dirty.push(idx);
+                    }
+                }
             }
         }
 
         std::mem::take(&mut self.dirty)
+    }
+
+    /// Drain the set of item indices whose dbusmenu layout changed since the
+    /// last call (see [`Tray::dispatch`]). The bar re-fetches an open menu for
+    /// these so it live-updates instead of waiting for the next open.
+    pub fn take_layout_dirty(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.layout_dirty)
     }
 
     fn handle_call(&mut self, call: &MarshalledMessage) {
@@ -294,12 +326,24 @@ impl Tray {
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from)
             .collect();
+        // KDE/Qt items leave IconName empty and ship raw ARGB32 pixmaps instead;
+        // only pay for that (potentially large) fetch when there's no name.
+        let icon_pixmaps = if icon_name.is_empty() {
+            self.item_get_pixmaps(&service, &path, "IconPixmap")
+        } else {
+            Vec::new()
+        };
         // The `Menu` property is a D-Bus object path (sig 'o', not 's'); a
         // missing/empty/"/" value means the item has no context menu.
         let menu_path = self
             .item_get_objpath(&service, &path, "Menu")
             .filter(|p| !p.is_empty() && p != "/");
-        tracing::info!(%service, %id, %icon_name, has_menu = menu_path.is_some(), "tray: item registered");
+        tracing::info!(
+            %service, %id, %icon_name,
+            has_pixmap = !icon_pixmaps.is_empty(),
+            has_menu = menu_path.is_some(),
+            "tray: item registered"
+        );
 
         // Replace any prior registration from the same service/path.
         self.items
@@ -309,6 +353,7 @@ impl Tray {
             path,
             icon_name,
             theme_dirs,
+            icon_pixmaps,
             menu_path,
             icon: None,
             icon_px: 0,
@@ -321,16 +366,23 @@ impl Tray {
     pub fn ensure_icons(&mut self, px: u16) {
         let theme = &self.theme;
         for item in &mut self.items {
-            if item.icon_px == px && (item.icon.is_some() || item.icon_name.is_empty()) {
+            let has_source = !item.icon_name.is_empty() || !item.icon_pixmaps.is_empty();
+            if item.icon_px == px && (item.icon.is_some() || !has_source) {
                 continue;
             }
-            item.icon = if item.icon_name.is_empty() {
-                None
-            } else {
-                theme
-                    .lookup(&item.icon_name, px, &item.theme_dirs)
-                    .and_then(|p| crate::icons::decode(&p, px))
-            };
+            // Prefer a themeable IconName (crisp, follows the theme); fall back to
+            // the item's raw ARGB32 pixmap when it gave no name (KDE/Qt).
+            let from_name = (!item.icon_name.is_empty())
+                .then(|| {
+                    theme
+                        .lookup(&item.icon_name, px, &item.theme_dirs)
+                        .and_then(|p| crate::icons::decode(&p, px))
+                })
+                .flatten();
+            item.icon = from_name.or_else(|| {
+                crate::icons::best_pixmap(&item.icon_pixmaps, px)
+                    .and_then(|(w, h, b)| crate::icons::decode_argb32(*w, *h, b, px))
+            });
             item.icon_px = px;
         }
     }
@@ -546,7 +598,14 @@ impl Tray {
         let name = self
             .item_get_string(&svc, &path, "IconName")
             .unwrap_or_default();
+        // Mirror registration: pixmaps are the fallback only when there's no name.
+        let pixmaps = if name.is_empty() {
+            self.item_get_pixmaps(&svc, &path, "IconPixmap")
+        } else {
+            Vec::new()
+        };
         self.items[i].icon_name = name;
+        self.items[i].icon_pixmaps = pixmaps;
         self.items[i].icon = None;
         self.items[i].icon_px = 0;
         self.dirty = true;
@@ -637,6 +696,48 @@ impl Tray {
             .ok()
             .and_then(|v| v.get::<rustbus::wire::ObjectPath<String>>().ok())
             .map(|op| op.as_ref().to_string())
+    }
+
+    /// Fetch the item's `IconPixmap` property — signature `a(iiay)`, a list of
+    /// `(width, height, ARGB32-BE bytes)`. Empty `Vec` if absent/typed wrong.
+    fn item_get_pixmaps(
+        &mut self,
+        service: &str,
+        path: &str,
+        prop: &str,
+    ) -> Vec<(i32, i32, Vec<u8>)> {
+        let mut call = MessageBuilder::new()
+            .call("Get")
+            .at(service.to_string())
+            .on(path.to_string())
+            .with_interface(PROPS_IFACE)
+            .build();
+        if call.body.push_param(ITEM_IFACE).is_err() || call.body.push_param(prop).is_err() {
+            return Vec::new();
+        }
+        let Some(serial) = self
+            .rpc
+            .send_message(&mut call)
+            .ok()
+            .and_then(|c| c.write_all().ok())
+        else {
+            return Vec::new();
+        };
+        let Ok(resp) = self
+            .rpc
+            .wait_response(serial, Timeout::Duration(Duration::from_millis(500)))
+        else {
+            return Vec::new();
+        };
+        if resp.typ == MessageType::Error {
+            return Vec::new();
+        }
+        resp.body
+            .parser()
+            .get::<Variant>()
+            .ok()
+            .and_then(|v| v.get::<Vec<(i32, i32, Vec<u8>)>>().ok())
+            .unwrap_or_default()
     }
 
     fn send(&mut self, mut msg: MarshalledMessage) -> Result<(), ()> {
