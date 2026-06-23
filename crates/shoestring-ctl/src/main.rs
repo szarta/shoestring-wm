@@ -257,6 +257,34 @@ enum Command {
         /// New display name; empty string clears the override.
         name: String,
     },
+    /// Move a window to a workspace by its `ext-foreign-toplevel-list-v1`
+    /// identifier. Unlike the `move-window-to-workspace` action (focused
+    /// window only), this targets an arbitrary window and leaves the active
+    /// workspace and focus untouched. INDEX is 1-based.
+    MoveWindow {
+        /// FT identifier of the window to move.
+        id: String,
+        /// 1-based destination workspace.
+        index: u8,
+    },
+    /// Minimize or restore a window by its `ext-foreign-toplevel-list-v1`
+    /// identifier, regardless of which window has focus.
+    SetMinimized {
+        /// FT identifier of the window.
+        id: String,
+        /// `true` to hide, `false` to restore.
+        #[arg(action = clap::ArgAction::Set)]
+        minimized: bool,
+    },
+    /// Maximize or unmaximize a window by its `ext-foreign-toplevel-list-v1`
+    /// identifier, regardless of which window has focus.
+    SetMaximized {
+        /// FT identifier of the window.
+        id: String,
+        /// `true` to fill the work area, `false` to restore the floating rect.
+        #[arg(action = clap::ArgAction::Set)]
+        maximized: bool,
+    },
     /// Capture a PNG screenshot via the WM and print the resulting
     /// path. Requires the automation gate to be on. Path is
     /// auto-generated as `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`.
@@ -432,6 +460,9 @@ fn main() -> Result<()> {
             Request::SetWindowAlwaysOnTop { id, always_on_top }
         }
         Command::SetName { id, name } => Request::SetWindowName { id, name },
+        Command::MoveWindow { id, index } => Request::MoveWindowToWorkspace { id, index },
+        Command::SetMinimized { id, minimized } => Request::SetWindowMinimized { id, minimized },
+        Command::SetMaximized { id, maximized } => Request::SetWindowMaximized { id, maximized },
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,
         },

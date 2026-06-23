@@ -659,6 +659,39 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::MoveWindowToWorkspace {
+                id: window_id,
+                index,
+            } => {
+                let resp = match state.move_window_to_workspace_by_id(&window_id, index) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::SetWindowMinimized {
+                id: window_id,
+                minimized,
+            } => {
+                let resp = match state.set_window_minimized_by_id(&window_id, minimized) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::SetWindowMaximized {
+                id: window_id,
+                maximized,
+            } => {
+                let resp = match state.set_window_maximized_by_id(&window_id, maximized) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::InjectClick { button, x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());

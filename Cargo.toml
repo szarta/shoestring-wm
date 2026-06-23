@@ -6,6 +6,7 @@ members = [
     "crates/shoestring-bar",
     "crates/shoestring-confirm",
     "crates/shoestring-ctl",
+    "crates/shoestring-tasks",
     "crates/shoestring-kill",
     "crates/shoestring-lock",
     "crates/shoestring-menu",
@@ -161,12 +162,14 @@ recommends = "xwayland, xdg-desktop-portal, pipewire, wireplumber"
 extended-description = """\
 A lightweight Rust Wayland window manager built on Smithay, shipped with \
 its companion tools: a status bar, dmenu-style launcher, notification \
-daemon, screen locker, screenshot/region pickers, and an IPC control \
-client. Pick "shoestring-wm" from your display manager's session menu."""
+daemon, screen locker, screenshot/region pickers, an IPC control client, \
+and a console (TUI) window/workspace manager. Pick "shoestring-wm" from \
+your display manager's session menu."""
 assets = [
     ["target/release/shoestring-wm",         "usr/bin/", "755"],
     ["target/release/shoestring-bar",        "usr/bin/", "755"],
     ["target/release/shoestring-ctl",        "usr/bin/", "755"],
+    ["target/release/shoestring-tasks",      "usr/bin/", "755"],
     ["target/release/shoestring-kill",       "usr/bin/", "755"],
     ["target/release/shoestring-notify",     "usr/bin/", "755"],
     ["target/release/shoestring-lock",       "usr/bin/", "755"],
@@ -192,6 +195,7 @@ assets = [
     ["docs/_build/man/shoestring-bar.1",     "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-menu.1",    "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-ctl.1",     "usr/share/man/man1/", "644"],
+    ["docs/_build/man/shoestring-tasks.1",   "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-confirm.1",    "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-kill.1",       "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-lock.1",       "usr/share/man/man1/", "644"],
@@ -225,6 +229,7 @@ assets = [
     { source = "target/release/shoestring-wm",         dest = "/usr/bin/shoestring-wm",         mode = "0755" },
     { source = "target/release/shoestring-bar",        dest = "/usr/bin/shoestring-bar",        mode = "0755" },
     { source = "target/release/shoestring-ctl",        dest = "/usr/bin/shoestring-ctl",        mode = "0755" },
+    { source = "target/release/shoestring-tasks",      dest = "/usr/bin/shoestring-tasks",      mode = "0755" },
     { source = "target/release/shoestring-kill",       dest = "/usr/bin/shoestring-kill",       mode = "0755" },
     { source = "target/release/shoestring-notify",     dest = "/usr/bin/shoestring-notify",     mode = "0755" },
     { source = "target/release/shoestring-lock",       dest = "/usr/bin/shoestring-lock",       mode = "0755" },
@@ -247,6 +252,7 @@ assets = [
     { source = "docs/_build/man/shoestring-bar.1",     dest = "/usr/share/man/man1/shoestring-bar.1",  mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-menu.1",    dest = "/usr/share/man/man1/shoestring-menu.1", mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-ctl.1",     dest = "/usr/share/man/man1/shoestring-ctl.1",  mode = "0644", doc = true },
+    { source = "docs/_build/man/shoestring-tasks.1",   dest = "/usr/share/man/man1/shoestring-tasks.1", mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-confirm.1",    dest = "/usr/share/man/man1/shoestring-confirm.1",    mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-kill.1",       dest = "/usr/share/man/man1/shoestring-kill.1",       mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-lock.1",       dest = "/usr/share/man/man1/shoestring-lock.1",       mode = "0644", doc = true },

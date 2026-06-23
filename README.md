@@ -20,6 +20,7 @@ spawns. As of the monorepo migration, bar/menu/notify live in
 | `shoestring-menu` | dmenu-style launcher for commands and bookmarks. |
 | `shoestring-notify` | `org.freedesktop.Notifications` daemon (layer-shell pop-ups). |
 | `shoestring-ctl` | Command-line IPC client (query state, fire actions, subscribe to events). |
+| `shoestring-tasks` | Console (TUI) window/workspace manager — focus, move, rename, minimize/maximize, kill, screenshot any window over IPC. |
 | `shoestring-lock` | Session locker (`ext-session-lock-v1`), PAM-authenticated, maze screensaver. |
 | `shoestring-screenshot` | PNG capture via wlr-screencopy; optional region via `shoestring-region`. |
 | `shoestring-region` | Slurp-equivalent rectangle picker. |

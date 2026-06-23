@@ -276,6 +276,29 @@ Each request is a JSON object with a ``type`` discriminator:
        it closes — it does not persist. Setting or clearing it broadcasts
        a ``window_title_changed`` event with the new effective title.
        Returns ``error`` if no window matches. Not gated by automation.
+   * - ``{"type": "move_window_to_workspace", "id": "...", "index": <1-based>}``
+     - Move the window with the given identifier to workspace ``index``
+       (1-based). The per-id, focus-independent counterpart to the
+       ``move-window-to-workspace`` *action* (which only moves the focused
+       window): this targets an arbitrary window and does **not** switch the
+       active workspace or steal focus, so a TUI or taskbar can shuffle a
+       background window without disturbing the user's view. Moving a window
+       *onto* the active workspace maps it into view; moving it *off* unmaps it
+       (refocusing the next window if the moved one held focus). A no-op when
+       the window is already on ``index``. Broadcasts a
+       ``window_moved_to_workspace`` event. Returns ``error`` if no window
+       matches, ``index`` is out of range, or the window is sticky (un-stick it
+       first) or minimized (restore it first). Not gated by automation.
+   * - ``{"type": "set_window_minimized", "id": "...", "minimized": <bool>}``
+     - Minimize (hide) or restore the window with the given identifier,
+       regardless of which window has focus — the per-id counterpart to the
+       ``minimize`` action (which toggles the *focused* window). Idempotent.
+       Returns ``error`` if no window matches. Not gated by automation.
+   * - ``{"type": "set_window_maximized", "id": "...", "maximized": <bool>}``
+     - Maximize (fill the work area) or restore the saved floating rectangle of
+       the window with the given identifier, regardless of focus — the per-id
+       counterpart to the ``maximize`` action. Idempotent. Returns ``error`` if
+       no window matches. Not gated by automation.
    * - ``{"type": "find_windows", "title": "...", "app_id": "..."}``
      - List every mapped window whose ``title`` and ``app_id`` match
        the supplied regular expressions. Each filter is independent and
@@ -956,6 +979,21 @@ version (``shoestring-ctl --version``). Per the :ref:`stability policy
 <ipc-stability>` every entry below is an *additive* change — nothing has
 been renamed, removed, or repurposed since 0.1.0 — so a client written
 against any prior version still works against a newer WM.
+
+0.7.0
+~~~~~
+
+- ``move_window_to_workspace`` request (``{id, index}``): move an arbitrary
+  window to a workspace by FT id, focus-independent — does not switch the
+  active workspace or steal focus. The per-id counterpart to the focused-only
+  ``move-window-to-workspace`` action. Reuses the existing
+  ``window_moved_to_workspace`` event.
+- ``set_window_minimized`` / ``set_window_maximized`` requests
+  (``{id, <bool>}``): minimize/restore and maximize/unmaximize an arbitrary
+  window by FT id, regardless of focus. Per-id counterparts to the focused-only
+  ``minimize`` / ``maximize`` actions.
+- These back ``shoestring-tasks``, the new console (TUI) window/workspace
+  manager — see :manpage:`shoestring-tasks(1)`.
 
 0.5.0
 ~~~~~

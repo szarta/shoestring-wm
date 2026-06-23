@@ -326,6 +326,128 @@ impl ShoestringWm {
         Ok(())
     }
 
+    /// Minimize or restore the toplevel whose FT identifier matches `id`,
+    /// regardless of focus. The per-id IPC entry point behind
+    /// `set_window_minimized`; reuses the same [`Self::minimize_window`] /
+    /// [`Self::unminimize_window`] helpers the foreign-toplevel-management
+    /// taskbar path uses, both of which are idempotent.
+    pub fn set_window_minimized_by_id(&mut self, id: &str, minimized: bool) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        if minimized {
+            self.minimize_window(&window);
+        } else {
+            self.unminimize_window(&window);
+        }
+        Ok(())
+    }
+
+    /// Maximize or unmaximize the toplevel whose FT identifier matches `id`,
+    /// regardless of focus. The per-id IPC entry point behind
+    /// `set_window_maximized`; reuses the idempotent [`Self::maximize_window`] /
+    /// [`Self::unmaximize_window`] helpers shared with the xdg `set_maximized`
+    /// request.
+    pub fn set_window_maximized_by_id(&mut self, id: &str, maximized: bool) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        if maximized {
+            self.maximize_window(&window);
+        } else {
+            self.unmaximize_window(&window);
+        }
+        Ok(())
+    }
+
+    /// Move the toplevel whose FT identifier matches `id` to the 1-based
+    /// workspace `index`, without switching the active workspace or stealing
+    /// focus. The per-id, focus-independent IPC entry point behind
+    /// `move_window_to_workspace` — contrast [`Self::move_window_to_workspace`]
+    /// (the keybind/window-rule path), which assumes the moved window lives on
+    /// the active workspace and skips a `target == active` request. Here the
+    /// window can live anywhere, so we map it *in* when the target is the
+    /// active workspace and unmap it when the move takes it off-screen.
+    pub fn move_window_to_workspace_by_id(&mut self, id: &str, index: u8) -> Result<(), String> {
+        let window = self.window_by_ft_id(id)?;
+        let target = self.workspaces.from_one_based(index).ok_or_else(|| {
+            format!(
+                "workspace index {index} out of range (1..={})",
+                self.workspaces.count()
+            )
+        })?;
+        if self.is_sticky(&window) {
+            return Err(
+                "window is sticky (shown on all workspaces); un-stick it before moving".into(),
+            );
+        }
+        if self.layout.is_minimized(&window) {
+            return Err("window is minimized; restore it before moving".into());
+        }
+        let current = self
+            .workspaces
+            .windows_on_any()
+            .find(|(w, _)| w == &window)
+            .map(|(_, ws)| ws)
+            .ok_or_else(|| format!("window {id:?} has no workspace assignment"))?;
+        if current == target {
+            return Ok(());
+        }
+        let active = self.workspaces.active();
+        let was_focused = self.focused_window().as_ref() == Some(&window);
+
+        // Snapshot the on-screen position before any unmap so the window
+        // re-maps at the same spot when its workspace next becomes active.
+        if let Some(loc) = self.space.element_location(&window) {
+            self.workspaces.record_location(&window, loc);
+        }
+
+        self.workspaces.reassign(&window, target);
+        self.workspaces.record_focus(target, &window);
+        self.workspaces.remove_from_active_focus(current, &window);
+
+        if target == active {
+            // Pulled onto the visible workspace — map it in (unless a sticky
+            // window was somehow already mapped, which can't happen here since
+            // sticky windows are rejected above).
+            if !self.space.elements().any(|el| el == &window) {
+                let loc = self
+                    .workspaces
+                    .saved_location(&window)
+                    .unwrap_or_else(|| (0, 0).into());
+                self.space.map_element(window.clone(), loc, false);
+                crate::window_ext::sync_x11_location(&window, loc);
+            }
+        } else if current == active {
+            // Pushed off the visible workspace — unmap it.
+            self.space.unmap_elem(&window);
+        }
+        // (both non-active → nothing mapped, nothing to do)
+
+        if let Some(handle) = self.foreign_toplevels.get(&window) {
+            self.emit_ipc(shoestring_ipc::Event::WindowMovedToWorkspace {
+                id: handle.identifier(),
+                workspace: target.one_based(),
+            });
+        }
+
+        // If we just unmapped the focused window, hand focus to the active
+        // workspace's next MRU-top mapped window (mirrors the keybind path).
+        if was_focused && target != active {
+            let pick = loop {
+                let Some(w) = self.workspaces.last_focused(active) else {
+                    break None;
+                };
+                if self.space.elements().any(|el| el == &w) {
+                    break Some(w);
+                }
+                self.workspaces.discard_top_focus(active);
+            };
+            match pick {
+                Some(w) => self.focus_window(&w),
+                None => self.clear_focus(),
+            }
+        }
+        self.refresh_idle_inhibit();
+        Ok(())
+    }
+
     /// Look up a tracked window by its `ext-foreign-toplevel-list-v1`
     /// identifier. Shared by the by-id IPC entry points.
     fn window_by_ft_id(&self, id: &str) -> Result<Window, String> {

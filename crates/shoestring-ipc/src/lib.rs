@@ -307,6 +307,41 @@ pub enum Request {
     /// window matches. Not gated by automation (a benign display tweak,
     /// like [`Request::FocusWindow`]).
     SetWindowName { id: String, name: String },
+    /// Move the toplevel matching `id` (an `ext-foreign-toplevel-list-v1`
+    /// identifier, as carried by [`WindowSummary::id`]) to workspace `index`
+    /// (1-based). The per-id, focus-independent counterpart to the
+    /// `move-window-to-workspace` [`Request::DispatchAction`] action, which
+    /// only ever moves the *focused* window: this targets an arbitrary window
+    /// and does **not** switch the active workspace or steal focus, so a TUI /
+    /// taskbar can shuffle a background window without disturbing the user's
+    /// view.
+    ///
+    /// Moving a window *onto* the active workspace maps it into view; moving it
+    /// *off* the active workspace unmaps it (refocusing the next window if the
+    /// moved one held focus). A no-op when the window is already on `index`.
+    /// Broadcasts [`Event::WindowMovedToWorkspace`]. Reply is [`Response::Ok`]
+    /// on success, [`Response::Error`] if no window matches, `index` is out of
+    /// range, or the window is sticky (shown on all workspaces — un-stick it
+    /// first) or minimized (restore it first). Not gated by automation (a
+    /// benign window-management tweak, like [`Request::FocusWindow`]).
+    MoveWindowToWorkspace { id: String, index: u8 },
+    /// Minimize (hide) or restore the toplevel matching `id`. The per-id,
+    /// focus-independent counterpart to the `minimize` [`Request::DispatchAction`]
+    /// action (which toggles the focused window): `minimized: true` hides the
+    /// window regardless of focus, `false` restores a hidden one to the active
+    /// workspace. Idempotent — minimizing an already-minimized window (or
+    /// restoring a visible one) is a no-op. Reply is [`Response::Ok`] on
+    /// success, [`Response::Error`] if no window matches. Not gated by
+    /// automation (a benign window-management tweak, like [`Request::FocusWindow`]).
+    SetWindowMinimized { id: String, minimized: bool },
+    /// Maximize or unmaximize the toplevel matching `id`. The per-id,
+    /// focus-independent counterpart to the `maximize` [`Request::DispatchAction`]
+    /// action (which toggles the focused window): `maximized: true` fills the
+    /// work area, `false` restores the saved floating rectangle. Idempotent.
+    /// Reply is [`Response::Ok`] on success, [`Response::Error`] if no window
+    /// matches. Not gated by automation (a benign window-management tweak, like
+    /// [`Request::FocusWindow`]).
+    SetWindowMaximized { id: String, maximized: bool },
     /// Run a named bind `Action` server-side, exactly as if a keybind
     /// had fired. Unlike [`Request::InjectKey`] this does *not* route
     /// through the focused surface — Super+Shift+Q won't fire because
@@ -1204,6 +1239,42 @@ mod tests {
                 mic_muted: false,
                 camera_active: true
             }
+        ));
+    }
+
+    #[test]
+    fn per_id_window_action_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Request::MoveWindowToWorkspace {
+                id: "win-7".into(),
+                index: 4,
+            })
+            .unwrap(),
+            r#"{"type":"move_window_to_workspace","id":"win-7","index":4}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::SetWindowMinimized {
+                id: "win-7".into(),
+                minimized: true,
+            })
+            .unwrap(),
+            r#"{"type":"set_window_minimized","id":"win-7","minimized":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::SetWindowMaximized {
+                id: "win-7".into(),
+                maximized: false,
+            })
+            .unwrap(),
+            r#"{"type":"set_window_maximized","id":"win-7","maximized":false}"#
+        );
+        // Round-trip back into the same request.
+        let back: Request =
+            serde_json::from_str(r#"{"type":"move_window_to_workspace","id":"abc","index":16}"#)
+                .unwrap();
+        assert!(matches!(
+            back,
+            Request::MoveWindowToWorkspace { ref id, index: 16 } if id == "abc"
         ));
     }
 

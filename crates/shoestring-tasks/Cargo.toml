@@ -1,0 +1,22 @@
+[package]
+name = "shoestring-tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Console (TUI) mission-control for shoestring-wm windows and workspaces."
+
+[[bin]]
+name = "shoestring-tasks"
+path = "src/main.rs"
+
+[dependencies]
+shoestring-ipc = { path = "../shoestring-ipc" }
+serde_json = { workspace = true }
+anyhow = "1"
+# The one deliberate dependency call (cf. the resvg/png image-rendering
+# precedent): a TUI needs a terminal toolkit. shoestring-tasks is a standalone
+# binary the compositor neither links nor requires, so the WM's
+# low-dependency goal does not constrain it — pick for ergonomics. ratatui
+# re-exports its matching crossterm, so we pull exactly one version.
+ratatui = "0.29"

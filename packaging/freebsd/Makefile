@@ -34,13 +34,14 @@ USE_GITHUB=	yes
 GH_ACCOUNT=	szarta
 USE_GL=		egl gbm
 
-# Build all ten workspace binaries: the compositor (root crate) plus the
-# nine helper crates. The remaining members (config, ipc) are libraries
+# Build all eleven workspace binaries: the compositor (root crate) plus the
+# ten helper crates. The remaining members (config, ipc) are libraries
 # and produce no binary, so they are not listed here.
 CARGO_INSTALL_PATH=	. \
 			crates/shoestring-bar \
 			crates/shoestring-confirm \
 			crates/shoestring-ctl \
+			crates/shoestring-tasks \
 			crates/shoestring-kill \
 			crates/shoestring-lock \
 			crates/shoestring-menu \
