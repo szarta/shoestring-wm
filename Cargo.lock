@@ -2652,6 +2652,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoestring-remote"
+version = "0.6.1"
+dependencies = [
+ "flate2",
+]
+
+[[package]]
 name = "shoestring-screenshot"
 version = "0.6.1"
 dependencies = [

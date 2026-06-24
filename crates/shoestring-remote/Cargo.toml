@@ -1,0 +1,14 @@
+[package]
+name = "shoestring-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol + tile codec for shoestring-wm remote desktop."
+
+[dependencies]
+# Pure-Rust deflate (miniz_oxide backend) so the tile codec adds no system
+# library — already in the workspace tree via the icon stack, and keeps the
+# low-dependency + FreeBSD-portable ethos. `rust_backend` pins the pure-Rust
+# path explicitly so a zlib-sys dependency can never creep in.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
