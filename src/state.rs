@@ -1817,38 +1817,52 @@ impl ShoestringWm {
         Some(crate::ext_screencopy::BufferConstraints {
             size,
             shm,
-            #[cfg(feature = "tty")]
+            // smithay only carries the `dma` field when its `backend_drm` is
+            // compiled, which both our `tty` and `headless` features pull in
+            // (gbm → drm). The headless backend exports no dmabuf, so its arm
+            // resolves to `None` inside `ext_dmabuf_constraints`.
+            #[cfg(any(feature = "tty", feature = "headless"))]
             dma: self.ext_dmabuf_constraints(),
         })
     }
 
     /// dmabuf format/modifier constraints for ext-image-copy-capture, grouped by
-    /// fourcc. `None` on winit (no dmabuf export) or before the dmabuf global is
-    /// up. Offers only formats the primary GPU's renderer can actually import,
-    /// opaque first (screencast streams are opaque).
-    #[cfg(feature = "tty")]
+    /// fourcc. `None` on winit/headless (no dmabuf export) or before the dmabuf
+    /// global is up. Offers only formats the primary GPU's renderer can actually
+    /// import, opaque first (screencast streams are opaque).
+    #[cfg(any(feature = "tty", feature = "headless"))]
     pub fn ext_dmabuf_constraints(&self) -> Option<crate::ext_screencopy::DmabufConstraints> {
-        use smithay::backend::allocator::Fourcc;
-        let node = self.udev.as_ref()?.primary_render_node();
-        let formats = self.dmabuf_formats.as_ref()?;
-        let mut grouped = Vec::new();
-        for code in [Fourcc::Xrgb8888, Fourcc::Argb8888] {
-            let modifiers: Vec<_> = formats
-                .iter()
-                .filter(|f| f.code == code)
-                .map(|f| f.modifier)
-                .collect();
-            if !modifiers.is_empty() {
-                grouped.push((code, modifiers));
+        // The headless backend compiles smithay's backend_drm (via gbm) so the
+        // `dma` constraint type exists, but it exports no dmabuf — so there are
+        // no constraints to advertise.
+        #[cfg(not(feature = "tty"))]
+        {
+            None
+        }
+        #[cfg(feature = "tty")]
+        {
+            use smithay::backend::allocator::Fourcc;
+            let node = self.udev.as_ref()?.primary_render_node();
+            let formats = self.dmabuf_formats.as_ref()?;
+            let mut grouped = Vec::new();
+            for code in [Fourcc::Xrgb8888, Fourcc::Argb8888] {
+                let modifiers: Vec<_> = formats
+                    .iter()
+                    .filter(|f| f.code == code)
+                    .map(|f| f.modifier)
+                    .collect();
+                if !modifiers.is_empty() {
+                    grouped.push((code, modifiers));
+                }
             }
+            if grouped.is_empty() {
+                return None;
+            }
+            Some(crate::ext_screencopy::DmabufConstraints {
+                node,
+                formats: grouped,
+            })
         }
-        if grouped.is_empty() {
-            return None;
-        }
-        Some(crate::ext_screencopy::DmabufConstraints {
-            node,
-            formats: grouped,
-        })
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from

@@ -1,8 +1,8 @@
 Running shoestring-wm
 =====================
 
-shoestring-wm has two backends. They are selected automatically from the
-environment but can be forced with ``--backend``.
+shoestring-wm has three backends. The first two are selected automatically
+from the environment; all can be forced with ``--backend``.
 
 ============  ===========================================================
 **winit**     A nested window inside an existing X11 or Wayland session.
@@ -10,7 +10,28 @@ environment but can be forced with ``--backend``.
               ``$WAYLAND_DISPLAY`` or ``$DISPLAY`` is set.
 **tty**       Native DRM/KMS + libinput + libseat. The daily-driver
               path. Selected when both env vars are unset.
+**headless**  Surfaceless EGL on a DRM render node with one virtual
+              output and no physical display. Never auto-detected —
+              request it explicitly with ``--backend headless``. The
+              foundation for remote-desktop *serve mode*, and useful on
+              its own for CI, the WLCS harness, and automation. Compiled
+              only when the ``headless`` Cargo feature is enabled.
 ============  ===========================================================
+
+The headless backend opens an unprivileged render node — so it needs no
+seat, VT, or display manager — and drives its render at a fixed cadence
+(there is no vblank). Nothing scans the rendered frame out; it is reached
+only through the capture path (``shoestring-ctl screenshot``,
+``wlr-screencopy`` / ``ext-image-copy-capture``). Two environment knobs:
+
+``$SHOESTRING_WM_RENDER_NODE``
+    Render node to open. Defaults to the first existing of
+    ``/dev/dri/renderD128``–``renderD130``.
+
+``$SHOESTRING_WM_HEADLESS_SIZE``
+    Virtual output size as ``WIDTHxHEIGHT`` (e.g. ``2560x1440``).
+    Defaults to ``1920x1080``. A future remote client resizes the
+    virtual output to its own pixel size.
 
 Command-line flags
 ------------------
@@ -20,8 +41,9 @@ Command-line flags
     ``$XDG_CONFIG_HOME/shoestring-wm/config.toml`` (falling back to
     ``$HOME/.config/...``).
 
-``-b, --backend winit|tty``
-    Override the auto-detected backend.
+``-b, --backend winit|tty|headless``
+    Override the auto-detected backend. ``headless`` is only available
+    when compiled with the ``headless`` Cargo feature.
 
 ``-C, --command CMD``
     Spawn ``CMD`` once the compositor is up. Defaults to

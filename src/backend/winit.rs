@@ -1,10 +1,7 @@
 use anyhow::Result;
 use smithay::{
     backend::{
-        renderer::{
-            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
-            gles::GlesRenderer,
-        },
+        renderer::damage::OutputDamageTracker,
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -125,135 +122,19 @@ pub fn init_winit(
                 let render_states = {
                     let (renderer, mut framebuffer) = backend.bind().unwrap();
 
-                    // Re-pick the cursor frame for the configured scale (cursors
-                    // are raster sprites — fractional values round up to the next
-                    // whole pixel ratio). Read straight from config; per-output
-                    // scaling would change this.
-                    let scale_int = state.config.general.output_scale.ceil().max(1.0) as u32;
-                    state.refresh_cursor_buffer(scale_int);
-                    let locked = state.is_locked();
-                    // Cursor only when unlocked; the lock surface owns the
-                    // visible content while locked.
-                    let cursor_elements: Vec<crate::drawing::PointerRenderElement<GlesRenderer>> =
-                        if !locked {
-                            if let Some((pe, location, hotspot)) = state.cursor_render_snapshot() {
-                                let scale: smithay::utils::Scale<f64> =
-                                    output.current_scale().fractional_scale().into();
-                                let physical_location: smithay::utils::Point<
-                                    i32,
-                                    smithay::utils::Physical,
-                                > = smithay::utils::Point::<f64, smithay::utils::Physical>::from((
-                                    (location.x - hotspot.0 as f64) * scale.x,
-                                    (location.y - hotspot.1 as f64) * scale.y,
-                                ))
-                                .to_i32_round();
-                                use smithay::backend::renderer::element::AsRenderElements;
-                                pe.render_elements(renderer, physical_location, scale, 1.0)
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            // Surface elements for the lock surface (if any)
-                            // ride the same custom_elements slot — they
-                            // accept WaylandSurfaceRenderElement via the
-                            // Surface variant of PointerRenderElement.
-                            let scale: smithay::utils::Scale<f64> =
-                                output.current_scale().fractional_scale().into();
-                            let lock_surface = state.lock_surface_for(&output);
-                            crate::handlers::session_lock::lock_render_elements(
-                                lock_surface.as_ref(),
-                                renderer,
-                                scale,
-                            )
-                        };
-                    // Clear to the configured background color (the wallpaper, if
-                    // any, is composited on top below). Black while locked so no
-                    // client content leaks.
-                    let clear = if locked {
-                        [0.0, 0.0, 0.0, 1.0]
-                    } else {
-                        state.config.background.color_rgba()
-                    };
-                    // Rebuild the wallpaper canvas if the output size / config
-                    // changed (no-op otherwise). Before the renderer is used to
-                    // build elements below; the buffer is owned by `state`.
-                    if !locked {
-                        state.refresh_wallpaper(&output);
-                    }
-
-                    // A fullscreen window on this output is rendered alone,
-                    // dropping the bar/layer surfaces it covers. While locked we
-                    // render an empty scene so no client content leaks.
-                    let fullscreen = if locked {
-                        None
-                    } else {
-                        crate::layout::fullscreen_window_on(&state.space, &state.layout, &output)
-                    };
-                    // Overlay elements that ride above the window stack: the
-                    // cursor (or lock surface) plus the server-side window
-                    // borders. Built once so the capture path composites the
-                    // exact same overlays the screen shows.
-                    let border_elements =
-                        state.output_border_elements(&output, locked, fullscreen.as_ref());
+                    // Build the composited scene (cursor/borders on top, the
+                    // window/layer space, wallpaper at the bottom). Shared with
+                    // the headless backend; the screen-only diagnostics overlay
+                    // is added afterwards (below) so it stays out of captures.
+                    let (mut elements, clear) = state.compose_scene(&output, renderer);
 
                     // F3-style diagnostics overlay (its own top-most slot, not
                     // a CaptureOverlay — kept out of screenshots). Refresh the
                     // buffer now, before the renderer touches it below. Hidden
                     // while locked: nothing but the lock surface should show.
-                    let show_overlay = !locked && state.is_diag_overlay_output(&output);
+                    let show_overlay = !state.is_locked() && state.is_diag_overlay_output(&output);
                     if show_overlay {
                         state.refresh_diag_overlay(&output);
-                    }
-                    let overlays: Vec<crate::drawing::CaptureOverlay<GlesRenderer>> = cursor_elements
-                        .into_iter()
-                        .map(crate::drawing::CaptureOverlay::Pointer)
-                        .chain(
-                            border_elements
-                                .into_iter()
-                                .map(crate::drawing::CaptureOverlay::Border),
-                        )
-                        .collect();
-
-                    let space_elements = if locked {
-                        Vec::new()
-                    } else {
-                        crate::drawing::output_space_elements(
-                            renderer,
-                            &state.space,
-                            &output,
-                            fullscreen.as_ref(),
-                        )
-                    };
-                    // The composited scene, top to bottom: overlays (cursor on
-                    // top, then borders), the window/layer stack, and the
-                    // wallpaper at the very bottom — render_output draws
-                    // first-element-first. Built before screencopy so captures
-                    // composite the exact same list (the screen-only diagnostics
-                    // overlay is added afterwards).
-                    let mut elements: Vec<
-                        crate::drawing::OutputRenderElements<
-                            GlesRenderer,
-                            WaylandSurfaceRenderElement<GlesRenderer>,
-                        >,
-                    > = Vec::with_capacity(overlays.len() + space_elements.len() + 1);
-                    elements.extend(
-                        overlays
-                            .into_iter()
-                            .map(crate::drawing::CaptureOverlay::into_output_element),
-                    );
-                    elements.extend(
-                        space_elements
-                            .into_iter()
-                            .map(crate::drawing::OutputRenderElements::Space),
-                    );
-                    // Wallpaper at the very bottom (pushed last): below every
-                    // window and layer-shell surface. Skipped while locked.
-                    if !locked {
-                        if let Some((phys, logical)) = state.wallpaper_dims(&output) {
-                            if let Some(el) = state.wallpaper.element(renderer, phys, logical) {
-                                elements.push(crate::drawing::OutputRenderElements::Memory(el));
-                            }
-                        }
                     }
 
                     // Fulfil any pending wlr-screencopy captures for this output

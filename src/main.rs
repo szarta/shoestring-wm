@@ -33,6 +33,10 @@ enum BackendKind {
     Winit,
     /// Native DRM/KMS + libinput + libseat backend for running from a TTY.
     Tty,
+    /// Surfaceless EGL on a render node with one virtual output and no physical
+    /// display — for remote-desktop serve mode, CI, and automation. Never
+    /// auto-detected; request it explicitly with `--backend headless`.
+    Headless,
 }
 
 #[derive(Debug, Parser)]
@@ -230,6 +234,14 @@ fn main() -> Result<()> {
             }
             #[cfg(not(feature = "tty"))]
             anyhow::bail!("tty backend not compiled in");
+        }
+        BackendKind::Headless => {
+            #[cfg(feature = "headless")]
+            {
+                backend::headless::init_headless(&mut event_loop, &mut state)?;
+            }
+            #[cfg(not(feature = "headless"))]
+            anyhow::bail!("headless backend not compiled in");
         }
     }
 

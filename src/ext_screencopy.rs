@@ -47,7 +47,9 @@ use smithay::{
     },
 };
 
-#[cfg(feature = "tty")]
+// smithay defines `DmabufConstraints` only with its `backend_drm` compiled,
+// which both our `tty` and `headless` features pull in (gbm → drm).
+#[cfg(any(feature = "tty", feature = "headless"))]
 pub use smithay::wayland::image_copy_capture::DmabufConstraints;
 pub use smithay::wayland::image_copy_capture::{
     BufferConstraints, CaptureFailureReason, Session, SessionRef,

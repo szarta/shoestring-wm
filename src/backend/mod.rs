@@ -1,6 +1,9 @@
 #[cfg(feature = "winit")]
 pub mod winit;
 
+#[cfg(feature = "headless")]
+pub mod headless;
+
 #[cfg(feature = "tty")]
 pub mod udev;
 

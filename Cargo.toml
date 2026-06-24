@@ -60,6 +60,11 @@ default = ["winit", "tty"]
 # the `gles` module so GL-only code (the screencopy capture helper) compiles.
 gl = ["smithay/renderer_gl"]
 winit = ["smithay/backend_winit"]
+# Native headless backend: surfaceless EGL on a DRM render node + one virtual
+# output, no physical display. Foundation for remote-desktop serve mode, and
+# independently useful for CI / WLCS / automation. Pulls just the EGL + gbm +
+# GLES bits (no DRM scanout, no libseat).
+headless = ["smithay/backend_egl", "smithay/backend_gbm", "smithay/renderer_gl"]
 tty = [
     "smithay/backend_libinput",
     "smithay/backend_udev",
