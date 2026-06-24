@@ -569,6 +569,56 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 }
                 return true;
             }
+            Request::RegisterRemoteClient {
+                label,
+                width,
+                height,
+            } => {
+                // Add this connection to the machine-axis (index 1.. in arrival
+                // order) and subscribe it so it receives ViewChanged (to reveal/
+                // hide its surface) and CapturedInput while it's the active view.
+                // Long-lived: its disconnect removes the machine (see
+                // drop_ipc_client → drop_remote_client).
+                state.remote_clients.push(crate::remote::RemoteClient {
+                    id,
+                    label,
+                    width,
+                    height,
+                });
+                client.borrow_mut().subscriber = true;
+                let _ = write_response(
+                    client,
+                    &Response::RemoteClients {
+                        machines: state.machine_entries(),
+                        active: state.view_index,
+                    },
+                );
+                tracing::info!(?id, "remote client registered on machine-axis");
+                return false;
+            }
+            Request::RemoteClientStatus => {
+                let _ = write_response(
+                    client,
+                    &Response::RemoteClients {
+                        machines: state.machine_entries(),
+                        active: state.view_index,
+                    },
+                );
+                return true;
+            }
+            Request::SetView { index } => {
+                // Clamps to the machine count and broadcasts ViewChanged when the
+                // index actually moves (entering/leaving capture mode).
+                state.set_view(index);
+                let _ = write_response(
+                    client,
+                    &Response::RemoteClients {
+                        machines: state.machine_entries(),
+                        active: state.view_index,
+                    },
+                );
+                return true;
+            }
             Request::MediaStatus => {
                 let _ = write_response(client, &Response::Media { state: state.media });
                 return true;
@@ -1433,6 +1483,37 @@ fn collect_inputs(_state: &ShoestringWm) -> Vec<InputSummary> {
 }
 
 impl ShoestringWm {
+    /// Push an event to **one** specific client connection by id, rather than
+    /// broadcasting to every subscriber. Used for [`Event::CapturedInput`],
+    /// which is meaningful only to the connection that is the active
+    /// machine-axis view. Unlike [`Self::emit_ipc`] a write failure here is only
+    /// logged, not eagerly dropped — this runs inside input handling, and the
+    /// calloop readable handler cleans up the dead socket on its own; dropping
+    /// the client here would re-enter the view bookkeeping mid-event.
+    pub fn push_event_to(&mut self, id: ClientId, event: Event) {
+        let Some(server) = self.ipc.as_ref() else {
+            return;
+        };
+        let Some(entry) = server.clients.get(&id) else {
+            return;
+        };
+        let line = match serde_json::to_string(&event) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, ?event, "event serialize failed");
+                return;
+            }
+        };
+        let mut c = entry.client.borrow_mut();
+        if let Err(e) = c
+            .stream
+            .write_all(line.as_bytes())
+            .and_then(|_| c.stream.write_all(b"\n"))
+        {
+            tracing::debug!(?id, error = %e, "targeted ipc push failed");
+        }
+    }
+
     /// Push an event to every subscribed client. Dropping subscribers on
     /// write failure is intentional — see module docs.
     pub fn emit_ipc(&mut self, event: Event) {
@@ -1556,6 +1637,12 @@ impl ShoestringWm {
                 tracing::debug!(?id, "ipc client dropped");
             }
         }
+
+        // If the dropped connection was a machine on the axis, remove it and (if
+        // it was the active view) return input to local. Done after the
+        // connection leaves the client map so the ViewChanged broadcast can't
+        // target the now-dead socket.
+        self.drop_remote_client(id);
 
         if let Some((auto_changed, capture_changed)) = remote_teardown {
             tracing::info!("remote server disconnected; remote gate forced off");

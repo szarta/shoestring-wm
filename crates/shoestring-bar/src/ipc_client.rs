@@ -209,6 +209,27 @@ pub fn query_remote() -> Result<(bool, bool, u32)> {
     }
 }
 
+/// Query the machine-axis view (`Request::RemoteClientStatus`). Returns the
+/// active view index (0 = local) and that machine's label (`None` for local),
+/// seeding the "driving <machine>" chip; a `view_changed` event corrects us.
+pub fn query_remote_clients() -> Result<(u8, Option<String>)> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::RemoteClientStatus)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse remote_clients response")?;
+    match resp {
+        Response::RemoteClients { machines, active } => {
+            let label = active
+                .checked_sub(1)
+                .and_then(|i| machines.get(i as usize))
+                .map(|m| m.label.clone());
+            Ok((active, label))
+        }
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Set the runtime remote gate (`Request::SetRemote`). A `remote_changed` event
 /// (and coupled `automation_changed` / `screen_capture_changed`) follows when
 /// it flips; enabling is refused by the WM unless a server has registered.

@@ -1025,6 +1025,18 @@ pub enum Action {
     MoveWindowToWorkspace { index: u8 },
     /// Move the focused window to a workspace offset (-1 / +1).
     MoveWindowToWorkspaceRelative { delta: i8 },
+    /// Move along the **machine-axis** by a relative offset — the vertical
+    /// counterpart to [`Action::FocusWorkspaceRelative`]. `-1` steps toward the
+    /// local machine, `+1` toward the next connected remote; saturating at 0
+    /// (local) and the connected-machine count (no wrap). When the new view is a
+    /// remote, the WM enters capture mode and forwards all input to it. Bound to
+    /// `Super+K` / `Super+J` by default. A no-op (stays local) with no remotes
+    /// connected.
+    FocusMachineRelative { delta: i8 },
+    /// Jump straight back to the local machine (machine-axis index 0) from any
+    /// remote view — the break-out hotkey that ends input capture. Bound to
+    /// `Super+Escape` by default. A no-op when already local.
+    RemoteBreakout,
     /// Switch to Linux virtual terminal `vt` (1..=12). Only effective when
     /// running on the TTY backend; no-op with a warning under winit.
     ChangeVt { vt: u8 },
@@ -1171,10 +1183,12 @@ impl Config {
                 },
             },
             // Window-jump menu: fuzzy-focus any mapped window across all
-            // workspaces. `j` for "jump".
+            // workspaces. Super+Tab — the conventional "switch windows" slot
+            // (distinct from Alt+Tab / Super+Down, which cycle the active
+            // workspace). Super+J/K are the machine-axis below.
             Binding {
                 mods: super_only(),
-                key: "j".into(),
+                key: "Tab".into(),
                 action: Action::Spawn {
                     command: "shoestring-menu".into(),
                     args: vec!["--mode".into(), "windows".into()],
@@ -1303,6 +1317,25 @@ impl Config {
                 mods: super_ctrl(),
                 key: "l".into(),
                 action: Action::MoveWindowToWorkspaceRelative { delta: 1 },
+            },
+            // Machine-axis navigation — the vertical counterpart to H/L. Super+K
+            // (vim up) steps toward the local machine, Super+J (vim down) toward
+            // the next connected remote; Super+Escape breaks straight out to
+            // local. No-ops until a remote client registers.
+            Binding {
+                mods: super_only(),
+                key: "k".into(),
+                action: Action::FocusMachineRelative { delta: -1 },
+            },
+            Binding {
+                mods: super_only(),
+                key: "j".into(),
+                action: Action::FocusMachineRelative { delta: 1 },
+            },
+            Binding {
+                mods: super_only(),
+                key: "Escape".into(),
+                action: Action::RemoteBreakout,
             },
         ];
         // Super+F3 → toggle the on-screen diagnostics overlay (F3-style).
@@ -2034,6 +2067,50 @@ actions = { sticky = true }
         assert!(has(&|b| {
             matches!(b.action, Action::ArrangeBsp) && b.key == "g" && b.mods == ["Super", "Ctrl"]
         }));
+    }
+
+    #[test]
+    fn default_bindings_include_machine_axis() {
+        let cfg = Config::with_default_bindings();
+        let has = |pred: &dyn Fn(&Binding) -> bool| cfg.bindings.iter().any(pred);
+        // Super+K toward local, Super+J toward next remote, Super+Escape breaks out.
+        assert!(has(&|b| {
+            matches!(b.action, Action::FocusMachineRelative { delta: -1 })
+                && b.key == "k"
+                && b.mods == ["Super"]
+        }));
+        assert!(has(&|b| {
+            matches!(b.action, Action::FocusMachineRelative { delta: 1 })
+                && b.key == "j"
+                && b.mods == ["Super"]
+        }));
+        assert!(has(&|b| {
+            matches!(b.action, Action::RemoteBreakout) && b.key == "Escape" && b.mods == ["Super"]
+        }));
+        // Window-jump moved off Super+J to Super+Tab; nothing else owns Super+J.
+        assert!(has(&|b| b.key == "Tab" && b.mods == ["Super"]));
+        assert!(!has(&|b| b.key == "j"
+            && b.mods == ["Super"]
+            && matches!(b.action, Action::Spawn { .. })));
+    }
+
+    #[test]
+    fn machine_axis_actions_use_kebab_case_wire_form() {
+        let parse = |toml_action: &str| -> Action {
+            toml::from_str::<Binding>(&format!(
+                "mods = [\"Super\"]\nkey = \"j\"\naction = {toml_action}\n"
+            ))
+            .unwrap()
+            .action
+        };
+        assert!(matches!(
+            parse("{ type = \"focus-machine-relative\", delta = 1 }"),
+            Action::FocusMachineRelative { delta: 1 }
+        ));
+        assert!(matches!(
+            parse("{ type = \"remote-breakout\" }"),
+            Action::RemoteBreakout
+        ));
     }
 
     #[test]

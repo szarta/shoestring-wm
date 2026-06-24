@@ -220,6 +220,14 @@ impl ShoestringWm {
                 self.move_focused_to_workspace(target);
                 self.focus_workspace_id(target); // follow the window
             }
+            Action::FocusMachineRelative { delta } => {
+                tracing::debug!(delta, "FocusMachineRelative");
+                self.focus_machine_relative(delta);
+            }
+            Action::RemoteBreakout => {
+                tracing::debug!("RemoteBreakout");
+                self.set_view(0);
+            }
             Action::ChangeVt { vt } => self.change_vt(vt),
             Action::InjectKey { keysym } => {
                 if let Err(e) = self.inject_key(&keysym, &[]) {
@@ -681,6 +689,62 @@ impl ShoestringWm {
                     }
                     return;
                 }
+                // Machine-axis capture mode: a remote is the active view, so the
+                // local box is a KVM head — forward every key transition raw to
+                // that client and swallow it locally, *except* the axis binds
+                // (Super+J/K) and the break-out, which stay local so the user can
+                // always switch back. Run the key through xkb (keeps modifier
+                // state consistent) and intercept it; the resolved sym/mods only
+                // decide local-vs-forward.
+                if let Some(target) = self.captured_client() {
+                    enum CapKey {
+                        Local(Action),
+                        Forward,
+                    }
+                    let decision = self.seat.get_keyboard().unwrap().input::<CapKey, _>(
+                        self,
+                        event.key_code(),
+                        key_state,
+                        serial,
+                        time,
+                        |state, mods, handle| {
+                            if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
+                                let mask = ModMask::from_state(mods);
+                                if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
+                                    if matches!(
+                                        a,
+                                        Action::FocusMachineRelative { .. }
+                                            | Action::RemoteBreakout
+                                    ) {
+                                        return FilterResult::Intercept(CapKey::Local(a.clone()));
+                                    }
+                                }
+                            }
+                            FilterResult::Intercept(CapKey::Forward)
+                        },
+                    );
+                    match decision {
+                        // Axis key: act on press, and swallow its release so it
+                        // never lands on the remote as a dangling key.
+                        Some(CapKey::Local(a)) if key_state == KeyState::Pressed => {
+                            self.dispatch_action(a);
+                        }
+                        Some(CapKey::Local(_)) => {}
+                        // Everything else: forward the raw evdev transition. The
+                        // wire carries the pre-`+8` evdev code (see inject.rs).
+                        Some(CapKey::Forward) => {
+                            self.forward_captured(
+                                target,
+                                shoestring_ipc::RawInput::Key {
+                                    keycode: keycode.saturating_sub(8),
+                                    pressed: key_state == KeyState::Pressed,
+                                },
+                            );
+                        }
+                        None => {}
+                    }
+                    return;
+                }
                 let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
                     self,
                     event.key_code(),
@@ -766,6 +830,26 @@ impl ShoestringWm {
                 }
             }
             InputEvent::PointerMotion { event, .. } => {
+                // Machine-axis capture: advance the forwarded virtual pointer by
+                // the libinput delta (clamped to the remote's pixel size) and
+                // ship it as an absolute position. The local cursor doesn't move.
+                if let Some(target) = self.captured_client() {
+                    if let Some((w, h)) = self
+                        .active_machine()
+                        .map(|c| (c.width as f64, c.height as f64))
+                    {
+                        let delta = event.delta();
+                        let mut p = self.remote_pointer;
+                        p.0 = (p.0 + delta.x).clamp(0.0, w);
+                        p.1 = (p.1 + delta.y).clamp(0.0, h);
+                        self.remote_pointer = p;
+                        self.forward_captured(
+                            target,
+                            shoestring_ipc::RawInput::Motion { x: p.0, y: p.1 },
+                        );
+                    }
+                    return;
+                }
                 // libinput (TTY backend) sends relative deltas. Add to the
                 // pointer's current location and clamp to the union of all
                 // mapped outputs so the cursor can't fly off the workspace.
@@ -900,6 +984,24 @@ impl ShoestringWm {
                     return;
                 };
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                // Machine-axis capture: this backend reports an absolute
+                // position, so map the fraction within the output onto the
+                // remote's pixel space and forward it. The local cursor stays put.
+                if let Some(target) = self.captured_client() {
+                    if let Some((w, h)) = self
+                        .active_machine()
+                        .map(|c| (c.width as f64, c.height as f64))
+                    {
+                        let fx = ((pos.x - output_geo.loc.x as f64) / output_geo.size.w as f64)
+                            .clamp(0.0, 1.0);
+                        let fy = ((pos.y - output_geo.loc.y as f64) / output_geo.size.h as f64)
+                            .clamp(0.0, 1.0);
+                        let (x, y) = (fx * w, fy * h);
+                        self.remote_pointer = (x, y);
+                        self.forward_captured(target, shoestring_ipc::RawInput::Motion { x, y });
+                    }
+                    return;
+                }
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
                 let under = self.surface_under(pos);
@@ -922,6 +1024,20 @@ impl ShoestringWm {
                 let serial = SERIAL_COUNTER.next_serial();
                 let button = event.button_code();
                 let button_state = event.state();
+
+                // Machine-axis capture: forward the raw button transition to the
+                // active remote and swallow it locally (no click-to-focus, no
+                // super-drag — the remote applies its own focus policy).
+                if let Some(target) = self.captured_client() {
+                    self.forward_captured(
+                        target,
+                        shoestring_ipc::RawInput::Button {
+                            button,
+                            pressed: button_state == ButtonState::Pressed,
+                        },
+                    );
+                    return;
+                }
 
                 // Picker mode: a press resolves (left) or cancels (right /
                 // any other button). Releases are swallowed. The click is
@@ -995,6 +1111,19 @@ impl ShoestringWm {
                 });
                 let horizontal_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_discrete = event.amount_v120(Axis::Vertical);
+
+                // Machine-axis capture: forward the scroll deltas to the active
+                // remote and swallow locally (no desktop-scroll workspace switch).
+                if let Some(target) = self.captured_client() {
+                    self.forward_captured(
+                        target,
+                        shoestring_ipc::RawInput::Axis {
+                            horizontal: horizontal_amount,
+                            vertical: vertical_amount,
+                        },
+                    );
+                    return;
+                }
 
                 // Desktop scroll: a mouse wheel over the bare desktop — no
                 // window or layer-shell surface under the pointer — switches

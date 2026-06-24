@@ -38,6 +38,7 @@ mod picker;
 mod power;
 pub mod presentation;
 pub mod profiling;
+mod remote;
 mod remote_command;
 mod remote_screenshot;
 mod scale;

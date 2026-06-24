@@ -387,6 +387,29 @@ Each request is a JSON object with a ``type`` discriminator:
        desktop produces no frames. Consumed by ``shoestring-remote-server``,
        which relays the frames over an ssh tunnel; see the
        ``shoestring-remote`` crate for the wire format.
+   * - ``{"type": "register_remote_client", "label": "dev-107", "width": 1920, "height": 1080}``
+     - Register this connection as a **viewable machine** on the local
+       machine-axis — the viewer-box half of remote desktop. A
+       ``shoestring-remote-client`` that has tunnelled out to a remote box
+       registers here so the user can ``Super+J/K`` to it; index 0 is always the
+       local machine and registrations take index 1.. in arrival order. Unlike
+       ``register_remote_server`` (one served box, single registration) **many**
+       clients may register. ``width`` / ``height`` are the remote's negotiated
+       pixel size, used to clamp the forwarded virtual pointer. The connection
+       becomes an event subscriber and is added to the axis for its lifetime:
+       disconnecting removes the machine and, if it was the active view, returns
+       input to local. While this client is the active view the WM pushes every
+       local input event to it as ``captured_input``. Reply is ``remote_clients``.
+   * - ``{"type": "remote_client_status"}``
+     - Read the machine-axis without changing it: the registered remote machines
+       (index 1..) and the active view index (0 = local). Reply is
+       ``remote_clients``. Read-only, not gated.
+   * - ``{"type": "set_view", "index": 1}``
+     - Switch the active machine-axis view to ``index`` (0 = local, 1.. = a
+       registered remote), clamped to the machine count. The same internal path
+       the ``Super+J/K`` / break-out keybinds drive, exposed for clients and
+       tests. Entering a remote view starts input capture; ``index`` 0 stops it.
+       Broadcasts ``view_changed``. Reply is ``remote_clients``.
    * - ``{"type": "media_status"}``
      - Read the last media-privacy snapshot the WM holds (default-sink
        mute, microphone mute, camera-in-use). Reply is ``media``, whose
@@ -523,6 +546,14 @@ The server replies with a single JSON object tagged by ``type``:
     <bool>, "camera_active": <bool>}}``. Returned for ``media_status``.
     ``state`` is omitted (``null``) when no ``shoestring-mediad`` monitor
     has reported yet — distinct from "reported, all false".
+
+``remote_clients``
+    ``{"type": "remote_clients", "machines": [{"index": 1, "label":
+    "dev-107"}, ...], "active": <int>}``. Returned for
+    ``register_remote_client``, ``remote_client_status``, and ``set_view``.
+    ``machines`` are the registered remote machines (index 1.. ; the local
+    machine is the implicit index 0 and is not listed); ``active`` is the
+    current machine-axis view index (0 = local).
 
 ``screenshot``
     ``{"type": "screenshot", "path": "/absolute/path.png"}``.
@@ -870,6 +901,30 @@ Each event is tagged by ``type``.
     moved, as reported by ``shoestring-mediad``. Carries the full snapshot
     so a subscriber (the bar's MUTE/MIC/CAM chips) needs no follow-up
     ``media_status``.
+
+``view_changed``
+    ``{"type": "view_changed", "index": <int>, "label": "<machine>"}``.
+    Fired when the active machine-axis view changes — the user switched which
+    machine they're driving (``Super+J/K``, the break-out hotkey, a ``set_view``,
+    or a registration/disconnect that shifted the active index). ``index`` 0 =
+    local, 1.. = a registered remote; ``label`` is that machine's name and is
+    omitted at the local view. Broadcast to every subscriber: the bar lights a
+    "driving <machine>" chip, and a ``shoestring-remote-client`` uses it to
+    reveal/hide its own surface as it becomes (or stops being) the active view.
+    Re-query ``remote_client_status`` for the full machine list.
+
+``captured_input``
+    ``{"type": "captured_input", "event": {"kind": "key", "keycode": 30,
+    "pressed": true}}``. Pushed **only to the connection that is the active
+    machine-axis view** — the viewer-box mirror of ``inject_input``. While a
+    remote machine is the active view the WM swallows every local input event and
+    forwards it here as the same raw ``event`` currency ``inject_input`` injects
+    (``key`` / ``button`` / ``motion`` / ``axis``), so the client can relay it
+    over its tunnel for the remote's own keymap/binds to apply (raw KVM
+    passthrough). ``key`` carries an evdev keycode (before XKB's ``+8``);
+    ``motion`` is absolute in the remote's pixel space (clamped to the size from
+    ``register_remote_client``). The axis keys (``Super+J/K``) and the break-out
+    hotkey are handled locally and never forwarded.
 
 ``config_reloaded``
     ``{"type": "config_reloaded"}``. Fired after a successful config

@@ -338,6 +338,17 @@ enum Command {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// List the machine-axis: the remote machines registered as viewable
+    /// (index 1..) and which index is the active view (0 = local). Read-only.
+    RemoteClients,
+    /// Switch the active machine-axis view to INDEX (0 = local, 1.. = a
+    /// registered remote machine). Clamped to the machine count. The
+    /// programmatic equivalent of the Super+J/K binds; while a remote is the
+    /// active view the WM forwards all input to it.
+    SetView {
+        /// 0 = local; 1.. selects a registered remote machine.
+        index: u8,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -478,6 +489,8 @@ fn main() -> Result<()> {
             gamma,
         },
         Command::ResetGamma { output } => Request::ResetGamma { output },
+        Command::RemoteClients => Request::RemoteClientStatus,
+        Command::SetView { index } => Request::SetView { index },
     };
 
     let mut writer = stream.try_clone()?;

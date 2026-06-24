@@ -375,6 +375,24 @@ pub struct ShoestringWm {
     /// "being viewed / controlled" chip; `> 0` means someone is watching.
     pub remote_viewers: u32,
 
+    /// The **machine-axis** — the viewer-box half of remote desktop. Each
+    /// registered [`crate::remote::RemoteClient`] is a viewable machine
+    /// (`Super+J/K` cycles them); index 0 is the implicit local machine, so
+    /// `remote_clients[N-1]` is axis index `N`. Registered via
+    /// [`shoestring_ipc::Request::RegisterRemoteClient`]; an entry's IPC
+    /// connection dropping removes it (see [`Self::drop_remote_client`]).
+    pub remote_clients: Vec<crate::remote::RemoteClient>,
+    /// Active view on the machine-axis: 0 = local (normal input), `N` = driving
+    /// `remote_clients[N-1]`. While non-zero the WM is in **capture mode** — all
+    /// local input is swallowed and forwarded to that client as
+    /// [`shoestring_ipc::Event::CapturedInput`] (see [`Self::captured_client`]).
+    pub view_index: u8,
+    /// The forwarded virtual pointer position in the *active remote's* pixel
+    /// space, advanced by libinput deltas while in capture mode and clamped to
+    /// that client's registered size. Recentred on every view switch. Only
+    /// meaningful while `view_index != 0`.
+    pub remote_pointer: (f64, f64),
+
     /// In-flight `Request::Screenshot` subprocesses, keyed by an
     /// opaque counter. Entries are removed once the child has exited
     /// and the deferred IPC response has been written.
@@ -814,6 +832,9 @@ impl ShoestringWm {
             remote_enabled: false,
             remote_server: None,
             remote_viewers: 0,
+            remote_clients: Vec::new(),
+            view_index: 0,
+            remote_pointer: (0.0, 0.0),
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),

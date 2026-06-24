@@ -209,6 +209,13 @@ struct State {
     remote_enabled: bool,
     remote_server_available: bool,
     remote_viewers: u32,
+    /// Machine-axis view from the WM (`view_changed` events, seeded by
+    /// [`ipc_client::query_remote_clients`]). `view_index` 0 = the local machine
+    /// (no chip); `>0` means the user is driving remote `view_label` — the bar
+    /// lights a "driving <machine>" chip. Distinct from the `VIEW` chip above,
+    /// which means *this* box is being watched.
+    view_index: u8,
+    view_label: Option<String>,
     /// 1-based workspace for each window, keyed by ext-FT identifier.
     /// Populated from `window_opened` and updated by
     /// `window_moved_to_workspace`; ext-FT itself does not expose
@@ -545,6 +552,12 @@ fn run_session() -> Result<()> {
             tracing::warn!(error = ?e, "ipc remote query failed; assuming off");
             (false, false, 0)
         });
+    // Seed the machine-axis view (which machine the user is driving). Local on
+    // error; a `view_changed` event corrects us.
+    let (view_index, view_label) = ipc_client::query_remote_clients().unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "ipc remote-clients query failed; assuming local");
+        (0, None)
+    });
 
     // Detect the battery source once at startup. If `battery_show` is
     // off, skip detection entirely so we don't even open the sysfs
@@ -586,6 +599,8 @@ fn run_session() -> Result<()> {
         remote_enabled,
         remote_server_available,
         remote_viewers,
+        view_index,
+        view_label,
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
@@ -1063,6 +1078,15 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
                 state.dirty = true;
             }
         }
+        IpcEvent::ViewChanged { index, label } => {
+            // Which machine the user is driving on the machine-axis. index 0 =
+            // local (no chip); >0 lights the "driving <machine>" chip.
+            if state.view_index != index || state.view_label != label {
+                state.view_index = index;
+                state.view_label = label;
+                state.dirty = true;
+            }
+        }
         IpcEvent::MediaChanged {
             audio_muted,
             mic_muted,
@@ -1090,6 +1114,9 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
         | IpcEvent::OutputAdded(_)
         | IpcEvent::OutputRemoved { .. }
         | IpcEvent::ConfigReloaded
+        // CapturedInput is pushed only to the active remote-client connection,
+        // never to the bar — listed for exhaustiveness.
+        | IpcEvent::CapturedInput { .. }
         | IpcEvent::Metrics { .. } => {}
     }
 }
@@ -1351,6 +1378,52 @@ fn redraw(
         None
     };
 
+    // Machine-axis chip: when the user is driving a *remote* machine
+    // (`view_index != 0`), show which one (`>host`) so it's obvious the keyboard
+    // and mouse are going elsewhere. Uses ACCENT (not the red privacy color) —
+    // this is a navigation state for *this* user, not a "you're being watched"
+    // signal like VIEW. Hidden at the local machine (index 0).
+    let machine_chip_left = if state.view_index != 0 {
+        if let Some(label) = state.view_label.as_deref() {
+            let text = format!(">{label}");
+            let pad = s(4);
+            let gap = s(8);
+            let chip_w = measure_text(&state.font, font_px, &text) + pad * 2;
+            let chip_right = view_chip_left
+                .or(cap_chip_left)
+                .or(auto_chip_left)
+                .or(control_left)
+                .unwrap_or(clock_x)
+                - gap;
+            let chip_left = chip_right - chip_w;
+            fill_rect(
+                &mut mmap,
+                pw,
+                ph,
+                chip_left,
+                s(2),
+                chip_w,
+                ph as i32 - s(4),
+                ACCENT,
+            );
+            draw_text(
+                &mut mmap,
+                pw,
+                ph,
+                &state.font,
+                font_px,
+                chip_left + pad,
+                &text,
+                fg,
+            );
+            Some(chip_left)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Media-privacy chips (MUTE / MIC / CAM): drawn left of the capture chip
     // whenever `shoestring-mediad` is reporting (`state.media` is `Some`) and
     // the flagged condition holds. MUTE = the default output is muted; MIC =
@@ -1391,7 +1464,8 @@ fn redraw(
         );
         chip_left
     };
-    let media_base = view_chip_left
+    let media_base = machine_chip_left
+        .or(view_chip_left)
         .or(cap_chip_left)
         .or(auto_chip_left)
         .or(control_left)
@@ -1426,6 +1500,7 @@ fn redraw(
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
             let right_anchor = media_chip_left
+                .or(machine_chip_left)
                 .or(view_chip_left)
                 .or(cap_chip_left)
                 .or(auto_chip_left)
@@ -1456,6 +1531,7 @@ fn redraw(
             let gap = s(6);
             let right_anchor = battery_left
                 .or(media_chip_left)
+                .or(machine_chip_left)
                 .or(view_chip_left)
                 .or(cap_chip_left)
                 .or(auto_chip_left)
@@ -1547,6 +1623,7 @@ fn redraw(
     let list_end_x = tray_left
         .or(battery_left)
         .or(media_chip_left)
+        .or(machine_chip_left)
         .or(cap_chip_left)
         .or(auto_chip_left)
         .unwrap_or(clock_x)

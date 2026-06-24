@@ -57,6 +57,29 @@ panel under the pointer — also switches workspaces: wheel up moves to the
 next workspace, wheel down to the previous, clamping at the first and
 last. This is a built-in pointer behavior, not a rebindable key.
 
+Machine axis (remote desktop)
+-----------------------------
+
+The vertical counterpart to the workspace keys: you are always at
+``(machine, workspace)``, and these switch *which machine* you drive. Index 0
+is the local machine; each ``shoestring-remote-client`` connected to a remote
+box is the next index. While a remote is the active view the WM captures **all**
+input and forwards it raw to that machine (its own keymap and keybinds apply) —
+only these keys stay local.
+
+=====================================  ========================================
+Binding                                Action
+=====================================  ========================================
+``Super+J``                            View next machine (toward remotes)
+``Super+K``                            View previous machine (toward local)
+``Super+Escape``                       Break out to the local machine (index 0)
+=====================================  ========================================
+
+The axis saturates at 0 (local) and the connected-machine count — no wrap. With
+no remote connected these are no-ops (you stay local). See :doc:`ipc` for the
+``register_remote_client`` / ``set_view`` / ``view_changed`` surface a client
+uses to join the axis.
+
 Launchers and shell
 -------------------
 
@@ -66,7 +89,7 @@ Binding                            Action
 ``Super+Return``                   Spawn ``alacritty``
 ``Super+P``                        Spawn ``shoestring-menu`` (commands)
 ``Super+B``                        Spawn ``shoestring-menu --mode bookmarks``
-``Super+J``                        Spawn ``shoestring-menu --mode windows`` (jump to window)
+``Super+Tab``                      Spawn ``shoestring-menu --mode windows`` (jump to window)
 ``Super+Shift+L``                  Lock session (spawn ``shoestring-lock``)
 ``Super+Space``                    Cycle keyboard layout (``cycle-layout``)
 ``Super+Shift+Q``                  Quit shoestring-wm (confirm dialog)
@@ -102,7 +125,7 @@ Binding                            Spawns
 ================================  ============================================
 
 If ``shoestring-menu`` is not on ``$PATH``, the ``Super+P`` / ``Super+B`` /
-``Super+J`` spawn silently fails (a warning is logged). The bind is still
+``Super+Tab`` spawn silently fails (a warning is logged). The bind is still
 defined so installing the menu later "just works".
 
 Virtual terminals

@@ -219,6 +219,35 @@ pub enum Request {
     /// light a "being viewed / controlled" chip (privacy: never silent). Reply
     /// is [`Response::Ok`].
     ReportRemoteViewers { viewers: u32 },
+    /// Register this connection as a **viewable machine** on the local
+    /// machine-axis — the viewer-box half of remote desktop. A
+    /// `shoestring-remote-client` (or a stand-in) that has tunnelled out to a
+    /// remote box registers here so the user can `Super+J/K` to it; index 0 is
+    /// always the local machine, registrations take index 1.. in arrival order.
+    /// Unlike [`Request::RegisterRemoteServer`] (one served box, single
+    /// registration) **many** clients may register. `width`/`height` are the
+    /// remote's negotiated pixel size, used to clamp the forwarded virtual
+    /// pointer. The connection becomes a subscriber and is added to the axis for
+    /// its lifetime: disconnecting removes the machine and, if it was the active
+    /// view, returns input to local. While this client is the active view the WM
+    /// pushes every local input event to it as [`Event::CapturedInput`]. Reply
+    /// is [`Response::RemoteClients`].
+    RegisterRemoteClient {
+        label: String,
+        width: u32,
+        height: u32,
+    },
+    /// Read the machine-axis state without changing it: the registered remote
+    /// machines (index 1..) and which index is the active view (0 = local).
+    /// Reply is [`Response::RemoteClients`].
+    RemoteClientStatus,
+    /// Switch the active view on the machine-axis to `index` (0 = local, 1.. =
+    /// a registered remote machine). Clamped to the current machine count. The
+    /// same internal path the `Super+J/K` / break-out keybinds drive, exposed so
+    /// a client (or a test) can switch programmatically. Entering a remote view
+    /// starts input capture; leaving it (or `index` 0) stops. Broadcasts
+    /// [`Event::ViewChanged`]. Reply is [`Response::RemoteClients`].
+    SetView { index: u8 },
     /// Capture a PNG screenshot via the WM's wlr-screencopy server. The
     /// WM spawns `shoestring-screenshot` on the user's behalf and replies
     /// with the resulting [`Response::Screenshot`] once the file is
@@ -605,6 +634,17 @@ pub struct ScreenshotRegion {
     pub h: i32,
 }
 
+/// One registered remote machine on the machine-axis, for
+/// [`Response::RemoteClients`]. `index` is its axis position (1.. ; index 0 is
+/// the implicit local machine); `label` is the human name the client registered
+/// with (typically the remote host).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineEntry {
+    pub index: u8,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
@@ -669,6 +709,15 @@ pub enum Response {
         enabled: bool,
         server_available: bool,
         viewers: u32,
+    },
+    /// Machine-axis state. Returned for [`Request::RegisterRemoteClient`],
+    /// [`Request::RemoteClientStatus`], and [`Request::SetView`]. `machines`
+    /// are the registered remote machines (index 1.. ; the local machine is the
+    /// implicit index 0 and is not listed); `active` is the current view index
+    /// (0 = local).
+    RemoteClients {
+        machines: Vec<MachineEntry>,
+        active: u8,
     },
     /// Path of the PNG written by [`Request::Screenshot`]. Absolute,
     /// usually under `$XDG_PICTURES_DIR`.
@@ -1012,6 +1061,34 @@ pub enum Event {
         server_available: bool,
         viewers: u32,
     },
+    /// Fired when the active machine-axis view changes — the user switched which
+    /// machine they're driving (`Super+J/K`, the break-out hotkey, a
+    /// [`Request::SetView`], or a registration/disconnect that shifted the
+    /// active index). `index` is the new view (0 = local, 1.. = a registered
+    /// remote); `label` is that machine's name, or `None` for local. The bar
+    /// lights a "driving <machine>" chip while `index != 0`; a
+    /// `shoestring-remote-client` uses it to reveal/hide its own surface when it
+    /// becomes (or stops being) the active view. Broadcast, so non-active
+    /// clients see it too. Re-query [`Request::RemoteClientStatus`] for the full
+    /// machine list.
+    ViewChanged {
+        index: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// One captured local input transition, pushed **only to the connection that
+    /// is the active machine-axis view** — the viewer-box mirror of
+    /// [`Request::InjectInput`]. While a remote machine is the active view the
+    /// WM swallows every local input event and forwards it here as the same
+    /// [`RawInput`] currency the served side injects, so the client can relay it
+    /// over its tunnel for the remote's own keymap/binds to apply (raw KVM
+    /// passthrough). Keys carry an evdev keycode; motion is absolute in the
+    /// remote's pixel space (clamped to the size from
+    /// [`Request::RegisterRemoteClient`]). The axis keys (`Super+J/K`) and the
+    /// break-out hotkey are handled locally and never forwarded.
+    CapturedInput {
+        event: RawInput,
+    },
     /// Fired when a screen-capture frame is actually delivered to a client —
     /// the live "your screen is being read right now" signal, distinct from
     /// the gate merely being enabled. Rate-limited by the WM (at most a few
@@ -1216,6 +1293,73 @@ mod tests {
             let back: Request = serde_json::from_str(&s).unwrap();
             assert!(matches!(back, Request::InjectInput { event } if event == ev));
         }
+    }
+
+    #[test]
+    fn machine_axis_shapes() {
+        // Register carries label + remote pixel size.
+        let reg = Request::RegisterRemoteClient {
+            label: "dev-107".into(),
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            serde_json::to_string(&reg).unwrap(),
+            r#"{"type":"register_remote_client","label":"dev-107","width":1920,"height":1080}"#
+        );
+
+        let sv = Request::SetView { index: 1 };
+        assert_eq!(
+            serde_json::to_string(&sv).unwrap(),
+            r#"{"type":"set_view","index":1}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"type":"remote_client_status"}"#).unwrap(),
+            Request::RemoteClientStatus
+        ));
+
+        // Response lists remotes (index 1..); local is implicit.
+        let resp = Response::RemoteClients {
+            machines: vec![MachineEntry {
+                index: 1,
+                label: "dev-107".into(),
+            }],
+            active: 1,
+        };
+        let back: Response = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Response::RemoteClients { machines, active }
+                if active == 1 && machines == vec![MachineEntry { index: 1, label: "dev-107".into() }]
+        ));
+
+        // ViewChanged: label present off-local, skipped at local.
+        assert_eq!(
+            serde_json::to_string(&Event::ViewChanged {
+                index: 0,
+                label: None,
+            })
+            .unwrap(),
+            r#"{"type":"view_changed","index":0}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::ViewChanged {
+                index: 1,
+                label: Some("dev-107".into()),
+            })
+            .unwrap(),
+            r#"{"type":"view_changed","index":1,"label":"dev-107"}"#
+        );
+
+        // CapturedInput reuses RawInput verbatim.
+        let cap = Event::CapturedInput {
+            event: RawInput::Motion { x: 12.0, y: 34.0 },
+        };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&cap).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Event::CapturedInput { event: RawInput::Motion { x, y } } if x == 12.0 && y == 34.0
+        ));
     }
 
     #[test]
