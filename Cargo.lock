@@ -2659,6 +2659,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoestring-remote-server"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "shoestring-ipc",
+ "shoestring-remote",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "shoestring-screenshot"
 version = "0.6.1"
 dependencies = [

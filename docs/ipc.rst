@@ -202,6 +202,18 @@ Each request is a JSON object with a ``type`` discriminator:
        Parity with ``xdotool mousemove``; useful for hover-only tests
        and for composing drags (``move_mouse`` → ``inject_click``).
        Does not change keyboard focus.
+   * - ``{"type": "inject_input", "event": {"kind": "key", "keycode": 30, "pressed": true}}``
+     - Inject one **raw input transition** straight into the seat — the
+       KVM-passthrough primitive behind remote-desktop serve mode. ``event``
+       is a tagged object selected by ``"kind"``: ``key`` (``keycode`` is an
+       evdev keycode *before* XKB's ``+8``; forwarded past the binding table so
+       the served machine's own keymap/binds apply), ``button``
+       (``button`` is an evdev code, ``BTN_LEFT`` = ``272``), ``motion``
+       (``x`` / ``y`` compositor-space), and ``axis`` (``horizontal`` /
+       ``vertical`` scroll deltas). Each carries ``"pressed"`` for the
+       down/up variants. Unlike ``inject_key`` / ``inject_click`` (atomic
+       tap / press+release) each is a single event, so a held key, a chord,
+       or a drag reproduces exactly. Gated by the automation gate.
    * - ``{"type": "pointer_position"}``
      - Read the current pointer location. Reply is ``pointer_position``.
        Read-only and not gated by automation.
@@ -447,7 +459,7 @@ The following requests refuse with an ``error`` while
 ``[general].automation_enabled`` is off (and the CLI flag
 ``--enable-automation`` / the IPC ``set_automation`` haven't flipped
 it): ``inject_key``, ``inject_text``, ``inject_click``, ``move_mouse``,
-``dispatch_action``, ``screenshot``, ``run_command``. The error message
+``inject_input``, ``dispatch_action``, ``screenshot``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
 

@@ -113,6 +113,16 @@ pub enum Request {
     /// way it would for a real `wl_pointer.motion` event. Gated by
     /// `set_automation`. Reply is [`Response::Ok`].
     MoveMouse { x: f64, y: f64 },
+    /// Inject a single **raw input transition** straight into the seat —
+    /// the KVM-passthrough primitive behind remote-desktop serve mode. Unlike
+    /// [`Request::InjectKey`] (keysym, atomic tap) and [`Request::InjectClick`]
+    /// (atomic press+release), each [`RawInput`] is one low-level event — a key
+    /// or button *down or up*, an absolute motion, or a scroll — so a held key,
+    /// a drag, or a chord can be reproduced exactly as the remote client sent
+    /// it. Keys carry an evdev keycode and are forwarded past the WM's binding
+    /// table (the *served* machine's own keymap/binds apply natively). Gated by
+    /// `set_automation`. Reply is [`Response::Ok`].
+    InjectInput { event: RawInput },
     /// Read the current pointer location in compositor-space logical
     /// coords. Reply is [`Response::PointerPosition`]. Read-only and not
     /// gated by automation — pure observation, useful for verifying that
@@ -526,6 +536,28 @@ pub enum Request {
         mic_muted: bool,
         camera_active: bool,
     },
+}
+
+/// One raw input transition for [`Request::InjectInput`] — the low-level events
+/// a remote-desktop client forwards (KVM passthrough). Each is a single event,
+/// not an atomic gesture, so held keys/buttons and drags reproduce exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RawInput {
+    /// A key transition. `keycode` is a Linux/evdev keycode (the value *before*
+    /// XKB's `+8` offset, as libinput reports it); the WM adds the offset. The
+    /// key is forwarded past the binding table — the served machine's own keymap
+    /// and keybinds apply.
+    Key { keycode: u32, pressed: bool },
+    /// A pointer button transition. `button` is an evdev button code
+    /// (`BTN_LEFT` = `0x110`, `BTN_RIGHT` = `0x111`, `BTN_MIDDLE` = `0x112`).
+    Button { button: u32, pressed: bool },
+    /// Absolute pointer motion to compositor-space `(x, y)` — same coordinate
+    /// system as [`Request::MoveMouse`].
+    Motion { x: f64, y: f64 },
+    /// Scroll. `horizontal` / `vertical` are continuous deltas (surface-local
+    /// units); either may be zero.
+    Axis { horizontal: f64, vertical: f64 },
 }
 
 /// A media-privacy snapshot: the live mute state of the default audio sink and
@@ -1149,6 +1181,41 @@ mod tests {
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"pointer_position","x":10.0,"y":20.0}"#
         );
+    }
+
+    #[test]
+    fn inject_input_raw_shapes() {
+        let key = Request::InjectInput {
+            event: RawInput::Key {
+                keycode: 30,
+                pressed: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&key).unwrap(),
+            r#"{"type":"inject_input","event":{"kind":"key","keycode":30,"pressed":true}}"#
+        );
+
+        // Each variant round-trips through the tagged enum.
+        for ev in [
+            RawInput::Key {
+                keycode: 1,
+                pressed: false,
+            },
+            RawInput::Button {
+                button: 0x110,
+                pressed: true,
+            },
+            RawInput::Motion { x: 4.5, y: -2.0 },
+            RawInput::Axis {
+                horizontal: 0.0,
+                vertical: 15.0,
+            },
+        ] {
+            let s = serde_json::to_string(&Request::InjectInput { event: ev }).unwrap();
+            let back: Request = serde_json::from_str(&s).unwrap();
+            assert!(matches!(back, Request::InjectInput { event } if event == ev));
+        }
     }
 
     #[test]

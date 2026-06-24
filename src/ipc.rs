@@ -853,6 +853,27 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::InjectInput { event } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                match event {
+                    shoestring_ipc::RawInput::Key { keycode, pressed } => {
+                        state.inject_raw_keycode(keycode, pressed)
+                    }
+                    shoestring_ipc::RawInput::Button { button, pressed } => {
+                        state.inject_raw_button(button, pressed)
+                    }
+                    shoestring_ipc::RawInput::Motion { x, y } => state.inject_move_mouse(x, y),
+                    shoestring_ipc::RawInput::Axis {
+                        horizontal,
+                        vertical,
+                    } => state.inject_raw_axis(horizontal, vertical),
+                }
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
             Request::PointerPosition => {
                 let (x, y) = state.pointer_position();
                 let _ = write_response(client, &Response::PointerPosition { x, y });

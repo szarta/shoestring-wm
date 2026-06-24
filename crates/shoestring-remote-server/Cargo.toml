@@ -1,0 +1,29 @@
+[package]
+name = "shoestring-remote-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Remote-desktop serve-mode bridge for shoestring-wm: streams the WM's output and replays client input over an ssh tunnel."
+
+[[bin]]
+name = "shoestring-remote-server"
+path = "src/main.rs"
+
+[dependencies]
+# The binary wire protocol + tile codec shared with the client. Carries the
+# damage-tile frames and raw input over the one ssh-tunneled stream.
+shoestring-remote = { path = "../shoestring-remote" }
+
+# The WM IPC wire types — the server bridges this newline-JSON socket (register,
+# gate events, capture stream, input injection) to the network protocol.
+shoestring-ipc = { path = "../shoestring-ipc" }
+serde_json = "1"
+
+# Lightweight error type for `main` and the bridge threads.
+anyhow = "1"
+
+# Structured logs, env-filterable + redirectable to a file
+# (SHOESTRING_REMOTE_SERVER_LOG), matching the rest of the suite.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

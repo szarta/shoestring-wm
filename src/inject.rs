@@ -19,10 +19,10 @@
 //!   BTN_* code. Optional `(x, y)` pre-moves the pointer.
 
 use smithay::{
-    backend::input::{ButtonState, KeyState},
+    backend::input::{Axis, ButtonState, KeyState},
     input::{
         keyboard::{xkb, FilterResult, Keysym},
-        pointer::{ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     utils::SERIAL_COUNTER,
 };
@@ -240,6 +240,66 @@ impl ShoestringWm {
         );
         pointer.frame(self);
         Ok(())
+    }
+
+    /// Inject one raw key transition by **evdev keycode** (the value libinput
+    /// reports, before XKB's `+8`). Forwarded past the binding table like every
+    /// injected key — the served machine's own keymap and keybinds apply. The
+    /// KVM-passthrough primitive for remote serve mode; unlike [`inject_key`]
+    /// it is a single down/up, so held keys and chords reproduce exactly.
+    pub fn inject_raw_keycode(&mut self, evdev_keycode: u32, pressed: bool) {
+        let state = if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        // dispatch_key speaks X-style keycodes (evdev + 8); the wire carries the
+        // raw evdev code, matching what smithay's libinput backend adds before
+        // calling KeyboardHandle::input.
+        self.dispatch_key(evdev_keycode + 8, state);
+    }
+
+    /// Inject one raw pointer button transition by evdev button code
+    /// (`BTN_LEFT` = `0x110`, …). Unlike [`inject_click`] this is a single
+    /// down or up — so a remote drag (press → move → release) reproduces — and
+    /// it does *not* run the click-to-focus logic: the served WM applies its
+    /// own focus policy as the events flow through the seat.
+    pub fn inject_raw_button(&mut self, button: u32, pressed: bool) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        pointer.button(
+            self,
+            &ButtonEvent {
+                button,
+                state: if pressed {
+                    ButtonState::Pressed
+                } else {
+                    ButtonState::Released
+                },
+                serial,
+                time: monotonic_msec(),
+            },
+        );
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.frame(self);
+    }
+
+    /// Inject a scroll event. `horizontal` / `vertical` are continuous deltas
+    /// in surface-local units (the same convention the remote wire uses); a
+    /// zero axis is omitted from the frame.
+    pub fn inject_raw_axis(&mut self, horizontal: f64, vertical: f64) {
+        let mut frame = AxisFrame::new(monotonic_msec())
+            .source(smithay::backend::input::AxisSource::Continuous);
+        if horizontal != 0.0 {
+            frame = frame.value(Axis::Horizontal, horizontal);
+        }
+        if vertical != 0.0 {
+            frame = frame.value(Axis::Vertical, vertical);
+        }
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        pointer.axis(self, frame);
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.frame(self);
     }
 
     fn tap_key(&mut self, keycode: u32) {
