@@ -41,7 +41,7 @@
 mod codec;
 mod message;
 
-pub use codec::{apply_tile, extract_tiles};
+pub use codec::{apply_tile, encode_tile, extract_tiles};
 pub use message::{
     ClientMessage, CursorUpdate, PixelFormat, Rect, ServerMessage, Tile, TileEncoding,
     BYTES_PER_PIXEL,

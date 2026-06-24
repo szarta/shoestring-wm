@@ -359,6 +359,22 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "screen_capture_status"}``
      - Read the current screen-capture gate state without changing it.
        Reply is ``screen_capture``.
+   * - ``{"type": "capture_stream", "output": null}``
+     - Subscribe to a **streaming damage capture** of an output — the
+       native damage-push primitive behind remote-desktop serve mode.
+       ``output`` is the output name (omit / null → first output).
+       **Gated by the screen-capture gate**: returns ``error`` when the
+       gate is off, and an active stream is torn down (a ``Bye`` frame,
+       then disconnect) if the gate is flipped off mid-stream. Unlike
+       every other request the reply is **not** pure newline-JSON: the
+       server writes one ``ok`` line, then *upgrades the connection* to a
+       binary stream of length-prefixed ``shoestring_remote::ServerMessage``
+       frames — a ``Ready`` (served size/scale/format) and full-output
+       first frame, then one ``Frame`` of only the *damaged tiles* per
+       render (zlib-compressed), plus ``Resize`` on output change. An idle
+       desktop produces no frames. Consumed by ``shoestring-remote-server``,
+       which relays the frames over an ssh tunnel; see the
+       ``shoestring-remote`` crate for the wire format.
    * - ``{"type": "media_status"}``
      - Read the last media-privacy snapshot the WM holds (default-sink
        mute, microphone mute, camera-in-use). Reply is ``media``, whose

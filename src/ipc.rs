@@ -83,6 +83,19 @@ pub(crate) struct Client {
     /// diagnostics sampler. The sampler timer pushes [`Event::Metrics`] at
     /// it every tick, gated by the per-subscriber interval below.
     metrics_sub: Option<MetricsSub>,
+    /// `Some` after [`Request::CaptureStream`]: this connection carries a
+    /// binary `shoestring_remote::ServerMessage` damage stream pushed from the
+    /// render loop (see [`crate::capture_stream`]). Once set, the connection no
+    /// longer speaks newline-JSON.
+    pub(crate) capture_sub: Option<crate::capture_stream::CaptureSub>,
+}
+
+impl Client {
+    /// Mutable access to the raw stream, for the capture-stream pusher to write
+    /// length-prefixed binary frames (see [`crate::capture_stream`]).
+    pub(crate) fn stream_mut(&mut self) -> &mut UnixStream {
+        &mut self.stream
+    }
 }
 
 /// Per-connection state for a `metrics` stream subscriber.
@@ -175,16 +188,45 @@ impl Server {
         self.clients.len()
     }
 
-    /// Long-lived streaming subscribers — event-stream tails plus metrics
-    /// tails. Surfaced as the `ipc.subscribers` gauge.
+    /// Long-lived streaming subscribers — event-stream tails, metrics tails,
+    /// and capture streams. Surfaced as the `ipc.subscribers` gauge.
     pub fn subscriber_count(&self) -> usize {
         self.clients
             .values()
             .filter(|e| {
                 let c = e.client.borrow();
-                c.subscriber || c.metrics_sub.is_some()
+                c.subscriber || c.metrics_sub.is_some() || c.capture_sub.is_some()
             })
             .count()
+    }
+
+    /// Capture-stream subscribers watching `output_name`, as (id, handle) pairs
+    /// the render loop can write damage frames to.
+    pub(crate) fn capture_subscribers(
+        &self,
+        output_name: &str,
+    ) -> Vec<(ClientId, Rc<RefCell<Client>>)> {
+        self.clients
+            .iter()
+            .filter(|(_, e)| {
+                e.client
+                    .borrow()
+                    .capture_sub
+                    .as_ref()
+                    .is_some_and(|s| s.output_name == output_name)
+            })
+            .map(|(&id, e)| (id, Rc::clone(&e.client)))
+            .collect()
+    }
+
+    /// Every capture-stream subscriber, regardless of output — for tearing them
+    /// all down when the capture gate is revoked.
+    pub(crate) fn all_capture_subscribers(&self) -> Vec<(ClientId, Rc<RefCell<Client>>)> {
+        self.clients
+            .iter()
+            .filter(|(_, e)| e.client.borrow().capture_sub.is_some())
+            .map(|(&id, e)| (id, Rc::clone(&e.client)))
+            .collect()
     }
 }
 
@@ -201,6 +243,7 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
         subscriber: false,
         spent: false,
         metrics_sub: None,
+        capture_sub: None,
     }));
 
     let source_client = Rc::clone(&client);
@@ -784,6 +827,49 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 tracing::debug!(?id, interval_ms = want, "ipc client subscribed to metrics");
                 return false;
             }
+            Request::CaptureStream { output } => {
+                // Gated by the screen-capture flag — never stream without consent.
+                if !state.screen_capture_enabled {
+                    let _ = write_response(client, &capture_off_error());
+                    return true;
+                }
+                // Resolve the target output: a named one, else the first mapped.
+                let resolved = match &output {
+                    Some(name) => state
+                        .space
+                        .outputs()
+                        .find(|o| o.name() == *name)
+                        .map(|o| o.name()),
+                    None => state.space.outputs().next().map(|o| o.name()),
+                };
+                let Some(output_name) = resolved else {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: match output {
+                                Some(name) => format!("capture_stream: no output named {name}"),
+                                None => "capture_stream: no outputs available".into(),
+                            },
+                        },
+                    );
+                    return true;
+                };
+                // One Ok line, then the connection upgrades to a binary
+                // shoestring_remote frame stream pushed from the render loop.
+                if write_response(client, &Response::Ok).is_err() {
+                    return true;
+                }
+                {
+                    let mut c = client.borrow_mut();
+                    c.capture_sub =
+                        Some(crate::capture_stream::CaptureSub::new(output_name.clone()));
+                    // Long-lived like the other subscribers: stay open; further
+                    // newline input is unexpected on a binary stream.
+                    c.spent = true;
+                }
+                tracing::debug!(?id, %output_name, "ipc client subscribed to capture stream");
+                return false;
+            }
             Request::DispatchAction { action } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -880,6 +966,14 @@ fn automation_off_error() -> Response {
     Response::Error {
         message: "automation disabled: enable with `shoestring-ctl automation on` \
                   or restart the WM with --enable-automation"
+            .into(),
+    }
+}
+
+fn capture_off_error() -> Response {
+    Response::Error {
+        message: "screen capture disabled: enable with `shoestring-ctl screen-capture on` \
+                  (or `automation on`, which also flips the capture gate)"
             .into(),
     }
 }

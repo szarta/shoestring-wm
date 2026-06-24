@@ -1737,6 +1737,9 @@ impl ShoestringWm {
                 p.frame
                     .fail(crate::ext_screencopy::CaptureFailureReason::Stopped);
             }
+            // Streaming capture subscribers (remote-desktop serve mode) must
+            // stop the instant consent is revoked: send a final Bye and drop.
+            self.teardown_capture_subscribers();
         }
     }
 

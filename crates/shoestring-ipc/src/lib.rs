@@ -404,6 +404,27 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_ms: Option<u32>,
     },
+    /// Subscribe to a **streaming damage capture** of an output — the native
+    /// damage-push primitive behind remote-desktop serve mode. The WM pushes
+    /// only the *damaged tiles* of the chosen output on each render, so an idle
+    /// desktop produces no traffic. Consumed by `shoestring-remote-server`,
+    /// which relays the frames over an ssh tunnel.
+    ///
+    /// `output: None` selects the first/default output; `Some(name)` a
+    /// specific one. Gated by the **screen-capture gate**
+    /// (`[general].screen_capture_enabled` / `set_screen_capture`): returns
+    /// [`Response::Error`] when the gate is off, and an active stream is torn
+    /// down (a `Bye` frame, then disconnect) if the gate is flipped off.
+    ///
+    /// Unlike every other request, the reply is **not** pure newline-JSON: the
+    /// server writes one [`Response::Ok`] line, then *upgrades the connection*
+    /// to a binary stream of length-prefixed `shoestring_remote::ServerMessage`
+    /// frames (`Ready`, then `Frame`/`Resize`/`Bye`). The subscriber reads the
+    /// `ok` line, then switches to the binary framing.
+    CaptureStream {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
     /// Set a per-output gamma ramp from a color temperature, server-side —
     /// the WM computes the ramp and drives the CRTC, so no external
     /// night-light daemon (wlsunset/gammastep) is needed. Shares the same
@@ -1406,6 +1427,22 @@ mod tests {
         );
         let back: Request = serde_json::from_str(r#"{"type":"metrics_stream"}"#).unwrap();
         assert!(matches!(back, Request::MetricsStream { interval_ms: None }));
+
+        // capture_stream: output is skipped when None.
+        let bare = Request::CaptureStream { output: None };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"type":"capture_stream"}"#
+        );
+        let named = Request::CaptureStream {
+            output: Some("HEADLESS-1".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&named).unwrap(),
+            r#"{"type":"capture_stream","output":"HEADLESS-1"}"#
+        );
+        let back: Request = serde_json::from_str(r#"{"type":"capture_stream"}"#).unwrap();
+        assert!(matches!(back, Request::CaptureStream { output: None }));
     }
 
     #[test]

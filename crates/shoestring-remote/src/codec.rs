@@ -59,13 +59,43 @@ fn crop(fb: &[u8], fb_width: u32, fb_height: u32, rect: &Rect) -> Option<Vec<u8>
     Some(out)
 }
 
+/// Encode one already-cropped, tightly-packed region (`rect.raw_len()` bytes,
+/// row-major) into a [`Tile`]. When `prefer` is [`TileEncoding::Zlib`] the
+/// region is compressed, but the raw bytes are kept instead whenever they are
+/// smaller — so a tile is never inflated by compression. Used directly by a
+/// server that reads back only the damaged regions of its framebuffer.
+pub fn encode_tile(rect: Rect, raw: Vec<u8>, prefer: TileEncoding) -> Tile {
+    match prefer {
+        TileEncoding::Raw => Tile {
+            rect,
+            encoding: TileEncoding::Raw,
+            data: raw,
+        },
+        TileEncoding::Zlib => {
+            let compressed = zlib_compress(&raw);
+            if compressed.len() < raw.len() {
+                Tile {
+                    rect,
+                    encoding: TileEncoding::Zlib,
+                    data: compressed,
+                }
+            } else {
+                Tile {
+                    rect,
+                    encoding: TileEncoding::Raw,
+                    data: raw,
+                }
+            }
+        }
+    }
+}
+
 /// Crop and encode each damaged `rect` out of `fb` into a [`Tile`].
 ///
 /// `fb` is a tightly-packed framebuffer of `fb_width × fb_height` pixels.
 /// Rectangles outside the framebuffer are skipped (so a stale damage rect from
-/// a just-resized output can't panic). When `prefer` is [`TileEncoding::Zlib`]
-/// each tile is compressed, but the raw form is kept instead whenever it is
-/// smaller — so a tile is never inflated by compression.
+/// a just-resized output can't panic). Each surviving region is encoded with
+/// [`encode_tile`].
 pub fn extract_tiles(
     fb: &[u8],
     fb_width: u32,
@@ -78,30 +108,7 @@ pub fn extract_tiles(
         let Some(raw) = crop(fb, fb_width, fb_height, rect) else {
             continue;
         };
-        let tile = match prefer {
-            TileEncoding::Raw => Tile {
-                rect: *rect,
-                encoding: TileEncoding::Raw,
-                data: raw,
-            },
-            TileEncoding::Zlib => {
-                let compressed = zlib_compress(&raw);
-                if compressed.len() < raw.len() {
-                    Tile {
-                        rect: *rect,
-                        encoding: TileEncoding::Zlib,
-                        data: compressed,
-                    }
-                } else {
-                    Tile {
-                        rect: *rect,
-                        encoding: TileEncoding::Raw,
-                        data: raw,
-                    }
-                }
-            }
-        };
-        tiles.push(tile);
+        tiles.push(encode_tile(*rect, raw, prefer));
     }
     tiles
 }

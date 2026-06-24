@@ -9,8 +9,8 @@
 //! - **winit** renders into a nested window's framebuffer; **udev** scans out to
 //!   a CRTC. Headless renders into an offscreen GLES texture that nothing
 //!   displays — the pixels are reached only via the capture path
-//!   (`wlr-screencopy` / `ext-image-copy-capture`) and, later, the streaming
-//!   damage subscription (task A2).
+//!   (`wlr-screencopy` / `ext-image-copy-capture`) and the streaming damage
+//!   subscription ([`crate::capture_stream`], the remote-desktop serve path).
 //! - There is no vblank to pace the loop, so a calloop [`Timer`] drives the
 //!   render at a fixed cadence (the winit backend's `request_redraw` loop is the
 //!   moral equivalent).
@@ -55,8 +55,9 @@ const DEFAULT_SIZE: (i32, i32) = (1920, 1080);
 
 /// Frame cadence for the render loop. No vblank exists to pace us, so we tick a
 /// timer at ~60 Hz. `render_output` early-outs when there is no damage, so an
-/// idle desktop costs only the per-frame element build; the streaming damage
-/// subscription (task A2) will add proper idle gating ("idle ⇒ 0 frames").
+/// idle desktop costs only the per-frame element build and produces no capture
+/// traffic ("idle ⇒ 0 frames" on the stream). Idling the *timer* itself when
+/// nothing's pending is a later optimization.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Resolve the render node path: `$SHOESTRING_WM_RENDER_NODE`, else the first of
@@ -173,12 +174,19 @@ pub fn init_headless(
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut renderer = renderer;
-    // The offscreen target. Lazily (re)created to the output's current pixel
-    // size; nothing scans it out — it exists so the scene is composited with
-    // real damage tracking and so the capture path has a consistent renderer.
+    // The offscreen target: the texture, its size, and its buffer *age*.
+    // Lazily (re)created to the output's current pixel size; nothing scans it
+    // out — it exists so the scene is composited with real damage tracking and
+    // so the capture path has a consistent renderer. The age is what makes
+    // damage tracking incremental: a freshly created buffer has unknown
+    // contents (age 0 → full damage), but since we reuse the *same* texture
+    // every frame it is exactly one frame old thereafter (age 1 → only the
+    // regions that actually changed). Without this the tracker would report
+    // full-output damage every frame and the capture stream would never idle.
     let mut target: Option<(
         GlesTexture,
         smithay::utils::Size<i32, smithay::utils::Buffer>,
+        usize,
     )> = None;
 
     let timer = Timer::immediate();
@@ -210,6 +218,7 @@ fn render_once(
     target: &mut Option<(
         GlesTexture,
         smithay::utils::Size<i32, smithay::utils::Buffer>,
+        usize,
     )>,
 ) {
     let Some(mode) = output.current_mode() else {
@@ -217,19 +226,21 @@ fn render_once(
     };
     let size: smithay::utils::Size<i32, smithay::utils::Buffer> = (mode.size.w, mode.size.h).into();
 
-    // (Re)create the offscreen texture if missing or the output resized.
-    if target.as_ref().map(|(_, s)| *s) != Some(size) {
+    // (Re)create the offscreen texture if missing or the output resized. A
+    // fresh buffer starts at age 0 (contents unknown → full repaint).
+    if target.as_ref().map(|(_, s, _)| *s) != Some(size) {
         match renderer.create_buffer(Fourcc::Argb8888, size) {
-            Ok(tex) => *target = Some((tex, size)),
+            Ok(tex) => *target = Some((tex, size, 0)),
             Err(e) => {
                 tracing::warn!(error = %e, "headless: offscreen create_buffer failed");
                 return;
             }
         }
     }
-    let Some((texture, _)) = target.as_mut() else {
+    let Some((texture, _, age)) = target.as_mut() else {
         return;
     };
+    let buffer_age = *age;
 
     // Build the composited scene (shared with the winit backend). The
     // screen-only diagnostics overlay is added below, after the capture pass,
@@ -273,19 +284,36 @@ fn render_once(
             }
         };
         let render_start = std::time::Instant::now();
-        let result =
-            match damage_tracker.render_output(renderer, &mut framebuffer, 0, &elements, clear) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "headless: render_output failed");
-                    return;
-                }
-            };
+        let result = match damage_tracker.render_output(
+            renderer,
+            &mut framebuffer,
+            buffer_age,
+            &elements,
+            clear,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = ?e, "headless: render_output failed");
+                return;
+            }
+        };
         state
             .metrics
             .record_frame(render_start.elapsed().as_micros() as u64);
+        // Stream the damaged tiles to any capture subscribers (serve mode),
+        // reading them back from the framebuffer we just rendered. No-op when
+        // the gate is off or nobody's subscribed.
+        crate::capture_stream::push_capture(
+            state,
+            output,
+            renderer,
+            &framebuffer,
+            result.damage.map(|v| v.as_slice()),
+        );
         result.states
     };
+    // The texture now holds this frame; next time it is exactly one frame old.
+    *age = 1;
     crate::profiling::frame_mark();
 
     // wp_presentation, best effort: no hardware vblank, so mark the frame

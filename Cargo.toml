@@ -87,6 +87,7 @@ profile-with-tracy = ["dep:tracing-tracy"]
 [dependencies]
 shoestring-ipc = { path = "crates/shoestring-ipc" }
 shoestring-config = { path = "crates/shoestring-config" }
+shoestring-remote = { path = "crates/shoestring-remote" }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
