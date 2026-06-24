@@ -118,8 +118,11 @@ const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     // Arch / generic Linux
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    // Fedora / RHEL
+    // Fedora / RHEL (the liberation package installs under
+    // `liberation-sans-fonts/`, verified on Fedora 44 — the bare
+    // `liberation-sans/` path below is older / other distros)
     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
     "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
     // FreeBSD (pkg install dejavu / liberation-fonts-ttf)
     "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
