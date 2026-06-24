@@ -2659,6 +2659,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoestring-remote-client"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "memmap2",
+ "serde_json",
+ "shoestring-ipc",
+ "shoestring-remote",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "xcursor",
+]
+
+[[package]]
 name = "shoestring-remote-server"
 version = "0.6.1"
 dependencies = [

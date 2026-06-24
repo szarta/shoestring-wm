@@ -80,6 +80,23 @@ no remote connected these are no-ops (you stay local). See :doc:`ipc` for the
 ``register_remote_client`` / ``set_view`` / ``view_changed`` surface a client
 uses to join the axis.
 
+A remote joins the axis by running **shoestring-remote-client** on the local
+machine. It connects out to a remote box's ``shoestring-remote-server`` (reached
+over an ``ssh -L`` tunnel or plain loopback), presents that desktop fullscreen,
+and registers on the axis so ``Super+J``/``K`` reach it::
+
+    # On the served box: enable serve mode (see the remote-server) so its
+    # listener opens, reached locally as 127.0.0.1:7355 via:
+    ssh -L 7355:127.0.0.1:7355 user@served-box
+
+    # On the local machine:
+    shoestring-remote-client --connect 127.0.0.1:7355 --label served-box
+
+While that client is the active view its surface is shown and all local input is
+forwarded to the served box; ``Super+Escape`` returns to local and hides it. The
+remote cursor is drawn with the **local** xcursor theme (``$XCURSOR_THEME`` /
+``$XCURSOR_SIZE``). ``$SHOESTRING_REMOTE_CLIENT_LOG`` redirects its log to a file.
+
 Launchers and shell
 -------------------
 

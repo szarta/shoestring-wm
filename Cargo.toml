@@ -13,6 +13,7 @@ members = [
     "crates/shoestring-notify",
     "crates/shoestring-region",
     "crates/shoestring-remote",
+    "crates/shoestring-remote-client",
     "crates/shoestring-remote-server",
     "crates/shoestring-screenshot",
     "crates/xdg-desktop-portal-shoestring",

@@ -1,0 +1,47 @@
+[package]
+name = "shoestring-remote-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Remote-desktop viewer for shoestring-wm: presents a remote shoestring-wm desktop fullscreen and forwards local input over an ssh tunnel."
+
+[[bin]]
+name = "shoestring-remote-client"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland client + the layer-shell protocol bindings. Versions match what
+# shoestring-wm pulls via smithay (and what shoestring-bar uses), so all three
+# share resolved deps on disk.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# wl_shm pool: mmap an anon tempfile, hand the fd to the compositor, draw the
+# reconstructed remote frame into the mapping directly (the bar's reuse pattern).
+memmap2 = "0.9"
+tempfile = "3"
+
+# poll(2) for the single-threaded event loop multiplexing wayland + WM IPC + net.
+libc = "0.2"
+
+# The remote cursor is structural: the server sends a freedesktop cursor name and
+# we render it with the *local* xcursor theme. Same crate the WM uses.
+xcursor = "0.3"
+
+# The binary wire protocol + tile codec shared with the server.
+shoestring-remote = { path = "../shoestring-remote" }
+
+# The WM IPC wire types — register on the machine-axis and receive view_changed +
+# captured_input from the local WM.
+shoestring-ipc = { path = "../shoestring-ipc" }
+serde_json = "1"
+
+# Lightweight error type for main, and CLI/log plumbing.
+anyhow = "1"
+
+# Structured logs, env-filterable + redirectable to a file
+# (SHOESTRING_REMOTE_CLIENT_LOG), matching the rest of the suite.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
