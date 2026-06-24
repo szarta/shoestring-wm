@@ -179,6 +179,36 @@ pub enum Request {
     /// Read the current screen-capture gate state without changing it. Reply
     /// is [`Response::ScreenCapture`].
     ScreenCaptureStatus,
+    /// Register the connection as *the* remote-desktop server
+    /// (`shoestring-remote-server`). Sent once at the server's startup so the
+    /// WM knows a server is available — which is what makes the **remote gate**
+    /// selectable (greyed-out until then). The registration lives for the
+    /// connection's lifetime: when the server disconnects the WM clears it and
+    /// forces the remote gate off. The WM replies [`Response::Remote`] and then
+    /// pushes [`Event::RemoteChanged`] to this connection so the server learns
+    /// when the gate flips (open / close its ssh-tunneled listener). At most one
+    /// server registers at a time; a second registration replaces the first.
+    RegisterRemoteServer,
+    /// Flip the runtime **remote gate** — the single consent switch for
+    /// remote-desktop serve mode. Enabling *couples* the capture gate (so the
+    /// served output can be streamed) and the automation gate (so client input
+    /// can be injected); disabling turns both back off. Refused with
+    /// [`Response::Error`] unless a server has registered
+    /// ([`Request::RegisterRemoteServer`]). Reply is [`Response::Remote`];
+    /// [`Event::RemoteChanged`] is broadcast when the value changes. Runtime
+    /// only — never read from disk, so remote access can't be on at login
+    /// (the user enables it explicitly after logging into the served box).
+    SetRemote { enabled: bool },
+    /// Read the remote-gate state without changing it: whether the gate is on,
+    /// whether a server has registered, and the current viewer count. Reply is
+    /// [`Response::Remote`].
+    RemoteStatus,
+    /// Report the number of connected remote viewers/controllers. Sent by the
+    /// registered `shoestring-remote-server` as clients connect and disconnect.
+    /// The WM caches it and broadcasts [`Event::RemoteChanged`] so the bar can
+    /// light a "being viewed / controlled" chip (privacy: never silent). Reply
+    /// is [`Response::Ok`].
+    ReportRemoteViewers { viewers: u32 },
     /// Capture a PNG screenshot via the WM's wlr-screencopy server. The
     /// WM spawns `shoestring-screenshot` on the user's behalf and replies
     /// with the resulting [`Response::Screenshot`] once the file is
@@ -598,6 +628,16 @@ pub enum Response {
     ScreenCapture {
         enabled: bool,
     },
+    /// Remote-gate state. Returned for [`Request::RegisterRemoteServer`],
+    /// [`Request::SetRemote`], and [`Request::RemoteStatus`]. `enabled` is the
+    /// gate; `server_available` is whether a `shoestring-remote-server` has
+    /// registered (the bar greys the toggle until then); `viewers` is the
+    /// number of connected clients (the "being viewed" chip lights when > 0).
+    Remote {
+        enabled: bool,
+        server_available: bool,
+        viewers: u32,
+    },
     /// Path of the PNG written by [`Request::Screenshot`]. Absolute,
     /// usually under `$XDG_PICTURES_DIR`.
     Screenshot {
@@ -928,6 +968,18 @@ pub enum Event {
     ScreenCaptureChanged {
         enabled: bool,
     },
+    /// Fired when any remote-desktop state changes: the gate flipping, a server
+    /// (un)registering, or the viewer count moving. Carries the full state so
+    /// the bar can light a "being viewed / controlled" chip (when `viewers >
+    /// 0`) and grey the gate toggle (until `server_available`), and the
+    /// registered server learns when to open/close its listener (`enabled`),
+    /// all without polling. Mirrors the [`ScreenCaptureChanged`] privacy-signal
+    /// pattern. See [`Request::SetRemote`].
+    RemoteChanged {
+        enabled: bool,
+        server_available: bool,
+        viewers: u32,
+    },
     /// Fired when a screen-capture frame is actually delivered to a client —
     /// the live "your screen is being read right now" signal, distinct from
     /// the gate merely being enabled. Rate-limited by the WM (at most a few
@@ -1199,6 +1251,48 @@ mod tests {
             serde_json::to_string(&cap).unwrap(),
             r#"{"type":"screen_captured","output":"eDP-1"}"#
         );
+    }
+
+    #[test]
+    fn remote_request_response_event_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Request::RegisterRemoteServer).unwrap(),
+            r#"{"type":"register_remote_server"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::SetRemote { enabled: true }).unwrap(),
+            r#"{"type":"set_remote","enabled":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::RemoteStatus).unwrap(),
+            r#"{"type":"remote_status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::ReportRemoteViewers { viewers: 2 }).unwrap(),
+            r#"{"type":"report_remote_viewers","viewers":2}"#
+        );
+        let resp = Response::Remote {
+            enabled: true,
+            server_available: true,
+            viewers: 1,
+        };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"remote","enabled":true,"server_available":true,"viewers":1}"#
+        );
+        let ev = Event::RemoteChanged {
+            enabled: false,
+            server_available: true,
+            viewers: 0,
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"remote_changed","enabled":false,"server_available":true,"viewers":0}"#
+        );
+        // Round-trips back to the same value.
+        let back: Request =
+            serde_json::from_str(r#"{"type":"set_remote","enabled":false}"#).unwrap();
+        assert!(matches!(back, Request::SetRemote { enabled: false }));
     }
 
     #[test]

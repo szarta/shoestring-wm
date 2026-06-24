@@ -186,6 +186,40 @@ pub fn set_automation(enabled: bool) -> Result<()> {
     }
 }
 
+/// Send `Request::RemoteStatus`, return `(enabled, server_available, viewers)`.
+/// Used at startup so the remote toggle/chip reflect reality before the first
+/// `remote_changed` event.
+pub fn query_remote() -> Result<(bool, bool, u32)> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::RemoteStatus)?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse remote response")?;
+    match resp {
+        Response::Remote {
+            enabled,
+            server_available,
+            viewers,
+        } => Ok((enabled, server_available, viewers)),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Set the runtime remote gate (`Request::SetRemote`). A `remote_changed` event
+/// (and coupled `automation_changed` / `screen_capture_changed`) follows when
+/// it flips; enabling is refused by the WM unless a server has registered.
+pub fn set_remote(enabled: bool) -> Result<()> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::SetRemote { enabled })?;
+    let line = read_line(&mut stream)?.context("server closed before responding")?;
+    let resp: Response = serde_json::from_str(&line).context("parse set_remote response")?;
+    match resp {
+        Response::Remote { .. } | Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("server error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 /// Mute/unmute the default audio output (`Request::SetAudioMute`). The WM
 /// delegates to `shoestring-mediad`; the resulting live state arrives later as
 /// an `Event::MediaChanged`, which the event loop applies to the chips.

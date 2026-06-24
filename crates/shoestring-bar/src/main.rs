@@ -193,6 +193,14 @@ struct State {
     /// monitor is reporting — the bar then shows no MUTE/MIC/CAM chips and the
     /// control menu omits the media rows (graceful degrade).
     media: Option<MediaState>,
+    /// Remote-desktop state from the WM (`remote_changed` events, seeded by
+    /// [`ipc_client::query_remote`]). `remote_enabled` is the gate (control-menu
+    /// checkmark); `remote_server_available` greys the toggle until a
+    /// `shoestring-remote-server` registers; `remote_viewers > 0` lights the
+    /// "VIEW" being-viewed chip (a live privacy signal, like MIC/CAM).
+    remote_enabled: bool,
+    remote_server_available: bool,
+    remote_viewers: u32,
     /// 1-based workspace for each window, keyed by ext-FT identifier.
     /// Populated from `window_opened` and updated by
     /// `window_moved_to_workspace`; ext-FT itself does not expose
@@ -495,6 +503,14 @@ fn run_session() -> Result<()> {
         None
     });
 
+    // Seed remote-desktop state (gate / server-availability / viewers). All
+    // off on error; a `remote_changed` event corrects us.
+    let (remote_enabled, remote_server_available, remote_viewers) = ipc_client::query_remote()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = ?e, "ipc remote query failed; assuming off");
+            (false, false, 0)
+        });
+
     // Detect the battery source once at startup. If `battery_show` is
     // off, skip detection entirely so we don't even open the sysfs
     // dir on platforms where the user has opted out.
@@ -532,6 +548,9 @@ fn run_session() -> Result<()> {
         screen_capture_enabled,
         last_capture: None,
         media,
+        remote_enabled,
+        remote_server_available,
+        remote_viewers,
         window_workspaces,
         dirty: false,
         last_clock: String::new(),
@@ -993,6 +1012,21 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
             state.last_capture = Some(Instant::now());
             state.dirty = true;
         }
+        IpcEvent::RemoteChanged {
+            enabled,
+            server_available,
+            viewers,
+        } => {
+            if state.remote_enabled != enabled
+                || state.remote_server_available != server_available
+                || state.remote_viewers != viewers
+            {
+                state.remote_enabled = enabled;
+                state.remote_server_available = server_available;
+                state.remote_viewers = viewers;
+                state.dirty = true;
+            }
+        }
         IpcEvent::MediaChanged {
             audio_muted,
             mic_muted,
@@ -1238,6 +1272,49 @@ fn redraw(
         None
     };
 
+    // Remote "being viewed / controlled" chip: drawn left of the capture chip
+    // whenever a remote client is connected (`remote_viewers > 0`). Uses the
+    // active red color — like MIC/CAM, it's a *live* privacy event: someone is
+    // watching and driving this machine right now, and that must never be
+    // silent. Hidden when no one is connected (the gate merely being on shows
+    // via the CAP/AUTO chips it couples).
+    let view_chip_left = if state.remote_viewers > 0 {
+        const VIEW_LABEL: &str = "VIEW";
+        let pad = s(4);
+        let gap = s(8);
+        let label_w = measure_text(&state.font, font_px, VIEW_LABEL);
+        let chip_w = label_w + pad * 2;
+        let chip_right = cap_chip_left
+            .or(auto_chip_left)
+            .or(control_left)
+            .unwrap_or(clock_x)
+            - gap;
+        let chip_left = chip_right - chip_w;
+        fill_rect(
+            &mut mmap,
+            pw,
+            ph,
+            chip_left,
+            s(2),
+            chip_w,
+            ph as i32 - s(4),
+            CAPTURE_ACTIVE,
+        );
+        draw_text(
+            &mut mmap,
+            pw,
+            ph,
+            &state.font,
+            font_px,
+            chip_left + pad,
+            VIEW_LABEL,
+            fg,
+        );
+        Some(chip_left)
+    } else {
+        None
+    };
+
     // Media-privacy chips (MUTE / MIC / CAM): drawn left of the capture chip
     // whenever `shoestring-mediad` is reporting (`state.media` is `Some`) and
     // the flagged condition holds. MUTE = the default output is muted; MIC =
@@ -1278,7 +1355,8 @@ fn redraw(
         );
         chip_left
     };
-    let media_base = cap_chip_left
+    let media_base = view_chip_left
+        .or(cap_chip_left)
         .or(auto_chip_left)
         .or(control_left)
         .unwrap_or(clock_x);
@@ -1312,6 +1390,7 @@ fn redraw(
             let text = battery::format_reading(&reading, &state.cfg.battery_format);
             let text_w = measure_text(&state.font, font_px, &text);
             let right_anchor = media_chip_left
+                .or(view_chip_left)
                 .or(cap_chip_left)
                 .or(auto_chip_left)
                 .or(control_left)
@@ -1341,6 +1420,7 @@ fn redraw(
             let gap = s(6);
             let right_anchor = battery_left
                 .or(media_chip_left)
+                .or(view_chip_left)
                 .or(cap_chip_left)
                 .or(auto_chip_left)
                 .or(control_left)
@@ -2488,6 +2568,7 @@ const CTRL_CAMERA: i32 = 7;
 const CTRL_SLEEP: i32 = 8;
 const CTRL_REBOOT: i32 = 9;
 const CTRL_SHUTDOWN: i32 = 10;
+const CTRL_REMOTE: i32 = 11;
 
 /// Build the control-menu rows from the current gate state. Toggles show a
 /// checkmark reflecting the live gate; lock/logout are plain items.
@@ -2524,6 +2605,20 @@ fn control_entries(state: &State) -> Vec<tray::MenuNode> {
             Some(state.automation_enabled),
         ),
     ];
+    // Remote-desktop toggle. Greyed out (disabled) until a
+    // shoestring-remote-server has registered, matching the consent model: you
+    // can only turn remote access on when a server is actually present to serve
+    // it. A check = the gate is on (capture + automation are coupled on too).
+    entries.push(tray::MenuNode {
+        id: CTRL_REMOTE,
+        label: "Remote desktop".to_string(),
+        enabled: state.remote_server_available,
+        visible: true,
+        separator: false,
+        has_submenu: false,
+        toggle: Some(state.remote_enabled),
+        children: Vec::new(),
+    });
     // Media-privacy rows, only when `shoestring-mediad` is reporting. The mute
     // checkmarks reflect PipeWire's live state (a checked box = muted). Camera
     // is a disabled, status-only row — there is no honest software off-switch.
@@ -2600,6 +2695,9 @@ fn apply_control_action(state: &mut State, id: i32) {
     let result = match id {
         CTRL_SCREEN_CAPTURE => ipc_client::set_screen_capture(!state.screen_capture_enabled),
         CTRL_AUTOMATION => ipc_client::set_automation(!state.automation_enabled),
+        // Greyed unless a server registered; the WM also refuses enabling
+        // without one. A `remote_changed` event updates our cached state.
+        CTRL_REMOTE => ipc_client::set_remote(!state.remote_enabled),
         CTRL_LOCK => ipc_client::lock(),
         CTRL_LOGOUT => ipc_client::quit(),
         // Power rows: each pops the WM confirm dialog before acting.

@@ -487,6 +487,88 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 );
                 return true;
             }
+            Request::RegisterRemoteServer => {
+                // Mark this connection as *the* remote server (replacing any
+                // prior one) and subscribe it to events so it learns when the
+                // gate flips. Long-lived: its disconnect clears the
+                // registration and forces the gate off (see drop_ipc_client).
+                state.remote_server = Some(id);
+                client.borrow_mut().subscriber = true;
+                let _ = write_response(
+                    client,
+                    &Response::Remote {
+                        enabled: state.remote_enabled,
+                        server_available: true,
+                        viewers: state.remote_viewers,
+                    },
+                );
+                tracing::info!(?id, "remote server registered");
+                // Tell the bar a server is now available (toggle un-greys).
+                state.emit_remote_changed();
+                return false;
+            }
+            Request::SetRemote { enabled } => {
+                // Enabling requires a registered server (the consent toggle is
+                // greyed until then; refuse it over IPC too).
+                if enabled && state.remote_server.is_none() {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "remote disabled: no shoestring-remote-server registered"
+                                .into(),
+                        },
+                    );
+                    return true;
+                }
+                let changed = state.remote_enabled != enabled;
+                // Couples the automation + capture gates on/off.
+                let (auto_changed, capture_changed) = state.set_remote(enabled);
+                let _ = write_response(
+                    client,
+                    &Response::Remote {
+                        enabled: state.remote_enabled,
+                        server_available: state.remote_server.is_some(),
+                        viewers: state.remote_viewers,
+                    },
+                );
+                if auto_changed {
+                    state.emit_ipc(Event::AutomationChanged {
+                        enabled: state.automation_enabled,
+                    });
+                }
+                if capture_changed {
+                    state.emit_ipc(Event::ScreenCaptureChanged {
+                        enabled: state.screen_capture_enabled,
+                    });
+                }
+                if changed {
+                    tracing::info!(enabled, "remote gate changed via ipc");
+                    state.emit_remote_changed();
+                }
+                return true;
+            }
+            Request::RemoteStatus => {
+                let _ = write_response(
+                    client,
+                    &Response::Remote {
+                        enabled: state.remote_enabled,
+                        server_available: state.remote_server.is_some(),
+                        viewers: state.remote_viewers,
+                    },
+                );
+                return true;
+            }
+            Request::ReportRemoteViewers { viewers } => {
+                // Pushed by the registered server as clients come and go. Like
+                // ReportMedia, the local socket is the trust boundary.
+                let changed = state.remote_viewers != viewers;
+                state.remote_viewers = viewers;
+                let _ = write_response(client, &Response::Ok);
+                if changed {
+                    state.emit_remote_changed();
+                }
+                return true;
+            }
             Request::MediaStatus => {
                 let _ = write_response(client, &Response::Media { state: state.media });
                 return true;
@@ -1429,12 +1511,44 @@ impl ShoestringWm {
         // client disconnects before the user resolves the pick, the
         // session must end (no one to deliver the reply to).
         self.cancel_picker_if_owned_by(id);
-        let Some(server) = self.ipc.as_mut() else {
-            return;
-        };
-        if let Some(entry) = server.clients.remove(&id) {
-            self.loop_handle.remove(entry.token);
-            tracing::debug!(?id, "ipc client dropped");
+
+        // If the registered remote server's connection dropped, the server is
+        // gone: clear registration and force the remote gate off (no server ⇒
+        // no remote access). set_remote(false) here also closes the coupled
+        // capture/automation gates and tears down any capture stream. Compute
+        // the changes now, drop the client below, then broadcast — so the
+        // RemoteChanged push doesn't try to write to the just-removed socket.
+        let remote_teardown = (self.remote_server == Some(id)).then(|| {
+            self.remote_server = None;
+            let changes = if self.remote_enabled {
+                self.set_remote(false)
+            } else {
+                (false, false)
+            };
+            self.remote_viewers = 0;
+            changes
+        });
+
+        if let Some(server) = self.ipc.as_mut() {
+            if let Some(entry) = server.clients.remove(&id) {
+                self.loop_handle.remove(entry.token);
+                tracing::debug!(?id, "ipc client dropped");
+            }
+        }
+
+        if let Some((auto_changed, capture_changed)) = remote_teardown {
+            tracing::info!("remote server disconnected; remote gate forced off");
+            if auto_changed {
+                self.emit_ipc(shoestring_ipc::Event::AutomationChanged {
+                    enabled: self.automation_enabled,
+                });
+            }
+            if capture_changed {
+                self.emit_ipc(shoestring_ipc::Event::ScreenCaptureChanged {
+                    enabled: self.screen_capture_enabled,
+                });
+            }
+            self.emit_remote_changed();
         }
     }
 }

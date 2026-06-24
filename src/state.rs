@@ -358,6 +358,23 @@ pub struct ShoestringWm {
     /// `Request::ReportMedia`; mutation is delegated to the helper.
     pub media: Option<shoestring_ipc::MediaState>,
 
+    /// Runtime **remote gate** for remote-desktop serve mode. Off until the
+    /// user explicitly enables it (never from disk, so remote access can't be
+    /// live at login), and only enable-able while a server is registered. When
+    /// it flips, the capture + automation gates follow (see
+    /// [`Self::set_remote`]). Reported to the bar (toggle + "being viewed"
+    /// chip) via [`shoestring_ipc::Event::RemoteChanged`].
+    pub remote_enabled: bool,
+    /// The IPC connection of the registered `shoestring-remote-server`, if one
+    /// has registered ([`shoestring_ipc::Request::RegisterRemoteServer`]).
+    /// `Some` ⇒ the remote gate is selectable. Cleared when that connection
+    /// drops, which also forces the gate off.
+    pub remote_server: Option<crate::ipc::ClientId>,
+    /// Connected remote viewers/controllers, as last reported by the server
+    /// ([`shoestring_ipc::Request::ReportRemoteViewers`]). Drives the bar's
+    /// "being viewed / controlled" chip; `> 0` means someone is watching.
+    pub remote_viewers: u32,
+
     /// In-flight `Request::Screenshot` subprocesses, keyed by an
     /// opaque counter. Entries are removed once the child has exited
     /// and the deferred IPC response has been written.
@@ -792,6 +809,11 @@ impl ShoestringWm {
             capture_gate,
             last_screen_capture_event: None,
             media: None,
+            // Remote-desktop serve mode: off and serverless until the user
+            // enables it after a server registers (runtime-only consent).
+            remote_enabled: false,
+            remote_server: None,
+            remote_viewers: 0,
             pending_screenshots: HashMap::new(),
             next_screenshot_id: 0,
             pending_commands: HashMap::new(),
@@ -1698,6 +1720,38 @@ impl ShoestringWm {
             self.set_screen_capture(enabled);
         }
         capture_changed
+    }
+
+    /// Flip the **remote gate**, coupling the automation + capture gates:
+    /// enabling turns both on (so the served output can stream and client input
+    /// can inject), disabling turns both off (which tears down any capture
+    /// stream). Returns `(automation_changed, capture_changed)` so the caller
+    /// can emit the matching `AutomationChanged` / `ScreenCaptureChanged`
+    /// events for the bar's AUTO/CAP chips. Does *not* emit `RemoteChanged`
+    /// itself — the caller does that via [`Self::emit_remote_changed`] once it
+    /// has decided whether the value actually moved.
+    pub fn set_remote(&mut self, enabled: bool) -> (bool, bool) {
+        self.remote_enabled = enabled;
+        let auto_before = self.automation_enabled;
+        let capture_changed = self.set_automation(enabled);
+        let auto_changed = self.automation_enabled != auto_before;
+        if !enabled {
+            // No stream ⇒ no viewers; the server will also re-report 0.
+            self.remote_viewers = 0;
+        }
+        (auto_changed, capture_changed)
+    }
+
+    /// Broadcast the current remote-desktop state to subscribers — the bar
+    /// (toggle + "being viewed" chip) and the registered server (which reads
+    /// `enabled` to open / close its listener).
+    pub fn emit_remote_changed(&mut self) {
+        let server_available = self.remote_server.is_some();
+        self.emit_ipc(shoestring_ipc::Event::RemoteChanged {
+            enabled: self.remote_enabled,
+            server_available,
+            viewers: self.remote_viewers,
+        });
     }
 
     /// Apply the screen-capture gate. Idempotent: brings the
