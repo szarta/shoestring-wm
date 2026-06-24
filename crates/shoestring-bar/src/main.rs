@@ -31,7 +31,12 @@ use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use shoestring_ipc::Event as IpcEvent;
 use shoestring_ipc::MediaState;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+// `Layer as _` brings the trait's `.boxed()` into scope for method resolution
+// without binding the name `Layer` (which is already the layer-shell enum here).
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
 use wayland_client::{
     backend::ObjectId,
     event_created_child,
@@ -333,18 +338,45 @@ fn main() -> Result<()> {
         }
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            // `.init()` bridges the `log` crate into tracing, so resvg/usvg's
-            // per-icon parser chatter (e.g. WARN "marker-* 'none'" on Adwaita
-            // symbolic icons) would otherwise spam the bar's stderr. Pin those
-            // crates to `error` in the default; an explicit RUST_LOG still wins.
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,usvg=error,resvg=error")),
-        )
-        .init();
+    init_tracing();
+    // A startup marker so each run is delimited in an append-mode log file.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "shoestring-bar starting"
+    );
 
     run_with_reconnect()
+}
+
+/// Initialise tracing. Writes to stderr by default; if `SHOESTRING_BAR_LOG`
+/// is set, appends to that file instead (ANSI off, so the file stays
+/// grep-friendly). Mirrors `SHOESTRING_WM_LOG` / `SHOESTRING_MENU_LOG` — the
+/// practical way to observe the bar's IPC event flow, gate/chip state, and
+/// which WM socket it connected to, without scraping stderr.
+///
+/// The default filter pins usvg/resvg to `error` because `.init()` bridges the
+/// `log` crate into tracing, and resvg/usvg's per-icon parser chatter (e.g.
+/// WARN "marker-* 'none'" on Adwaita symbolic icons) would otherwise spam the
+/// log. An explicit `RUST_LOG` still wins.
+fn init_tracing() {
+    let env = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,usvg=error,resvg=error"));
+    let fmt_layer = match std::env::var_os("SHOESTRING_BAR_LOG") {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .expect("open SHOESTRING_BAR_LOG path");
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .with_filter(env)
+                .boxed()
+        }
+        None => tracing_subscriber::fmt::layer().with_filter(env).boxed(),
+    };
+    tracing_subscriber::registry().with(fmt_layer).init();
 }
 
 /// Reconnect supervisor. A Wayland client cannot resurrect a severed
@@ -686,7 +718,8 @@ Config file: $XDG_CONFIG_HOME/shoestring-bar/config.toml (defaults to
 
 Environment: WAYLAND_DISPLAY (required), SHOESTRING_WM_SOCKET (optional,
 enables live workspace/focus updates), SHOESTRING_BAR_FONT (font path
-override), RUST_LOG (tracing filter).
+override), RUST_LOG (tracing filter), SHOESTRING_BAR_LOG (append tracing
+to this file instead of stderr, ANSI off).
 ",
         ver = env!("CARGO_PKG_VERSION"),
     )

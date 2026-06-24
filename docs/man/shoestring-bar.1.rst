@@ -39,6 +39,12 @@ Environment
 ``RUST_LOG``
     ``tracing_subscriber`` filter; default ``info``.
 
+``SHOESTRING_BAR_LOG``
+    Optional. When set, tracing is appended to this file (with ANSI
+    escapes disabled) instead of stderr. Mirrors ``SHOESTRING_WM_LOG``;
+    the practical way to observe the bar's IPC event flow and which WM
+    socket it connected to. Pair with ``RUST_LOG=debug``.
+
 Limitations
 -----------
 

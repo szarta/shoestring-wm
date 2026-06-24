@@ -20,6 +20,10 @@ use shoestring_ipc::{client_socket_path, Event, MediaState, Request, Response, W
 fn connect() -> Result<UnixStream> {
     let path = client_socket_path()
         .context("could not resolve socket path; is shoestring-wm running and exporting $SHOESTRING_WM_SOCKET?")?;
+    // Log the resolved socket so the live-vs-test `$SHOESTRING_WM_SOCKET`
+    // confusion (a bar pointed at the wrong WM shows stale data) is visible in
+    // the log. Debug-level: per-request, so it stays out of the default `info`.
+    tracing::debug!(socket = %path.display(), "ipc connect");
     UnixStream::connect(&path).with_context(|| format!("connect to {}", path.display()))
 }
 
@@ -328,6 +332,9 @@ pub fn open_event_stream() -> Result<EventStream> {
     stream
         .set_nonblocking(true)
         .context("set event stream non-blocking")?;
+    if let Some(path) = client_socket_path() {
+        tracing::info!(socket = %path.display(), "ipc event stream open");
+    }
     Ok(EventStream {
         stream,
         buf: Vec::new(),
