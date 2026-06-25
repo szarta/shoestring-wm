@@ -292,7 +292,11 @@ impl ShoestringWm {
             .elements()
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &root))
         {
-            let Some(output) = self.space.outputs().next() else {
+            // Unconstrain against the output the parent window actually sits
+            // on — not just the first output. Otherwise a popup whose parent
+            // is on a secondary monitor gets unconstrained against the primary
+            // output's rect and slides onto the wrong screen.
+            let Some(output) = crate::layout::output_under(&self.space, window) else {
                 return;
             };
             let (Some(output_geo), Some(window_geo)) = (

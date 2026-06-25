@@ -120,7 +120,10 @@ fn rect_contains(rect: Rectangle<i32, Logical>, point: Point<i32, Logical>) -> b
 
 /// The output under the window's center, falling back to the first known
 /// output if the window sits outside every output.
-fn output_under<'a>(space: &'a Space<Window>, window: &Window) -> Option<&'a Output> {
+pub(crate) fn output_under<'a>(
+    space: &'a Space<Window>,
+    window: &Window,
+) -> Option<&'a Output> {
     let center = space.element_location(window).map(|loc| {
         let geo = window.geometry();
         Point::from((loc.x + geo.size.w / 2, loc.y + geo.size.h / 2))
