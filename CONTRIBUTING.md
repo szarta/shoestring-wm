@@ -43,14 +43,21 @@ sudo apt-get install -y \
     libdrm-dev libgbm-dev libegl-dev \
     libudev-dev libinput-dev \
     libseat-dev libdisplay-info-dev \
-    libpam0g-dev
-
-# Only if you build the screencast portal or media monitor:
-sudo apt-get install -y libpipewire-0.3-dev libclang-dev
+    libpam0g-dev \
+    libpipewire-0.3-dev libclang-dev
 
 # Only to run X11 apps under the compositor (spawned on demand):
 sudo apt-get install -y xwayland
 ```
+
+That is the full set. `libpipewire-0.3-dev` + `libclang-dev` build the
+screencast portal and media monitor, which are part of the workspace — so
+`cargo build --workspace`, `cargo test --workspace`, and the pre-commit
+hooks (Testing, below) all need them. They are skippable **only** if you
+restrict yourself to the compositor alone (`cargo build -p shoestring-wm`)
+and never run the workspace test/clippy gates; when in doubt, install them.
+`libpam0g-dev` likewise links the screen locker, which the workspace build
+includes.
 
 Other distributions and FreeBSD are covered in
 [`docs/install.rst`](docs/install.rst). On FreeBSD, libraries live under

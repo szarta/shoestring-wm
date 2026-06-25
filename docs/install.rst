@@ -271,7 +271,9 @@ compositor or the winit dev backend.
 NixOS
 ~~~~~
 
-A development shell that brings in everything needed:
+A development shell that brings in everything needed for a full
+``cargo build --workspace`` (compositor plus every helper, including the
+screencast portal):
 
 .. code-block:: nix
 
@@ -285,7 +287,12 @@ A development shell that brings in everything needed:
         udev libinput
         seatd libdisplay-info
         pam
+        pipewire           # screencast portal + media monitor (workspace build)
       ];
+      # pipewire-sys / libspa-sys generate bindings with bindgen, which needs
+      # libclang at build time. Drop both this and `pipewire` only if you build
+      # the compositor alone (`cargo build -p shoestring-wm`).
+      LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
     }
 
 The packaging story for shoestring-wm itself (a Nix derivation under
