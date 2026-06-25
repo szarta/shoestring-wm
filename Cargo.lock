@@ -2514,6 +2514,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoestring-clipboard"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "tracing",
+ "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "shoestring-config"
 version = "0.6.1"
 dependencies = [

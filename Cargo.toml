@@ -4,6 +4,7 @@ members = [
     "crates/shoestring-ipc",
     "crates/shoestring-config",
     "crates/shoestring-bar",
+    "crates/shoestring-clipboard",
     "crates/shoestring-confirm",
     "crates/shoestring-ctl",
     "crates/shoestring-tasks",

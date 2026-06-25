@@ -77,6 +77,39 @@ shoestring-wm):
 - A few apps assume a root window they can draw on (some screensavers,
   ``xwallpaper``); the WM does not provide one.
 
+Clipboard managers and the cross-machine bridge
+-----------------------------------------------
+
+Besides ordinary ``wl_data_device`` clipboard and primary selection, the
+compositor advertises ``zwlr_data_control_manager_v1`` (the wlroots
+data-control protocol). This lets a client **read and set** the clipboard and
+primary selection without holding keyboard focus, so out-of-focus clipboard
+managers — ``cliphist``, ``copyq``, ``wl-clipboard`` (``wl-copy`` / ``wl-paste``)
+— work, and so does shoestring's own bridge.
+
+``shoestring-clipboard`` is a tiny data-control client with two modes:
+
+- ``shoestring-clipboard watch`` prints each new selection to stdout as a
+  length-framed entry;
+- ``shoestring-clipboard set`` reads those frames from stdin and takes
+  ownership of the selection, serving the bytes to whoever pastes.
+
+Add ``--primary`` to target the primary (middle-click) selection instead of
+the clipboard. Because the two halves compose over an ordinary byte pipe, you
+can **sync the clipboard between two shoestring-wm machines** by piping them
+over ``ssh`` — for example to share a remote box's clipboard with the local
+desktop you drive Claude from::
+
+    # local copy → remote box
+    shoestring-clipboard watch | ssh dev-106 shoestring-clipboard set
+    # remote copy → local box (run the reverse for two-way sync)
+    ssh dev-106 shoestring-clipboard watch | shoestring-clipboard set
+
+Both ends need a running shoestring-wm session (or any compositor advertising
+``zwlr_data_control_manager_v1``). v1 syncs text selections; an identical
+payload is not re-taken, so a two-way pair settles instead of echoing.
+``$SHOESTRING_CLIPBOARD_LOG`` redirects the tool's log to a file.
+
 Games, Steam and Proton
 -----------------------
 

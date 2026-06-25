@@ -286,6 +286,14 @@ impl PrimarySelectionHandler for ShoestringWm {
     }
 }
 
+impl smithay::wayland::selection::wlr_data_control::DataControlHandler for ShoestringWm {
+    fn data_control_state(
+        &mut self,
+    ) -> &mut smithay::wayland::selection::wlr_data_control::DataControlState {
+        &mut self.data_control_state
+    }
+}
+
 impl DndGrabHandler for ShoestringWm {}
 impl WaylandDndGrabHandler for ShoestringWm {
     fn dnd_requested<S: Source>(

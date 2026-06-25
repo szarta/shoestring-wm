@@ -1,0 +1,30 @@
+[package]
+name = "shoestring-clipboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Observe and set the shoestring-wm clipboard from out of focus over wlr-data-control; the unix-pipe half of the cross-machine clipboard bridge (watch | ssh host set)."
+
+[[bin]]
+name = "shoestring-clipboard"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland client + the wlr-data-control protocol bindings. Versions match what
+# shoestring-wm pulls via smithay (and what the rest of the suite uses), so the
+# resolved deps are shared on disk.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# poll(2) + pipe(2) for the single-threaded event loop (wayland fd + stdin) and
+# the selection-transfer pipes.
+libc = "0.2"
+
+# Lightweight error type for main, and CLI/log plumbing.
+anyhow = "1"
+
+# Structured logs, env-filterable + redirectable to a file
+# (SHOESTRING_CLIPBOARD_LOG), matching the rest of the suite.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

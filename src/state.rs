@@ -495,6 +495,12 @@ pub struct ShoestringWm {
     /// to / from X11 apps via the XWayland selection bridge.
     pub primary_selection_state:
         smithay::wayland::selection::primary_selection::PrimarySelectionState,
+    /// `zwlr_data_control_manager_v1` — lets an out-of-focus client (the
+    /// `shoestring-clipboard` bridge, cliphist, copyq) OBSERVE and SET the
+    /// clipboard + primary selection without holding keyboard focus. Held for
+    /// the global's lifetime. Drives the cross-machine clipboard sync (task
+    /// 181); composes with the XWayland bridge via the shared `SelectionHandler`.
+    pub data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
 }
 
 impl ShoestringWm {
@@ -629,6 +635,17 @@ impl ShoestringWm {
         let xwayland_shell_state = crate::xwayland::init_xwayland_globals(&dh);
         let primary_selection_state =
             smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Self>(&dh);
+        // wlr-data-control: advertise the manager (v2) unconditionally so
+        // clipboard managers and the cross-machine clipboard bridge can read +
+        // write the selection out of focus. Passing the primary-selection state
+        // enables primary over data-control too. `|_| true` = visible to every
+        // client (the protocol is the standard wlroots clipboard-manager API).
+        let data_control_state =
+            smithay::wayland::selection::wlr_data_control::DataControlState::new::<Self, _>(
+                &dh,
+                Some(&primary_selection_state),
+                |_| true,
+            );
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -858,6 +875,7 @@ impl ShoestringWm {
             xdisplay: None,
             xwayland_shell_state,
             primary_selection_state,
+            data_control_state,
         }
     }
 
