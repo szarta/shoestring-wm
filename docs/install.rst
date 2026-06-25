@@ -417,9 +417,13 @@ Write ``/etc/greetd/config.toml``:
     vt = 7
 
     [default_session]
-    # agreety prompts for login on the VT, then execs the WM as a fresh
-    # seat-active session — the clean handoff LightDM doesn't do.
-    command = "agreety --cmd shoestring-wm"
+    # agreety prompts for login on the VT, then execs the session as a fresh
+    # seat-active session — the clean handoff LightDM doesn't do. Point --cmd
+    # at the *session wrapper* (shoestring-wm-session), NOT the bare
+    # `shoestring-wm` binary: the wrapper exports XDG_CURRENT_DESKTOP and seeds
+    # the systemd/D-Bus environment that desktop portals need. Launch the bare
+    # compositor here and screenshots / screen sharing break — see the note below.
+    command = "agreety --cmd shoestring-wm-session"
     # The greeter's own unprivileged user. On Debian/Ubuntu the greetd
     # package creates `_greetd`; some distros use `greeter`. Check with
     # `getent passwd _greetd greeter`.
@@ -435,8 +439,30 @@ Then make greetd the display manager and reboot:
 
 At greetd's ``login:`` prompt (agreety looks like a plain text login), log in
 normally and shoestring launches. For a nicer login UI, install
-``greetd-tuigreet`` and use ``command = "tuigreet --cmd shoestring-wm"``
+``greetd-tuigreet`` and use ``command = "tuigreet --cmd shoestring-wm-session"``
 instead.
+
+.. important::
+
+   **Point the greeter at the session wrapper, not the bare compositor.** A
+   greeter's ``--cmd`` runs exactly what you give it, bypassing the
+   ``shoestring-wm.desktop`` file a graphical DM (GDM/SDDM) would use — so it
+   must name ``shoestring-wm-session``, never ``shoestring-wm``. The wrapper
+   exports ``XDG_CURRENT_DESKTOP=shoestring-wm`` and seeds the systemd / D-Bus
+   activation environment *before* the compositor starts. Skip it and
+   ``xdg-desktop-portal`` cannot select the shoestring backend (see
+   :doc:`portals`): the **Screenshot** and **ScreenCast** portal interfaces
+   are then served by no backend, so screen sharing silently fails and X11
+   apps under XWayland — GIMP's *File ▸ Create ▸ Screenshot*, for instance —
+   fall back to grabbing the empty X11 root window and produce a **solid black
+   image**. (Note this is a *different* black screen from the seat-handoff one
+   above: that one is a black display at login; this one is a working desktop
+   whose screenshots/recordings come out black.) To recover an
+   already-running session without logging out::
+
+       systemctl --user set-environment XDG_CURRENT_DESKTOP=shoestring-wm
+       dbus-update-activation-environment XDG_CURRENT_DESKTOP=shoestring-wm
+       systemctl --user restart xdg-desktop-portal.service
 
 No greeter at all
 ~~~~~~~~~~~~~~~~~
