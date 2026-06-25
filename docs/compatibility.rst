@@ -77,6 +77,39 @@ shoestring-wm):
 - A few apps assume a root window they can draw on (some screensavers,
   ``xwallpaper``); the WM does not provide one.
 
+GIMP screenshots (use 3.x, not 2.10)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**GIMP 2.10's built-in screenshot** (*File ▸ Create ▸ Screenshot*) produces a
+**solid black image** on shoestring-wm — for the full-screen, region, and
+single-window modes alike. This is a GIMP limitation, not a compositor bug,
+and **no portal or environment fix changes it**:
+
+- GIMP 2.10 is a GTK2 application, and GTK2 has no Wayland backend, so it
+  always runs under **XWayland** with an X11 ``$DISPLAY``.
+- Its screenshot plug-in selects a backend **X11-first** and hardcodes
+  ``screenshot_x11_available()`` to return ``TRUE`` (no XWayland guard). It
+  therefore always grabs the **X11 root window** — which under XWayland holds
+  none of the composited Wayland content — and never reaches the working
+  ``org.freedesktop.portal.Screenshot`` portal that the session serves.
+
+Two fixes:
+
+- **Use GIMP 3.x.** It is GTK3, runs natively on Wayland (no X11 display), and
+  its screenshot goes through the desktop portal, which shoestring-wm serves
+  (see :doc:`portals`) — so *File ▸ Create ▸ Screenshot* captures real pixels.
+  A from-source 3.x build works; Flathub also ships ``org.gimp.GIMP``. (Verify
+  the session's portal is reachable first: ``XDG_CURRENT_DESKTOP=shoestring-wm``
+  must be exported into the systemd-user / D-Bus activation environment, which
+  the ``shoestring-wm-session`` wrapper handles — see :doc:`install`.)
+- **Or capture outside GIMP and open the result.** ``shoestring-screenshot``
+  (add ``--region`` to drag-select a rectangle) writes a PNG you can open with
+  *File ▸ Open*; or ``shoestring-screenshot --clipboard`` (needs
+  ``wl-clipboard``) copies the capture for *File ▸ Create ▸ From Clipboard*.
+
+The same X11-first screenshot behaviour affects other GTK2/X11 capture tools;
+prefer a Wayland-native or GTK3 successor, or capture externally.
+
 Clipboard managers and the cross-machine bridge
 -----------------------------------------------
 
