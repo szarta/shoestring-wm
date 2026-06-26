@@ -214,6 +214,24 @@ Each request is a JSON object with a ``type`` discriminator:
        down/up variants. Unlike ``inject_key`` / ``inject_click`` (atomic
        tap / press+release) each is a single event, so a held key, a chord,
        or a drag reproduces exactly. Gated by the automation gate.
+   * - ``{"type": "get_clipboard"}`` (optional ``"primary": true``)
+     - Read the WM's current selection and reply with ``clipboard``. The WM
+       picks the best text mime the selection owner offers
+       (``text/plain;charset=utf-8`` → ``text/plain`` → ``UTF8_STRING`` → …),
+       reads the bytes out of band, and returns them. ``primary`` reads the
+       primary (middle-click) selection instead of the clipboard. The reply is
+       **deferred** — the WM holds the connection until the owning client
+       finishes writing. An empty or non-text selection replies with no ``mime``
+       and empty ``data``. This is the viewer-box read behind cross-machine
+       copy/paste; locally it is a focus-free ``wl-paste``. Gated by automation.
+   * - ``{"type": "set_clipboard", "mime": "text/plain;charset=utf-8", "data": [...]}``
+       (optional ``"primary": true``)
+     - Take ownership of the selection and serve ``data`` (a byte array) under
+       ``mime`` to anything that pastes. A text ``mime`` fans out to the standard
+       text aliases (``text/plain``, ``UTF8_STRING``, ``STRING``, ``TEXT``) so
+       every paster finds the atom it asks for. ``primary`` sets the primary
+       selection. The receiving half of cross-machine copy/paste; locally a
+       focus-free ``wl-copy``. Reply is ``ok``. Gated by automation.
    * - ``{"type": "pointer_position"}``
      - Read the current pointer location. Reply is ``pointer_position``.
        Read-only and not gated by automation.
@@ -482,7 +500,8 @@ The following requests refuse with an ``error`` while
 ``[general].automation_enabled`` is off (and the CLI flag
 ``--enable-automation`` / the IPC ``set_automation`` haven't flipped
 it): ``inject_key``, ``inject_text``, ``inject_click``, ``move_mouse``,
-``inject_input``, ``dispatch_action``, ``screenshot``, ``run_command``. The error message
+``inject_input``, ``get_clipboard``, ``set_clipboard``, ``dispatch_action``,
+``screenshot``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
 
@@ -557,6 +576,12 @@ The server replies with a single JSON object tagged by ``type``:
 
 ``screenshot``
     ``{"type": "screenshot", "path": "/absolute/path.png"}``.
+
+``clipboard``
+    ``{"type": "clipboard", "mime": "text/plain;charset=utf-8", "data": [...]}``.
+    Returned in reply to ``get_clipboard``. ``data`` is the selection bytes;
+    ``mime`` is the type they're in and is omitted when the selection was empty
+    or had no text the WM could read (``data`` is then empty).
 
 ``pointer_position``
     ``{"type": "pointer_position", "x": <f64>, "y": <f64>}``. Returned
@@ -926,6 +951,19 @@ Each event is tagged by ``type``.
     ``register_remote_client``). The axis keys (``Super+J/K``) and the break-out
     hotkey are handled locally and never forwarded.
 
+``remote_clipboard``
+    ``{"type": "remote_clipboard", "op": "push"|"pull"}``. Pushed **only to the
+    connection that is the active machine-axis view** when the user triggers a
+    remote clipboard transfer (``Super+Shift+C`` = ``push``, ``Super+Shift+V`` =
+    ``pull``). It is viewer-initiated and gated by remote sharing — never a
+    silent always-on stream. ``push`` tells the client to read *this* (viewer)
+    machine's selection (``get_clipboard``) and ship it to the remote, which
+    installs it (``set_clipboard``); ``pull`` tells the client to fetch the
+    remote's selection and install it locally. Because both directions are
+    initiated by the one active viewer, the served box only ever replies to the
+    requester — it never has to choose among its connected clients. Emitted only
+    while a remote machine is the active view; a no-op at the local view.
+
 ``config_reloaded``
     ``{"type": "config_reloaded"}``. Fired after a successful config
     re-read (file-watcher or explicit ``reload_config`` trigger).
@@ -1062,6 +1100,23 @@ version (``shoestring-ctl --version``). Per the :ref:`stability policy
 <ipc-stability>` every entry below is an *additive* change — nothing has
 been renamed, removed, or repurposed since 0.1.0 — so a client written
 against any prior version still works against a newer WM.
+
+0.8.0
+~~~~~
+
+- ``get_clipboard`` / ``set_clipboard`` requests + ``clipboard`` response: read
+  and set the WM's selection (clipboard or primary) over IPC, gated by
+  automation. ``get_clipboard`` reads the owner's bytes out of band and defers
+  its reply; ``set_clipboard`` takes ownership and fans text mimes out to the
+  standard aliases. A focus-free ``wl-paste`` / ``wl-copy``, and the native
+  plumbing behind cross-machine remote clipboard sync.
+- ``remote_clipboard`` event (``{op: "push"|"pull"}``): pushed to the active
+  machine-axis view when the user triggers ``Super+Shift+C`` / ``Super+Shift+V``,
+  telling a ``shoestring-remote-client`` to move the clipboard over its tunnel.
+  Both directions are viewer-initiated, so the served box only replies to the
+  requester. The ``clipboard-push`` / ``clipboard-pull`` / ``screenshot``
+  dispatchable actions back the binds; ``screenshot`` stays local while viewing
+  a remote.
 
 0.7.0
 ~~~~~

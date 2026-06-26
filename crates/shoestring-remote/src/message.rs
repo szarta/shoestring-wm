@@ -200,6 +200,18 @@ pub enum ClientMessage {
     /// Scroll deltas (continuous, in surface-local units). Either axis may be
     /// zero.
     PointerAxis { horizontal: f64, vertical: f64 },
+    /// Pull request: asks the server for the served machine's current selection
+    /// (`primary` = primary vs clipboard). The server replies with one
+    /// [`ServerMessage::Clipboard`]. The viewer fires this for `Super+Shift+V`.
+    GetClipboard { primary: bool },
+    /// Push: set the served machine's selection to `data` under `mime` (empty
+    /// `mime` clears / is a no-op). The viewer fires this for `Super+Shift+C`
+    /// after reading its own local clipboard.
+    SetClipboard {
+        primary: bool,
+        mime: String,
+        data: Vec<u8>,
+    },
     /// Orderly disconnect; the server may stop streaming and close.
     Bye,
 }
@@ -240,6 +252,20 @@ impl Message for ClientMessage {
                 put_f64(out, *horizontal);
                 put_f64(out, *vertical);
             }
+            ClientMessage::GetClipboard { primary } => {
+                put_u8(out, 6);
+                put_bool(out, *primary);
+            }
+            ClientMessage::SetClipboard {
+                primary,
+                mime,
+                data,
+            } => {
+                put_u8(out, 7);
+                put_bool(out, *primary);
+                put_str(out, mime);
+                put_bytes(out, data);
+            }
             ClientMessage::Bye => put_u8(out, 5),
         }
     }
@@ -269,6 +295,12 @@ impl Message for ClientMessage {
                 vertical: r.f64()?,
             },
             5 => ClientMessage::Bye,
+            6 => ClientMessage::GetClipboard { primary: r.bool()? },
+            7 => ClientMessage::SetClipboard {
+                primary: r.bool()?,
+                mime: r.string()?,
+                data: r.bytes()?,
+            },
             t => {
                 return Err(Error::BadTag {
                     kind: "ClientMessage",
@@ -303,6 +335,14 @@ pub enum ServerMessage {
     /// should reallocate its presentation surface. A fresh full-damage frame
     /// follows.
     Resize { width: u32, height: u32, scale: f64 },
+    /// Reply to [`ClientMessage::GetClipboard`]: the served machine's current
+    /// selection. Empty `mime` (and `data`) means the selection was empty / had
+    /// no readable text. `primary` echoes which selection this is.
+    Clipboard {
+        primary: bool,
+        mime: String,
+        data: Vec<u8>,
+    },
     /// The server is shutting the session down.
     Bye,
 }
@@ -344,6 +384,16 @@ impl Message for ServerMessage {
                 put_u32(out, *height);
                 put_f64(out, *scale);
             }
+            ServerMessage::Clipboard {
+                primary,
+                mime,
+                data,
+            } => {
+                put_u8(out, 5);
+                put_bool(out, *primary);
+                put_str(out, mime);
+                put_bytes(out, data);
+            }
             ServerMessage::Bye => put_u8(out, 4),
         }
     }
@@ -373,6 +423,11 @@ impl Message for ServerMessage {
                 scale: r.f64()?,
             },
             4 => ServerMessage::Bye,
+            5 => ServerMessage::Clipboard {
+                primary: r.bool()?,
+                mime: r.string()?,
+                data: r.bytes()?,
+            },
             t => {
                 return Err(Error::BadTag {
                     kind: "ServerMessage",
@@ -416,6 +471,12 @@ mod tests {
             horizontal: 0.0,
             vertical: 15.0,
         });
+        roundtrip(ClientMessage::GetClipboard { primary: true });
+        roundtrip(ClientMessage::SetClipboard {
+            primary: false,
+            mime: "text/plain;charset=utf-8".to_string(),
+            data: b"hello over the wire".to_vec(),
+        });
         roundtrip(ClientMessage::Bye);
     }
 
@@ -456,6 +517,16 @@ mod tests {
             width: 3840,
             height: 2160,
             scale: 1.5,
+        });
+        roundtrip(ServerMessage::Clipboard {
+            primary: false,
+            mime: "text/plain".to_string(),
+            data: b"pulled from the remote".to_vec(),
+        });
+        roundtrip(ServerMessage::Clipboard {
+            primary: true,
+            mime: String::new(),
+            data: vec![],
         });
         roundtrip(ServerMessage::Bye);
     }

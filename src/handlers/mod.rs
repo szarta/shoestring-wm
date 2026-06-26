@@ -272,6 +272,30 @@ impl PointerConstraintsHandler for ShoestringWm {
 
 impl SelectionHandler for ShoestringWm {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: smithay::input::Seat<Self>,
+    ) {
+        // A client took the selection — refresh the broker's view of the live
+        // mimes and drop any compositor cache we held for this target.
+        self.note_new_selection(ty, source.map(|s| s.mime_types()).unwrap_or_default());
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: smithay::input::Seat<Self>,
+        _user_data: &(),
+    ) {
+        // A client is pasting a selection we set (e.g. one pulled from a remote
+        // machine) — serve the cached bytes.
+        self.serve_clipboard_selection(ty, mime_type, fd);
+    }
 }
 
 impl DataDeviceHandler for ShoestringWm {

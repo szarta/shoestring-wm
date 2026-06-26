@@ -1114,9 +1114,10 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
         | IpcEvent::OutputAdded(_)
         | IpcEvent::OutputRemoved { .. }
         | IpcEvent::ConfigReloaded
-        // CapturedInput is pushed only to the active remote-client connection,
-        // never to the bar — listed for exhaustiveness.
+        // CapturedInput and RemoteClipboard are pushed only to the active
+        // remote-client connection, never to the bar — listed for exhaustiveness.
         | IpcEvent::CapturedInput { .. }
+        | IpcEvent::RemoteClipboard { .. }
         | IpcEvent::Metrics { .. } => {}
     }
 }

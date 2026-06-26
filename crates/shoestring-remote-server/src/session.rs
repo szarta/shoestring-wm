@@ -18,7 +18,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use shoestring_ipc::RawInput;
@@ -34,6 +34,12 @@ struct Teardown {
     wm_capture: UnixStream,
     done: AtomicBool,
 }
+
+/// The network writer, shared between the frames thread and the input loop.
+/// Both write whole `ServerMessage` frames; the mutex makes each write+flush
+/// atomic so a clipboard reply can never interleave mid-frame with a capture
+/// frame on the wire.
+type SharedNet = Arc<Mutex<BufWriter<TcpStream>>>;
 
 impl Teardown {
     fn stop(&self) {
@@ -86,18 +92,23 @@ pub fn serve(net: TcpStream, output: Option<String>, viewers: Arc<Viewers>) -> R
     viewers.add();
     tracing::info!(%peer, "session started");
 
+    // One shared writer for both directions (capture frames + clipboard replies).
+    let net_out: SharedNet = Arc::new(Mutex::new(BufWriter::new(
+        net.try_clone().context("clone net for writer")?,
+    )));
+
     // Frames thread: WM capture stream → network.
     let frames = {
         let teardown = Arc::clone(&teardown);
-        let net_out = net.try_clone().context("clone net for frames")?;
+        let net_out = Arc::clone(&net_out);
         std::thread::Builder::new()
             .name("frames".into())
             .spawn(move || forward_frames(wm_capture, net_out, &teardown))
             .context("spawn frames thread")?
     };
 
-    // Input loop on this thread: network → WM injection.
-    let input_result = forward_input(net_in, &teardown);
+    // Input loop on this thread: network → WM injection + clipboard brokering.
+    let input_result = forward_input(net_in, net_out, &teardown);
     teardown.stop();
     let _ = frames.join();
 
@@ -108,19 +119,20 @@ pub fn serve(net: TcpStream, output: Option<String>, viewers: Arc<Viewers>) -> R
 
 /// Read `ServerMessage` frames from the WM and write them to the client until
 /// either side closes. A `Bye` from the WM is forwarded, then the loop ends.
-fn forward_frames(wm_capture: UnixStream, net_out: TcpStream, teardown: &Teardown) {
+fn forward_frames(wm_capture: UnixStream, net_out: SharedNet, teardown: &Teardown) {
     let mut wm_in = BufReader::new(wm_capture);
-    let mut net_out = BufWriter::new(net_out);
     // Read ends the loop on EOF / shutdown / decode error: the capture stream is
     // done (gate off, WM exit, or client gone).
     while let Ok(msg) = read_framed::<_, ServerMessage>(&mut wm_in) {
         let is_bye = matches!(msg, ServerMessage::Bye);
         // Flush each frame so it isn't stuck in the BufWriter waiting on the
-        // next one — an idle desktop may send nothing more for a while.
-        if write_framed(&mut net_out, &msg).is_err() || net_out.flush().is_err() {
-            break;
-        }
-        if is_bye {
+        // next one — an idle desktop may send nothing more for a while. The lock
+        // is held for the whole write+flush so clipboard replies can't interleave.
+        let ok = {
+            let mut w = net_out.lock().unwrap();
+            write_framed(&mut *w, &msg).is_ok() && w.flush().is_ok()
+        };
+        if !ok || is_bye {
             break;
         }
     }
@@ -128,20 +140,59 @@ fn forward_frames(wm_capture: UnixStream, net_out: TcpStream, teardown: &Teardow
 }
 
 /// Read `ClientMessage`s and inject them into the WM until Bye/EOF/error.
-fn forward_input(mut net_in: BufReader<TcpStream>, teardown: &Teardown) -> Result<()> {
+fn forward_input(
+    mut net_in: BufReader<TcpStream>,
+    net_out: SharedNet,
+    teardown: &Teardown,
+) -> Result<()> {
     // Read ends the loop on EOF / shutdown / malformed.
     while let Ok(msg) = read_framed::<_, ClientMessage>(&mut net_in) {
-        if matches!(msg, ClientMessage::Bye) {
-            break;
-        }
-        // Hello (re-sent) and anything non-input maps to None and is skipped.
-        let Some(event) = to_raw_input(&msg) else {
-            continue;
-        };
-        if let Err(e) = wm::inject(event) {
-            // The gate likely flipped off mid-session; stop cleanly.
-            tracing::debug!(error = %e, "inject failed; ending session");
-            break;
+        match msg {
+            ClientMessage::Bye => break,
+            // Viewer Pull: read our WM's selection and ship it back to this one
+            // client (never a broadcast — the requester is the only recipient).
+            ClientMessage::GetClipboard { primary } => {
+                let reply = match wm::get_clipboard(primary) {
+                    Ok((mime, data)) => ServerMessage::Clipboard {
+                        primary,
+                        mime: mime.unwrap_or_default(),
+                        data,
+                    },
+                    Err(e) => {
+                        tracing::debug!(error = %e, "get_clipboard failed; replying empty");
+                        ServerMessage::Clipboard {
+                            primary,
+                            mime: String::new(),
+                            data: Vec::new(),
+                        }
+                    }
+                };
+                let mut w = net_out.lock().unwrap();
+                if write_framed(&mut *w, &reply).is_err() || w.flush().is_err() {
+                    break;
+                }
+            }
+            // Viewer Push: install the buffer the client read on its machine.
+            ClientMessage::SetClipboard {
+                primary,
+                mime,
+                data,
+            } => {
+                if let Err(e) = wm::set_clipboard(primary, mime, data) {
+                    tracing::debug!(error = %e, "set_clipboard failed");
+                }
+            }
+            // Hello (re-sent) and anything non-input maps to None and is skipped.
+            other => {
+                let Some(event) = to_raw_input(&other) else {
+                    continue;
+                };
+                if let Err(e) = wm::inject(event) {
+                    // The gate likely flipped off mid-session; stop cleanly.
+                    tracing::debug!(error = %e, "inject failed; ending session");
+                    break;
+                }
+            }
         }
     }
     teardown.stop();
@@ -164,7 +215,10 @@ fn to_raw_input(msg: &ClientMessage) -> Option<RawInput> {
             horizontal,
             vertical,
         }),
-        ClientMessage::Hello { .. } | ClientMessage::Bye => None,
+        ClientMessage::Hello { .. }
+        | ClientMessage::Bye
+        | ClientMessage::GetClipboard { .. }
+        | ClientMessage::SetClipboard { .. } => None,
     }
 }
 

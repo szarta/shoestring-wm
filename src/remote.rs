@@ -135,6 +135,21 @@ impl ShoestringWm {
         self.push_event_to(id, Event::CapturedInput { event });
     }
 
+    /// Ask the active remote view to move the clipboard. `Push` ships *this*
+    /// machine's selection to the remote; `Pull` fetches the remote's selection
+    /// into this machine. Viewer-initiated by `Super+Shift+C/V` — a no-op at the
+    /// local view (no remote to talk to). The connected client (a
+    /// `shoestring-remote-client`) does the actual `GetClipboard`/`SetClipboard`
+    /// brokering over its tunnel.
+    pub fn forward_clipboard(&mut self, op: shoestring_ipc::ClipboardOp) {
+        let Some(id) = self.captured_client() else {
+            tracing::debug!(?op, "clipboard action ignored: not viewing a remote");
+            return;
+        };
+        tracing::info!(?op, "forwarding remote clipboard op to active view");
+        self.push_event_to(id, Event::RemoteClipboard { op });
+    }
+
     /// Remove a registered remote machine when its IPC connection drops. If it
     /// was the active view (or its removal shifts the active index out of
     /// range), the view clamps back toward local and a [`Event::ViewChanged`] is

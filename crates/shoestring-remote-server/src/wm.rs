@@ -75,6 +75,28 @@ pub fn inject(event: RawInput) -> Result<()> {
     request_ok(&Request::InjectInput { event })
 }
 
+/// Read the served WM's selection (clipboard, or primary). Returns the mime the
+/// WM chose and the bytes (`None` mime + empty bytes = empty selection). The
+/// server-side half of a viewer **Pull**: the client asks for this machine's
+/// selection to ship back over the tunnel.
+pub fn get_clipboard(primary: bool) -> Result<(Option<String>, Vec<u8>)> {
+    match request(&Request::GetClipboard { primary })? {
+        Response::Clipboard { mime, data } => Ok((mime, data)),
+        Response::Error { message } => bail!("WM error: {message}"),
+        other => bail!("unexpected get_clipboard response: {other:?}"),
+    }
+}
+
+/// Set the served WM's selection. The server-side half of a viewer **Push**:
+/// the client sends a buffer it read on its own machine for us to install here.
+pub fn set_clipboard(primary: bool, mime: String, data: Vec<u8>) -> Result<()> {
+    request_ok(&Request::SetClipboard {
+        primary,
+        mime,
+        data,
+    })
+}
+
 /// Register this process as *the* remote server and return the connection (now
 /// a long-lived event subscriber) plus the gate's initial enabled state. The
 /// connection must be kept alive for the whole process: its drop tells the WM

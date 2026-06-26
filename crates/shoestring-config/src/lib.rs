@@ -104,7 +104,28 @@ pub struct Config {
     #[serde(default)]
     pub background: Background,
     #[serde(default)]
+    pub clipboard: Clipboard,
+    #[serde(default)]
     pub debug: Debug,
+}
+
+/// `[clipboard]` — clipboard-manager interop.
+///
+/// Cross-machine clipboard sync over a remote-desktop session does **not** need
+/// this — that path is brokered by the WM and gated by remote sharing. This
+/// section only governs the standalone `zwlr_data_control_manager_v1` global,
+/// which lets *any* local client read and set the selection out of focus (the
+/// protocol clipboard managers like cliphist / copyq / wl-clipboard speak).
+/// It is **off by default**: that capability is silent and unfocused, so it is
+/// opt-in, mirroring the screen-capture gate's privacy stance.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Clipboard {
+    /// Advertise `zwlr_data_control_manager_v1` so out-of-focus clipboard
+    /// managers work. Off by default (any client could otherwise observe every
+    /// copy). Enable only if you run a trusted clipboard manager.
+    #[serde(default)]
+    pub data_control: bool,
 }
 
 /// `[portal]` — settings for the `xdg-desktop-portal-shoestring` screen-sharing
@@ -1037,6 +1058,23 @@ pub enum Action {
     /// remote view — the break-out hotkey that ends input capture. Bound to
     /// `Super+Escape` by default. A no-op when already local.
     RemoteBreakout,
+    /// Take a screenshot (spawns `shoestring-screenshot`). A first-class action
+    /// — rather than a bare `spawn` — so it can stay **local** while viewing a
+    /// remote: the local screen already shows the reconstructed remote frame, so
+    /// a local capture grabs it directly without forwarding the key to the
+    /// remote. Bound to `Print` by default.
+    Screenshot,
+    /// **Push** the local clipboard to the remote you are viewing (the
+    /// client→server half of cross-machine copy/paste). Reads the local
+    /// selection and sets it on the active remote so you can paste there. Stays
+    /// local in capture mode. Bound to `Super+Shift+C`. A no-op unless a remote
+    /// is the active view.
+    ClipboardPush,
+    /// **Pull** the remote's clipboard into the local one (the server→client
+    /// half). Requests the active remote's current selection and sets it
+    /// locally, ready to paste here. Stays local in capture mode. Bound to
+    /// `Super+Shift+V`. A no-op unless a remote is the active view.
+    ClipboardPull,
     /// Switch to Linux virtual terminal `vt` (1..=12). Only effective when
     /// running on the TTY backend; no-op with a warning under winit.
     ChangeVt { vt: u8 },
@@ -1102,7 +1140,8 @@ pub fn default_config_toml() -> String {
 # toggle-always-on-top, focus-workspace, focus-workspace-relative,
 # move-window-to-workspace, move-window-to-workspace-relative, change-vt,
 # inject-key, inject-text, inject-click, lock, cycle-layout,
-# toggle-audio-mute, toggle-mic-mute, toggle-diagnostics.
+# toggle-audio-mute, toggle-mic-mute, toggle-diagnostics, screenshot,
+# clipboard-push, clipboard-pull.
 #
 # Modifier names (case-insensitive): Super, Ctrl, Alt, Shift.
 # Key names use xkb keysym strings (e.g. \"Return\", \"q\", \"F1\").
@@ -1337,6 +1376,28 @@ impl Config {
                 key: "Escape".into(),
                 action: Action::RemoteBreakout,
             },
+            // Cross-machine clipboard — these stay local while viewing a remote
+            // (capture mode) so they bridge the buffer instead of forwarding the
+            // key. Super+Shift+C pushes the local clipboard to the remote;
+            // Super+Shift+V pulls the remote's clipboard back. No-ops with no
+            // remote active.
+            Binding {
+                mods: super_shift(),
+                key: "c".into(),
+                action: Action::ClipboardPush,
+            },
+            Binding {
+                mods: super_shift(),
+                key: "v".into(),
+                action: Action::ClipboardPull,
+            },
+            // Screenshot — a first-class action so it stays local while viewing a
+            // remote (captures the on-screen reconstruction directly).
+            Binding {
+                mods: vec![],
+                key: "Print".into(),
+                action: Action::Screenshot,
+            },
         ];
         // Super+F3 → toggle the on-screen diagnostics overlay (F3-style).
         bindings.push(Binding {
@@ -1401,6 +1462,7 @@ impl Config {
             portal: Portal::default(),
             decorations: Decorations::default(),
             background: Background::default(),
+            clipboard: Clipboard::default(),
             debug: Debug::default(),
         }
     }

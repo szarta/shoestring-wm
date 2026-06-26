@@ -123,6 +123,28 @@ pub enum Request {
     /// table (the *served* machine's own keymap/binds apply natively). Gated by
     /// `set_automation`. Reply is [`Response::Ok`].
     InjectInput { event: RawInput },
+    /// Read the WM's current selection (clipboard, or primary with
+    /// `primary: true`). The WM picks the best text mime the owner offers, reads
+    /// the bytes out of band, and replies with [`Response::Clipboard`] (a
+    /// **deferred** reply — the WM holds the connection until the read drains).
+    /// The viewer-box half of cross-machine copy/paste: the remote stack reads a
+    /// machine's selection to ship it over the tunnel. Gated by `set_automation`.
+    GetClipboard {
+        #[serde(default)]
+        primary: bool,
+    },
+    /// Set the WM's selection (clipboard, or primary with `primary: true`) to
+    /// `data` under `mime` — the WM becomes the selection owner and serves these
+    /// bytes to anything that pastes (back-filling the standard text aliases).
+    /// The receiving half: the remote stack writes a buffer pulled over the
+    /// tunnel into the local selection. Gated by `set_automation`. Reply is
+    /// [`Response::Ok`].
+    SetClipboard {
+        #[serde(default)]
+        primary: bool,
+        mime: String,
+        data: Vec<u8>,
+    },
     /// Read the current pointer location in compositor-space logical
     /// coords. Reply is [`Response::PointerPosition`]. Read-only and not
     /// gated by automation — pure observation, useful for verifying that
@@ -719,6 +741,14 @@ pub enum Response {
         machines: Vec<MachineEntry>,
         active: u8,
     },
+    /// The selection bytes for [`Request::GetClipboard`]. `mime` is the type the
+    /// data is in (`None` with empty `data` = the selection was empty / had no
+    /// text the WM could read).
+    Clipboard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+        data: Vec<u8>,
+    },
     /// Path of the PNG written by [`Request::Screenshot`]. Absolute,
     /// usually under `$XDG_PICTURES_DIR`.
     Screenshot {
@@ -961,6 +991,16 @@ fn default_transform() -> String {
     "normal".to_string()
 }
 
+/// Which way the clipboard moves for [`Event::RemoteClipboard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardOp {
+    /// Send the local selection to the active remote.
+    Push,
+    /// Fetch the active remote's selection into the local one.
+    Pull,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -1088,6 +1128,17 @@ pub enum Event {
     /// break-out hotkey are handled locally and never forwarded.
     CapturedInput {
         event: RawInput,
+    },
+    /// A clipboard bridge action fired locally (`Super+Shift+C` / `+V`) while a
+    /// remote is the active view, pushed **only to that active client** so it
+    /// can carry the buffer over its tunnel. [`ClipboardOp::Push`] = send this
+    /// machine's selection to the remote; [`ClipboardOp::Pull`] = fetch the
+    /// remote's selection into this machine. The client services it with
+    /// [`Request::GetClipboard`] / [`Request::SetClipboard`] against its local WM
+    /// and the matching message on its wire. Like [`Event::CapturedInput`], this
+    /// is targeted, never broadcast.
+    RemoteClipboard {
+        op: ClipboardOp,
     },
     /// Fired when a screen-capture frame is actually delivered to a client —
     /// the live "your screen is being read right now" signal, distinct from
@@ -1359,6 +1410,62 @@ mod tests {
         assert!(matches!(
             back,
             Event::CapturedInput { event: RawInput::Motion { x, y } } if x == 12.0 && y == 34.0
+        ));
+    }
+
+    #[test]
+    fn clipboard_shapes() {
+        // GetClipboard: primary defaults false and is omittable.
+        let g: Request = serde_json::from_str(r#"{"type":"get_clipboard"}"#).unwrap();
+        assert!(matches!(g, Request::GetClipboard { primary: false }));
+        let gp: Request =
+            serde_json::from_str(r#"{"type":"get_clipboard","primary":true}"#).unwrap();
+        assert!(matches!(gp, Request::GetClipboard { primary: true }));
+
+        // SetClipboard carries mime + bytes; round-trips.
+        let s = Request::SetClipboard {
+            primary: false,
+            mime: "text/plain;charset=utf-8".into(),
+            data: b"hi".to_vec(),
+        };
+        let back: Request = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Request::SetClipboard { primary: false, mime, data }
+                if mime == "text/plain;charset=utf-8" && data == b"hi"
+        ));
+
+        // Clipboard response: empty selection skips the mime field.
+        assert_eq!(
+            serde_json::to_string(&Response::Clipboard {
+                mime: None,
+                data: vec![],
+            })
+            .unwrap(),
+            r#"{"type":"clipboard","data":[]}"#
+        );
+        let r: Response =
+            serde_json::from_str(r#"{"type":"clipboard","mime":"text/plain","data":[104,105]}"#)
+                .unwrap();
+        assert!(
+            matches!(r, Response::Clipboard { mime, data } if mime.as_deref() == Some("text/plain") && data == b"hi")
+        );
+
+        // RemoteClipboard event op round-trips snake_case.
+        assert_eq!(
+            serde_json::to_string(&Event::RemoteClipboard {
+                op: ClipboardOp::Push,
+            })
+            .unwrap(),
+            r#"{"type":"remote_clipboard","op":"push"}"#
+        );
+        let pull: Event =
+            serde_json::from_str(r#"{"type":"remote_clipboard","op":"pull"}"#).unwrap();
+        assert!(matches!(
+            pull,
+            Event::RemoteClipboard {
+                op: ClipboardOp::Pull
+            }
         ));
     }
 

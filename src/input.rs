@@ -228,6 +228,26 @@ impl ShoestringWm {
                 tracing::debug!("RemoteBreakout");
                 self.set_view(0);
             }
+            Action::Screenshot => {
+                // A first-class action (not a Spawn) so it stays **local** while
+                // viewing a remote: the local screen already shows the
+                // reconstructed remote frame, so capturing it here needs no round
+                // trip over the tunnel. See the capture-mode allowlist below.
+                let mut cmd = std::process::Command::new("shoestring-screenshot");
+                if let Some(socket) = self.socket_name.to_str() {
+                    cmd.env("WAYLAND_DISPLAY", socket);
+                }
+                match cmd.spawn() {
+                    Ok(child) => tracing::info!(pid = child.id(), "screenshot spawned"),
+                    Err(e) => tracing::warn!(error = %e, "screenshot spawn failed"),
+                }
+            }
+            Action::ClipboardPush => {
+                self.forward_clipboard(shoestring_ipc::ClipboardOp::Push);
+            }
+            Action::ClipboardPull => {
+                self.forward_clipboard(shoestring_ipc::ClipboardOp::Pull);
+            }
             Action::ChangeVt { vt } => self.change_vt(vt),
             Action::InjectKey { keysym } => {
                 if let Err(e) = self.inject_key(&keysym, &[]) {
@@ -715,6 +735,9 @@ impl ShoestringWm {
                                         a,
                                         Action::FocusMachineRelative { .. }
                                             | Action::RemoteBreakout
+                                            | Action::Screenshot
+                                            | Action::ClipboardPush
+                                            | Action::ClipboardPull
                                     ) {
                                         return FilterResult::Intercept(CapKey::Local(a.clone()));
                                     }

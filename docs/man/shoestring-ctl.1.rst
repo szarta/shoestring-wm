@@ -124,6 +124,20 @@ automation gate to be on.
     Parity with ``xdotool mousemove``; useful for hover-only tests and
     for setting up a drag (``move-mouse`` → ``click``).
 
+**get-clipboard** [**--primary**]
+    Read the WM's current selection and write the raw bytes to stdout
+    (the chosen mime goes to stderr). The WM picks the best text mime
+    the owner offers and reads it out of band. ``--primary`` reads the
+    primary (middle-click) selection. A focus-free ``wl-paste``. Gated
+    by the automation gate.
+
+**set-clipboard** [*TEXT*] [**--primary**] [**--mime** *MIME*]
+    Set the WM's selection to *TEXT* (or stdin if omitted) and serve it
+    to anything that pastes. ``--mime`` defaults to UTF-8 text (text
+    mimes fan out to the standard aliases server-side); ``--primary``
+    sets the primary selection. A focus-free ``wl-copy``. Gated by the
+    automation gate.
+
 **screenshot** [**--output** *NAME*] [**--region** *X,Y,W,H*]
     Capture a PNG via the WM's wlr-screencopy server. ``--output``
     defaults to the first advertised output. ``--region`` is

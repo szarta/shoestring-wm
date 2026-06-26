@@ -27,8 +27,8 @@ for a pre-commit hook or a CI check on a dotfiles repo.
 
 The file's main sections — ``[general]``, ``[workspaces]``,
 ``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, ``[input]``,
-``[touch]``, ``[decorations]``, ``[background]``, and ``[debug]`` — are all
-optional.
+``[touch]``, ``[decorations]``, ``[background]``, ``[clipboard]``, and
+``[debug]`` — are all optional.
 Missing sections take built-in defaults.
 
 The ``[general]`` section
@@ -812,6 +812,29 @@ restart needed.
     ``tile``          Repeat the image at its native size from the
                       top-left to fill the output.
     ================  ===============================================
+
+The ``[clipboard]`` section
+---------------------------
+
+``[clipboard]`` controls the ``zwlr_data_control_manager_v1`` global — the
+wlroots protocol that lets an **out-of-focus** client read *and* set the
+selection. It is what clipboard managers (cliphist, copyq) and ``wl-clipboard``
+use. Because any client that binds it then observes *every* copy, it is a
+privacy surface, so it is **opt-in and default-off** — mirroring the
+screen-capture and automation gates.
+
+::
+
+    [clipboard]
+    data_control = true
+
+``data_control``
+    Advertise ``zwlr_data_control_manager_v1`` to clients. Defaults to ``false``
+    (the global is created but hidden from every client, so nothing can bind it).
+    Set ``true`` to run a clipboard manager. This is **not** needed for the
+    cross-machine remote clipboard (``Super+Shift+C`` / ``Super+Shift+V``): that
+    rides the remote-sharing gate and is brokered natively by the WM, never
+    through this global.
 
 The ``[debug]`` section
 -----------------------

@@ -73,12 +73,24 @@ Binding                                Action
 ``Super+J``                            View next machine (toward remotes)
 ``Super+K``                            View previous machine (toward local)
 ``Super+Escape``                       Break out to the local machine (index 0)
+``Super+Shift+C``                      Push this machine's clipboard to the remote
+``Super+Shift+V``                      Pull the remote's clipboard to this machine
+``Print``                              Screenshot (stays local while viewing a remote)
 =====================================  ========================================
 
 The axis saturates at 0 (local) and the connected-machine count — no wrap. With
 no remote connected these are no-ops (you stay local). See :doc:`ipc` for the
 ``register_remote_client`` / ``set_view`` / ``view_changed`` surface a client
 uses to join the axis.
+
+While viewing a remote, ``Super+Shift+C`` / ``Super+Shift+V`` move the clipboard
+across the tunnel — push sends your local selection to the remote, pull fetches
+the remote's into your local one. Both are explicit and gated by the remote
+sharing you already enabled; nothing is streamed continuously. ``Print`` takes a
+screenshot that stays **local**: your screen already shows the reconstructed
+remote frame, so there's no round trip. (Out-of-focus clipboard *managers* —
+cliphist, copyq — instead want ``[clipboard] data_control = true``; see
+:doc:`configuration`.)
 
 A remote joins the axis by running **shoestring-remote-client** on the local
 machine. It connects out to a remote box's ``shoestring-remote-server`` (reached

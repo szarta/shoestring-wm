@@ -298,6 +298,29 @@ enum Command {
         #[arg(long, value_name = "X,Y,W,H", requires = "output")]
         region: Option<String>,
     },
+    /// Read the WM's current selection and write the raw bytes to stdout.
+    /// The WM picks the best text mime the owner offers. Requires the
+    /// automation gate to be on. The viewer-box half of cross-machine
+    /// copy/paste; locally, a focus-free `wl-paste`.
+    GetClipboard {
+        /// Read the primary selection (middle-click) instead of the clipboard.
+        #[arg(long)]
+        primary: bool,
+    },
+    /// Set the WM's selection to TEXT (or stdin if omitted). The WM becomes the
+    /// selection owner and serves these bytes to anything that pastes. Requires
+    /// the automation gate. A focus-free `wl-copy`.
+    SetClipboard {
+        /// The text to set. If omitted, the bytes are read from stdin.
+        text: Option<String>,
+        /// Set the primary selection instead of the clipboard.
+        #[arg(long)]
+        primary: bool,
+        /// Mime type to advertise. Defaults to UTF-8 text; text mimes fan out
+        /// to the standard aliases server-side.
+        #[arg(long, default_value = "text/plain;charset=utf-8")]
+        mime: String,
+    },
     /// Run a bind `Action` server-side as if a keybind had fired. Unlike
     /// `key`, this does not need an external key chord to land on a
     /// focused surface — Super+Shift+Q is consumed by the WM, but
@@ -474,6 +497,27 @@ fn main() -> Result<()> {
         Command::MoveWindow { id, index } => Request::MoveWindowToWorkspace { id, index },
         Command::SetMinimized { id, minimized } => Request::SetWindowMinimized { id, minimized },
         Command::SetMaximized { id, maximized } => Request::SetWindowMaximized { id, maximized },
+        Command::GetClipboard { primary } => Request::GetClipboard { primary },
+        Command::SetClipboard {
+            text,
+            primary,
+            mime,
+        } => {
+            let data = match text {
+                Some(t) => t.into_bytes(),
+                None => {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+                        .context("read clipboard data from stdin")?;
+                    buf
+                }
+            };
+            Request::SetClipboard {
+                primary,
+                mime,
+                data,
+            }
+        }
         Command::DispatchAction { action } => Request::DispatchAction {
             action: parse_action(&action)?,
         },
@@ -531,6 +575,14 @@ fn main() -> Result<()> {
             };
             print_value(&event, cli.pretty)?;
         }
+    } else if let Response::Clipboard { mime, data } = &response {
+        // Selection bytes go to stdout verbatim so `get-clipboard` pipes like
+        // `wl-paste` (the mime is on stderr for visibility, off the data path).
+        if let Some(m) = mime {
+            eprintln!("mime: {m}");
+        }
+        use std::io::Write as _;
+        std::io::stdout().write_all(data)?;
     } else {
         print_value(&response, cli.pretty)?;
     }

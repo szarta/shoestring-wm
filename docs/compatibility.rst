@@ -113,14 +113,26 @@ prefer a Wayland-native or GTK3 successor, or capture externally.
 Clipboard managers and the cross-machine bridge
 -----------------------------------------------
 
-Besides ordinary ``wl_data_device`` clipboard and primary selection, the
-compositor advertises ``zwlr_data_control_manager_v1`` (the wlroots
-data-control protocol). This lets a client **read and set** the clipboard and
-primary selection without holding keyboard focus, so out-of-focus clipboard
-managers — ``cliphist``, ``copyq``, ``wl-clipboard`` (``wl-copy`` / ``wl-paste``)
-— work, and so does shoestring's own bridge.
+Ordinary ``wl_data_device`` clipboard and primary selection always work. There
+are then two ways to reach the selection out of focus or across machines.
 
-``shoestring-clipboard`` is a tiny data-control client with two modes:
+**Cross-machine clipboard (built in).** While viewing a remote on the machine
+axis (see :doc:`bindings`), ``Super+Shift+C`` pushes your local selection to the
+remote and ``Super+Shift+V`` pulls the remote's into your local one. This is
+brokered natively by the compositor over the same tunnel the remote desktop uses
+and is gated by that remote sharing — it needs **no** extra protocol or config,
+and nothing is streamed continuously (each transfer is one explicit keypress).
+
+**Clipboard managers (opt-in).** For out-of-focus clipboard *managers* —
+``cliphist``, ``copyq``, ``wl-clipboard`` (``wl-copy`` / ``wl-paste``) — the
+compositor can advertise ``zwlr_data_control_manager_v1`` (the wlroots
+data-control protocol), which lets any bound client **read and set** the
+selection without focus. Because such a client then sees every copy, this is a
+privacy surface and is **off by default**; enable it with ``[clipboard]
+data_control = true`` (see :doc:`configuration`).
+
+``shoestring-clipboard`` is a tiny data-control client with two modes (and so
+needs ``data_control = true``):
 
 - ``shoestring-clipboard watch`` prints each new selection to stdout as a
   length-framed entry;
@@ -129,9 +141,9 @@ managers — ``cliphist``, ``copyq``, ``wl-clipboard`` (``wl-copy`` / ``wl-paste
 
 Add ``--primary`` to target the primary (middle-click) selection instead of
 the clipboard. Because the two halves compose over an ordinary byte pipe, you
-can **sync the clipboard between two shoestring-wm machines** by piping them
-over ``ssh`` — for example to share a remote box's clipboard with the local
-desktop you drive Claude from::
+can also **sync the clipboard between two machines** by piping them over ``ssh``
+— a manual alternative to the built-in ``Super+Shift+C`` / ``V`` when you want a
+continuous follow rather than per-keypress transfers::
 
     # local copy → remote box
     shoestring-clipboard watch | ssh dev-106 shoestring-clipboard set

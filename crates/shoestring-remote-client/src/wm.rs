@@ -110,6 +110,47 @@ impl Wm {
     }
 }
 
+/// Send a one-shot request to the local WM on a throwaway blocking connection
+/// and return the parsed reply. Used for clipboard brokering — separate from the
+/// long-lived non-blocking subscriber so a request/reply can't tangle with the
+/// event drain.
+fn one_shot(req: &Request) -> Result<Response> {
+    let path = client_socket_path()
+        .context("could not resolve $SHOESTRING_WM_SOCKET for clipboard request")?;
+    let mut stream =
+        UnixStream::connect(&path).with_context(|| format!("connect to {}", path.display()))?;
+    let line = serde_json::to_string(req)?;
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let reply = read_line(&mut stream)?.context("WM closed before clipboard reply")?;
+    serde_json::from_str(&reply).context("parse clipboard reply")
+}
+
+/// Read the local WM's selection (clipboard, or primary). Returns the chosen
+/// mime + bytes (`None` mime = empty selection). The viewer half of a **Push**.
+pub fn get_clipboard(primary: bool) -> Result<(Option<String>, Vec<u8>)> {
+    match one_shot(&Request::GetClipboard { primary })? {
+        Response::Clipboard { mime, data } => Ok((mime, data)),
+        Response::Error { message } => anyhow::bail!("WM error: {message}"),
+        other => anyhow::bail!("unexpected get_clipboard reply: {other:?}"),
+    }
+}
+
+/// Set the local WM's selection to `data` under `mime`. The viewer half of a
+/// **Pull** (installing what the remote sent us).
+pub fn set_clipboard(primary: bool, mime: String, data: Vec<u8>) -> Result<()> {
+    match one_shot(&Request::SetClipboard {
+        primary,
+        mime,
+        data,
+    })? {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!("WM error: {message}"),
+        other => anyhow::bail!("unexpected set_clipboard reply: {other:?}"),
+    }
+}
+
 /// Read one newline-delimited line (blocking — used once, before the stream is
 /// switched to non-blocking). `None` on EOF before any byte.
 fn read_line(stream: &mut UnixStream) -> Result<Option<String>> {

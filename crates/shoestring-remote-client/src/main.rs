@@ -574,6 +574,22 @@ fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
                 tracing::info!(width, height, scale, "remote resized");
                 state.resize_fb(width, height);
             }
+            ServerMessage::Clipboard {
+                primary,
+                mime,
+                data,
+            } => {
+                // Reply to our earlier wire GetClipboard (a Pull): install the
+                // remote's selection into the local WM. Empty mime = the remote
+                // had nothing readable, so there's nothing to set.
+                if mime.is_empty() {
+                    tracing::info!("remote clipboard was empty; nothing to paste");
+                } else if let Err(e) = wm::set_clipboard(primary, mime, data) {
+                    tracing::warn!(error = %e, "setting local clipboard from remote failed");
+                } else {
+                    tracing::info!("pulled remote clipboard into local selection");
+                }
+            }
             ServerMessage::Bye => return Ok(true),
         }
     }
@@ -613,6 +629,38 @@ fn handle_wm_event(state: &mut State, net: &mut Net, my_index: u8, ev: IpcEvent)
             };
             if let Err(e) = net.send(&msg) {
                 tracing::warn!(error = %e, "relaying input to server failed");
+            }
+        }
+        IpcEvent::RemoteClipboard { op } => {
+            if !state.active {
+                return; // only broker while we're the active view (defensive)
+            }
+            match op {
+                // Push: read this (viewer) machine's selection and ship it to the
+                // remote, which installs it as its own selection.
+                shoestring_ipc::ClipboardOp::Push => match wm::get_clipboard(false) {
+                    Ok((Some(mime), data)) => {
+                        let msg = ClientMessage::SetClipboard {
+                            primary: false,
+                            mime,
+                            data,
+                        };
+                        if let Err(e) = net.send(&msg) {
+                            tracing::warn!(error = %e, "pushing clipboard to server failed");
+                        } else {
+                            tracing::info!("pushed local clipboard to remote");
+                        }
+                    }
+                    Ok((None, _)) => tracing::info!("local clipboard empty; nothing to push"),
+                    Err(e) => tracing::warn!(error = %e, "reading local clipboard failed"),
+                },
+                // Pull: ask the remote for its selection. The reply arrives async
+                // as ServerMessage::Clipboard (handled in drain_server_messages).
+                shoestring_ipc::ClipboardOp::Pull => {
+                    if let Err(e) = net.send(&ClientMessage::GetClipboard { primary: false }) {
+                        tracing::warn!(error = %e, "requesting remote clipboard failed");
+                    }
+                }
             }
         }
         _ => {}

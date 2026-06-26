@@ -501,6 +501,11 @@ pub struct ShoestringWm {
     /// the global's lifetime. Drives the cross-machine clipboard sync (task
     /// 181); composes with the XWayland bridge via the shared `SelectionHandler`.
     pub data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
+    /// Native clipboard broker for the cross-machine remote-desktop feature:
+    /// reads/sets the data-device + primary selection on explicit, remote-
+    /// sharing-gated requests (see `src/clipboard.rs`). Distinct from the opt-in
+    /// `data_control_state` global, which any client could otherwise observe.
+    pub clipboard: crate::clipboard::ClipboardBroker,
 }
 
 impl ShoestringWm {
@@ -635,16 +640,22 @@ impl ShoestringWm {
         let xwayland_shell_state = crate::xwayland::init_xwayland_globals(&dh);
         let primary_selection_state =
             smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Self>(&dh);
-        // wlr-data-control: advertise the manager (v2) unconditionally so
-        // clipboard managers and the cross-machine clipboard bridge can read +
-        // write the selection out of focus. Passing the primary-selection state
-        // enables primary over data-control too. `|_| true` = visible to every
-        // client (the protocol is the standard wlroots clipboard-manager API).
+        // wlr-data-control: advertise the manager (v2) so out-of-focus clipboard
+        // managers (cliphist, copyq, wl-clipboard) can OBSERVE and SET the
+        // selection. Because any bound client then sees *every* copy, this is a
+        // privacy surface — so it is **opt-in** via `[clipboard] data_control`
+        // (default off), mirroring the screen-capture / automation gates. The
+        // global is always created but its visibility filter denies all clients
+        // when disabled, so no client can bind it. Cross-machine remote clipboard
+        // sync does NOT go through this global — the WM brokers the data-device
+        // selection natively (see `src/clipboard.rs`) gated by remote sharing.
+        // Passing the primary-selection state enables primary over data-control.
+        let data_control_enabled = config.clipboard.data_control;
         let data_control_state =
             smithay::wayland::selection::wlr_data_control::DataControlState::new::<Self, _>(
                 &dh,
                 Some(&primary_selection_state),
-                |_| true,
+                move |_| data_control_enabled,
             );
 
         let mut seat_state = SeatState::new();
@@ -876,6 +887,7 @@ impl ShoestringWm {
             xwayland_shell_state,
             primary_selection_state,
             data_control_state,
+            clipboard: crate::clipboard::ClipboardBroker::default(),
         }
     }
 

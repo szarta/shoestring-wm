@@ -924,6 +924,29 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::GetClipboard { primary } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                // Mark spent up front: the inline-reply paths drop the conn and
+                // the deferred path holds it open for a single reply either way.
+                client.borrow_mut().spent = true;
+                return state.handle_get_clipboard(id, client, primary);
+            }
+            Request::SetClipboard {
+                primary,
+                mime,
+                data,
+            } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                state.handle_set_clipboard(primary, mime, data);
+                let _ = write_response(client, &Response::Ok);
+                return true;
+            }
             Request::PointerPosition => {
                 let (x, y) = state.pointer_position();
                 let _ = write_response(client, &Response::PointerPosition { x, y });

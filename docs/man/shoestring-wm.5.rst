@@ -242,6 +242,19 @@ own rectangle (so it never bleeds onto an adjacent tile) and is focus-aware.
 **unfocused_color** (string, default ``#4c566a``)
     Border color of unfocused windows, same format.
 
+[clipboard] keys
+----------------
+
+Controls the ``zwlr_data_control_manager_v1`` global used by out-of-focus
+clipboard managers (cliphist, copyq, wl-clipboard). Off by default because any
+bound client then observes every copy — a privacy surface, gated like screen
+capture. Not needed for the built-in cross-machine clipboard
+(``Super+Shift+C`` / ``V``), which is brokered natively over the remote tunnel.
+
+**data_control** (bool, default ``false``)
+    Advertise the data-control global to clients. When ``false`` the global is
+    hidden from every client. Set ``true`` to run a clipboard manager.
+
 [debug] keys
 ------------
 
