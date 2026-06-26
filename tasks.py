@@ -15,6 +15,8 @@ Quick reference::
     inv run-nested           # launch a throwaway nested winit WM to test against
     inv create-docs          # Sphinx HTML user guide -> docs/_build/html
     inv create-manpages      # Sphinx man pages -> docs/_build/man
+    inv bump-version                       # show current version + files (dry run)
+    inv bump-version --new-version 0.7.0   # rewrite version across the repo
 
 The pre-commit hook already enforces fmt + clippy + test on every commit;
 ``inv check`` is for running that gate *before* you stage.
@@ -23,11 +25,104 @@ The doc tasks shell out to ``sphinx-build`` (via docs/Makefile), so run them
 from the docs virtualenv, e.g. ``. ~/data/stars/venv/bin/activate``.
 """
 
+import datetime
 import os
+import re
 import shutil
 from pathlib import Path
 
 from invoke import task
+
+# A semver core like 0.6.1 (no pre-release / build metadata).
+SEMVER = r"\d+\.\d+\.\d+"
+
+
+def _read_cargo_version():
+    cargo = Path("Cargo.toml").read_text()
+    # Match the [workspace.package] version line, anchored at start of line —
+    # not the inline `version = "..."` fields in [workspace.dependencies], which
+    # are never at column 0.
+    match = re.search(r'^version = "([^"]+)"', cargo, re.MULTILINE)
+    if not match:
+        raise RuntimeError("Could not find version in Cargo.toml")
+    return match.group(1)
+
+
+# Files that embed THIS workspace's own version, with the pattern that locates
+# it and a replacement template ({new} = full new version, {short} = its X.Y
+# prefix, {date} = today YYYY-MM-DD).
+#
+# Patterns match any semver (not just the current one) so a bump heals any
+# existing drift instead of silently skipping an out-of-sync file (docs/conf.py
+# currently trails Cargo.toml, for instance).
+#
+# NOT touched (intentionally):
+#   - .pre-commit-config.yaml `rev: v1.10.0`  -> that pins knots, not us
+#   - crates/{shoestring-bar,shoestring-mediad,xdg-desktop-portal-shoestring}
+#     Cargo.toml versions  -> independently-versioned crates, bumped on their own
+VERSION_FILES = [
+    # (path, pattern, replacement-template)
+    ("Cargo.toml", r'^(version = ")' + SEMVER + r'(")', r"\g<1>{new}\g<2>"),
+    # Sphinx: `release` is the full X.Y.Z, `version` the short X.Y (its
+    # convention). The match is lenient on component count so it heals an
+    # already-drifted value (e.g. a two-component "0.2") to the full semver.
+    ("docs/conf.py", r'^(release = ")\d+(?:\.\d+)+(")', r"\g<1>{new}\g<2>"),
+    ("docs/conf.py", r'^(version = ")\d+(?:\.\d+)+(")', r"\g<1>{short}\g<2>"),
+]
+
+
+@task
+def bump_version(c, new_version=None):
+    """Bump the workspace version across every file that embeds it.
+
+    Reads the current version from Cargo.toml. With no --new-version, prints
+    the current version and the files that would change (dry run). Otherwise
+    rewrites the workspace version in Cargo.toml and the Sphinx version/release
+    in docs/conf.py.
+
+    Args:
+        new_version: Target version string, e.g. 0.7.0 (no leading 'v').
+    """
+    current = _read_cargo_version()
+
+    if not new_version:
+        print(f"Current version (Cargo.toml): {current}")
+        print("\nFiles that would be updated:")
+        for path, *_ in VERSION_FILES:
+            print(f"  {path}")
+        print("\nRun: inv bump-version --new-version X.Y.Z")
+        return
+
+    if not re.fullmatch(SEMVER, new_version):
+        raise SystemExit(f"--new-version must look like X.Y.Z, got '{new_version}'")
+
+    short = ".".join(new_version.split(".")[:2])
+    today = datetime.date.today().isoformat()
+    changed = []
+
+    for path, pattern, tmpl in VERSION_FILES:
+        p = Path(path)
+        if not p.exists():
+            continue
+        text = p.read_text()
+        replacement = tmpl.format(new=new_version, short=short, date=today)
+        updated = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+        if updated != text:
+            p.write_text(updated)
+            changed.append(path)
+
+    if changed:
+        print(f"Bumped -> {new_version} in:")
+        for f in sorted(set(changed)):
+            print(f"  {f}")
+        print(
+            "\nNext: review `git diff`, commit, then "
+            f"`git tag v{new_version} && git push && git push origin v{new_version}` "
+            "(a tag triggers the packaging CI)."
+        )
+    else:
+        print("No version strings matched — nothing changed.")
+
 
 # Every binary the workspace produces, in the order docs/install.rst lists
 # them. These are what `deploy` drops on $PATH; the live session resolves them

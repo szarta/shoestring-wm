@@ -41,3 +41,13 @@ repos:
       - id: ruff-check    # lint (auto-fix what it safely can)
         args: [--fix]
       - id: ruff-format   # format, the Python counterpart to cargo fmt
+
+  # knots complexity gate. The default `knots` hook ships args
+  # [--aird-threshold=85], so no override is needed here. To tighten or add
+  # metrics, set `args:` (pre-commit replaces them wholesale), e.g.
+  #   args: [--aird-threshold=85, --cognitive-threshold=20]
+  - repo: https://github.com/brandon-arrendondo/knots
+    rev: v1.10.0
+    hooks:
+      - id: knots
+        types_or: [rust, python]

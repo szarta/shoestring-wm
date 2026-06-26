@@ -40,6 +40,7 @@ use smithay::{
 use crate::{
     binds::ModMask,
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
+    ipc::ClientId,
     layout::{self, LayoutState},
     state::ShoestringWm,
 };
@@ -664,614 +665,23 @@ impl ShoestringWm {
             self.notify_idle_activity();
         }
         match event {
-            InputEvent::Keyboard { event, .. } => {
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time_msec(&event);
-                let key_state = event.state();
-                let keycode: u32 = event.key_code().into();
-                // Releasing the held repeat keycode stops the repeat.
-                // Done before the bind lookup so a chord that resolves
-                // to the same key (unusual but possible) still ends
-                // the prior repeat cleanly.
-                if key_state == KeyState::Released {
-                    if let Some(kr) = self.key_repeat.as_ref() {
-                        if kr.keycode == keycode {
-                            self.cancel_key_repeat();
-                        }
-                    }
-                }
-                // Picker mode: intercept everything before it reaches the
-                // focused surface. Escape cancels; every other key is
-                // swallowed so the user can't accidentally type into the
-                // window they're about to kill.
-                if self.pending_picker.is_some() {
-                    // Run the key through xkb so modifier state stays
-                    // consistent, but intercept it — picker keys never reach
-                    // the focused surface. Pull the resolved keysym out and
-                    // hand it to the shared resolver (Escape cancels), which
-                    // the injected-key path also uses so the two can't drift.
-                    let sym = self.seat.get_keyboard().unwrap().input::<u32, _>(
-                        self,
-                        event.key_code(),
-                        key_state,
-                        serial,
-                        time,
-                        |_state, _mods, handle| {
-                            let sym = handle
-                                .raw_latin_sym_or_raw_current_sym()
-                                .map(|s| s.raw())
-                                .unwrap_or(0);
-                            FilterResult::Intercept(sym)
-                        },
-                    );
-                    if let Some(sym) = sym {
-                        self.picker_resolve_key(sym, key_state);
-                    }
-                    return;
-                }
-                // Machine-axis capture mode: a remote is the active view, so the
-                // local box is a KVM head — forward every key transition raw to
-                // that client and swallow it locally, *except* the axis binds
-                // (Super+J/K) and the break-out, which stay local so the user can
-                // always switch back. Run the key through xkb (keeps modifier
-                // state consistent) and intercept it; the resolved sym/mods only
-                // decide local-vs-forward.
-                if let Some(target) = self.captured_client() {
-                    enum CapKey {
-                        Local(Action),
-                        Forward,
-                    }
-                    let decision = self.seat.get_keyboard().unwrap().input::<CapKey, _>(
-                        self,
-                        event.key_code(),
-                        key_state,
-                        serial,
-                        time,
-                        |state, mods, handle| {
-                            if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
-                                let mask = ModMask::from_state(mods);
-                                if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
-                                    if matches!(
-                                        a,
-                                        Action::FocusMachineRelative { .. }
-                                            | Action::RemoteBreakout
-                                            | Action::Screenshot
-                                            | Action::ClipboardPush
-                                            | Action::ClipboardPull
-                                    ) {
-                                        return FilterResult::Intercept(CapKey::Local(a.clone()));
-                                    }
-                                }
-                            }
-                            FilterResult::Intercept(CapKey::Forward)
-                        },
-                    );
-                    match decision {
-                        // Axis key: act on press, and swallow its release so it
-                        // never lands on the remote as a dangling key.
-                        Some(CapKey::Local(a)) if key_state == KeyState::Pressed => {
-                            self.dispatch_action(a);
-                        }
-                        Some(CapKey::Local(_)) => {}
-                        // Everything else: forward the raw evdev transition. The
-                        // wire carries the pre-`+8` evdev code (see inject.rs).
-                        Some(CapKey::Forward) => {
-                            self.forward_captured(
-                                target,
-                                shoestring_ipc::RawInput::Key {
-                                    keycode: keycode.saturating_sub(8),
-                                    pressed: key_state == KeyState::Pressed,
-                                },
-                            );
-                        }
-                        None => {}
-                    }
-                    return;
-                }
-                let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
-                    self,
-                    event.key_code(),
-                    key_state,
-                    serial,
-                    time,
-                    |state, mods, handle| {
-                        if key_state != KeyState::Pressed {
-                            return FilterResult::Forward;
-                        }
-                        // Suppress binds while a session lock is up so the
-                        // user can't Quit / Spawn out of the lock — with one
-                        // exception: VT switching stays live as an escape
-                        // hatch, so a misbehaving locker can never hard-lock
-                        // the machine. Switching VT doesn't weaken the lock
-                        // (the Wayland session stays locked; switching back
-                        // shows the locker still up). Everything else is
-                        // forwarded to the lock surface, which holds focus.
-                        if state.is_locked() {
-                            if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
-                                let mask = ModMask::from_state(mods);
-                                if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
-                                    if matches!(a, Action::ChangeVt { .. }) {
-                                        return FilterResult::Intercept(a.clone());
-                                    }
-                                }
-                            }
-                            return FilterResult::Forward;
-                        }
-                        // A focused client holding an active keyboard-shortcuts
-                        // inhibitor (a game, VM/SPICE window, nested compositor,
-                        // or remote-desktop viewer) asked for the raw key
-                        // stream, so forward every bind to it. The sole
-                        // exception is VT switching — kept live as a hard escape
-                        // hatch so a client that grabs all keys can never lock
-                        // the user out of the machine (same policy as the lock
-                        // block above).
-                        if state.seat.keyboard_shortcuts_inhibited() {
-                            if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
-                                let mask = ModMask::from_state(mods);
-                                if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
-                                    if matches!(a, Action::ChangeVt { .. }) {
-                                        return FilterResult::Intercept(a.clone());
-                                    }
-                                }
-                            }
-                            return FilterResult::Forward;
-                        }
-                        // Use the keysym *before* shift/caps are applied so that
-                        // a binding registered as "q" matches Super+Shift+q
-                        // (which would otherwise produce keysym Q).
-                        let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() else {
-                            tracing::debug!("keypress: no raw_latin/current sym");
-                            return FilterResult::Forward;
-                        };
-                        let mask = ModMask::from_state(mods);
-                        let matched = state.bindings.lookup(mask, sym.raw());
-                        tracing::debug!(
-                            keysym = sym.raw(),
-                            keysym_name = %smithay::input::keyboard::xkb::keysym_get_name(sym),
-                            ?mask,
-                            matched = matched.is_some(),
-                            "keypress"
-                        );
-                        match matched {
-                            Some(a) => FilterResult::Intercept(a.clone()),
-                            None => FilterResult::Forward,
-                        }
-                    },
-                );
-                if let Some(a) = action {
-                    let repeatable = is_repeatable(&a);
-                    self.dispatch_action(a.clone());
-                    if repeatable {
-                        self.start_key_repeat(keycode, a);
-                    } else {
-                        // A non-repeatable bind cancels any prior
-                        // held repeat — e.g. Super+H is repeating, the
-                        // user mashes Super+Q. The Quit fires once and
-                        // the workspace walk stops.
-                        self.cancel_key_repeat();
-                    }
-                }
-            }
-            InputEvent::PointerMotion { event, .. } => {
-                // Machine-axis capture: advance the forwarded virtual pointer by
-                // the libinput delta (clamped to the remote's pixel size) and
-                // ship it as an absolute position. The local cursor doesn't move.
-                if let Some(target) = self.captured_client() {
-                    if let Some((w, h)) = self
-                        .active_machine()
-                        .map(|c| (c.width as f64, c.height as f64))
-                    {
-                        let delta = event.delta();
-                        let mut p = self.remote_pointer;
-                        p.0 = (p.0 + delta.x).clamp(0.0, w);
-                        p.1 = (p.1 + delta.y).clamp(0.0, h);
-                        self.remote_pointer = p;
-                        self.forward_captured(
-                            target,
-                            shoestring_ipc::RawInput::Motion { x: p.0, y: p.1 },
-                        );
-                    }
-                    return;
-                }
-                // libinput (TTY backend) sends relative deltas. Add to the
-                // pointer's current location and clamp to the union of all
-                // mapped outputs so the cursor can't fly off the workspace.
-                let serial = SERIAL_COUNTER.next_serial();
-                let pointer = self.seat.get_pointer().unwrap();
-                let delta = event.delta();
-                let current = pointer.current_location();
-
-                // A pointer constraint on the surface under the cursor changes
-                // how this motion is applied: a *locked* pointer receives no
-                // absolute motion at all (only the relative deltas below —
-                // what FPS games and RDP/VNC clients want), while a *confined*
-                // pointer is clamped to its region/surface. An inactive or
-                // out-of-region constraint doesn't apply.
-                let under = self.surface_under(current);
-                let mut pointer_locked = false;
-                let mut pointer_confined = false;
-                let mut confine_region = None;
-                if let Some((surface, surface_loc)) = under.as_ref() {
-                    with_pointer_constraint(surface, &pointer, |constraint| {
-                        let Some(constraint) = constraint else {
-                            return;
-                        };
-                        if !constraint.is_active() {
-                            return;
-                        }
-                        // A region-scoped constraint only bites while the
-                        // cursor is inside that surface-local region.
-                        if !constraint
-                            .region()
-                            .is_none_or(|r| r.contains((current - *surface_loc).to_i32_round()))
-                        {
-                            return;
-                        }
-                        match &*constraint {
-                            PointerConstraint::Locked(_) => pointer_locked = true,
-                            PointerConstraint::Confined(c) => {
-                                pointer_confined = true;
-                                confine_region = c.region().cloned();
-                            }
-                        }
-                    });
-                }
-
-                // Relative motion fires regardless of locking — for a locked
-                // pointer it is the only motion the client ever sees.
-                pointer.relative_motion(
-                    self,
-                    under.clone(),
-                    &RelativeMotionEvent {
-                        delta,
-                        delta_unaccel: event.delta_unaccel(),
-                        utime: event.time(),
-                    },
-                );
-
-                // Locked: the cursor stays put. Flush the frame and stop —
-                // no absolute motion, no focus-follow.
-                if pointer_locked {
-                    pointer.frame(self);
-                    return;
-                }
-
-                let mut new = current + delta;
-                if let Some(bounds) = workspace_bounds(&self.space) {
-                    new.x = new
-                        .x
-                        .clamp(bounds.loc.x as f64, (bounds.loc.x + bounds.size.w) as f64);
-                    new.y = new
-                        .y
-                        .clamp(bounds.loc.y as f64, (bounds.loc.y + bounds.size.h) as f64);
-                }
-
-                let new_under = self.surface_under(new);
-
-                // Confined: reject any motion that would leave the constrained
-                // surface or step outside its confine region.
-                if pointer_confined {
-                    if let Some((surface, surface_loc)) = under.as_ref() {
-                        if new_under.as_ref().map(|(s, _)| s) != Some(surface) {
-                            pointer.frame(self);
-                            return;
-                        }
-                        if let Some(region) = &confine_region {
-                            if !region.contains((new - *surface_loc).to_i32_round()) {
-                                pointer.frame(self);
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                pointer.motion(
-                    self,
-                    new_under.clone(),
-                    &MotionEvent {
-                        location: new,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                pointer.frame(self);
-                // Record what the client just saw so the post-dispatch
-                // refresh pass (see `refresh_pointer_focus`) doesn't re-send
-                // this same focus as a phantom move.
-                self.last_pointer_focus = new_under.clone();
-                self.maybe_pointer_focus(new);
-
-                // Activate a constraint once the cursor enters its region (the
-                // client armed it earlier, but it only takes hold in-region).
-                // A constraint created over the current location is activated
-                // directly in `new_constraint`.
-                if let Some((surface, surface_loc)) = new_under.as_ref() {
-                    with_pointer_constraint(surface, &pointer, |constraint| {
-                        if let Some(constraint) = constraint {
-                            if !constraint.is_active()
-                                && constraint
-                                    .region()
-                                    .is_none_or(|r| r.contains((new - *surface_loc).to_i32_round()))
-                            {
-                                constraint.activate();
-                            }
-                        }
-                    });
-                }
-            }
+            InputEvent::Keyboard { event, .. } => self.handle_keyboard_event::<I>(event),
+            InputEvent::PointerMotion { event, .. } => self.handle_pointer_motion::<I>(event),
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let Some(output) = self.space.outputs().next() else {
-                    return;
-                };
-                let Some(output_geo) = self.space.output_geometry(output) else {
-                    return;
-                };
-                let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
-                // Machine-axis capture: this backend reports an absolute
-                // position, so map the fraction within the output onto the
-                // remote's pixel space and forward it. The local cursor stays put.
-                if let Some(target) = self.captured_client() {
-                    if let Some((w, h)) = self
-                        .active_machine()
-                        .map(|c| (c.width as f64, c.height as f64))
-                    {
-                        let fx = ((pos.x - output_geo.loc.x as f64) / output_geo.size.w as f64)
-                            .clamp(0.0, 1.0);
-                        let fy = ((pos.y - output_geo.loc.y as f64) / output_geo.size.h as f64)
-                            .clamp(0.0, 1.0);
-                        let (x, y) = (fx * w, fy * h);
-                        self.remote_pointer = (x, y);
-                        self.forward_captured(target, shoestring_ipc::RawInput::Motion { x, y });
-                    }
-                    return;
-                }
-                let serial = SERIAL_COUNTER.next_serial();
-                let pointer = self.seat.get_pointer().unwrap();
-                let under = self.surface_under(pos);
-                pointer.motion(
-                    self,
-                    under.clone(),
-                    &MotionEvent {
-                        location: pos,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                pointer.frame(self);
-                self.last_pointer_focus = under;
-                self.maybe_pointer_focus(pos);
+                self.handle_pointer_motion_absolute::<I>(event)
             }
-            InputEvent::PointerButton { event, .. } => {
-                let pointer = self.seat.get_pointer().unwrap();
-                let keyboard = self.seat.get_keyboard().unwrap();
-                let serial = SERIAL_COUNTER.next_serial();
-                let button = event.button_code();
-                let button_state = event.state();
-
-                // Machine-axis capture: forward the raw button transition to the
-                // active remote and swallow it locally (no click-to-focus, no
-                // super-drag — the remote applies its own focus policy).
-                if let Some(target) = self.captured_client() {
-                    self.forward_captured(
-                        target,
-                        shoestring_ipc::RawInput::Button {
-                            button,
-                            pressed: button_state == ButtonState::Pressed,
-                        },
-                    );
-                    return;
-                }
-
-                // Picker mode: a press resolves (left) or cancels (right /
-                // any other button). Releases are swallowed. The click is
-                // never delivered to the surface beneath, so the window
-                // about to be closed doesn't see a phantom click. Shared with
-                // the injected-click path so the two can't drift.
-                if self.picker_handle_button(button, button_state) {
-                    return;
-                }
-
-                if ButtonState::Pressed == button_state
-                    && !pointer.is_grabbed()
-                    && !self.is_locked()
-                {
-                    let pos = pointer.current_location();
-                    let target = self.space.element_under(pos).map(|(w, l)| (w.clone(), l));
-                    let mods = keyboard.modifier_state();
-
-                    if let Some((window, _)) = target
-                        .as_ref()
-                        .filter(|_| mods.logo && (button == BTN_LEFT || button == BTN_RIGHT))
-                    {
-                        let window = window.clone();
-                        self.start_super_drag(button, &window, pos, serial);
-                        // Don't deliver the press to the client — the grab owns the gesture.
-                        return;
-                    }
-
-                    match target {
-                        // A window geometrically under the pointer is only the
-                        // real target if no Top/Overlay layer surface covers it.
-                        // Clicking a layer surface (tray menu, picker) that sits
-                        // above a window must not transfer focus to that window —
-                        // doing so yanked the menu's keyboard focus and made it
-                        // dismiss on its own clicks.
-                        Some((window, _loc)) if !self.overlay_layer_under(pos) => {
-                            self.focus_window(&window)
-                        }
-                        Some(_) => {}
-                        None => {
-                            // Only clear keyboard focus if nothing at all is
-                            // under the pointer. A layer-shell surface (e.g.
-                            // shoestring-region picker, menu) owns its own
-                            // focus via the layer_shell commit handler;
-                            // clicking it must not yank that focus away.
-                            if self.surface_under(pos).is_none() {
-                                self.clear_focus();
-                            }
-                        }
-                    }
-                }
-
-                pointer.button(
-                    self,
-                    &ButtonEvent {
-                        button,
-                        state: button_state,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                pointer.frame(self);
-            }
-            InputEvent::PointerAxis { event, .. } => {
-                let source = event.source();
-                let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
-                    event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.
-                });
-                let vertical_amount = event.amount(Axis::Vertical).unwrap_or_else(|| {
-                    event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.
-                });
-                let horizontal_discrete = event.amount_v120(Axis::Horizontal);
-                let vertical_discrete = event.amount_v120(Axis::Vertical);
-
-                // Machine-axis capture: forward the scroll deltas to the active
-                // remote and swallow locally (no desktop-scroll workspace switch).
-                if let Some(target) = self.captured_client() {
-                    self.forward_captured(
-                        target,
-                        shoestring_ipc::RawInput::Axis {
-                            horizontal: horizontal_amount,
-                            vertical: vertical_amount,
-                        },
-                    );
-                    return;
-                }
-
-                // Desktop scroll: a mouse wheel over the bare desktop — no
-                // window or layer-shell surface under the pointer — switches
-                // workspaces (wheel up to the next, down to the previous),
-                // the way Openbox scrolls the root window. Restricted to real
-                // wheels so touchpad scrolling isn't hijacked, and skipped
-                // mid-grab, mid-pick, or while locked. The event is then
-                // consumed (there is no client under the pointer to deliver
-                // it to anyway).
-                if source == AxisSource::Wheel
-                    && vertical_amount != 0.0
-                    && self.pending_picker.is_none()
-                    && !self.is_locked()
-                {
-                    let pointer = self.seat.get_pointer().unwrap();
-                    if !pointer.is_grabbed()
-                        && self.surface_under(pointer.current_location()).is_none()
-                    {
-                        // Accumulate wheel travel in v120 units (120 per
-                        // physical detent) and only step once a full
-                        // `desktop_scroll_notches` worth has built up. This
-                        // collapses the several sub-detent events a high-res
-                        // wheel emits per notch into one switch, and lets the
-                        // user dial in a slower feel. Fall back to scaling the
-                        // continuous amount if the backend gave no v120.
-                        let v120 = vertical_discrete
-                            .filter(|d| *d != 0.0)
-                            .unwrap_or(vertical_amount * 120.0 / 15.0);
-                        // Reset on direction reversal so a change of direction
-                        // starts fresh rather than first cancelling leftover
-                        // travel from the prior gesture.
-                        if self.desktop_scroll_accum != 0.0
-                            && (v120 > 0.0) != (self.desktop_scroll_accum > 0.0)
-                        {
-                            self.desktop_scroll_accum = 0.0;
-                        }
-                        self.desktop_scroll_accum += v120;
-
-                        let threshold =
-                            self.config.general.desktop_scroll_notches.max(1) as f64 * 120.0;
-                        // Wayland axis convention: positive vertical is
-                        // downward, so wheel up (negative accum) advances
-                        // forward (delta +1), wheel down steps back (-1).
-                        while self.desktop_scroll_accum.abs() >= threshold {
-                            let delta = if self.desktop_scroll_accum < 0.0 {
-                                self.desktop_scroll_accum += threshold;
-                                1
-                            } else {
-                                self.desktop_scroll_accum -= threshold;
-                                -1
-                            };
-                            let target = self.workspaces.shifted(self.workspaces.active(), delta);
-                            if target == self.workspaces.active() {
-                                // Clamped at an end — drop leftover travel so
-                                // it doesn't spill into the next gesture.
-                                self.desktop_scroll_accum = 0.0;
-                                break;
-                            }
-                            tracing::debug!(
-                                delta,
-                                target = target.one_based(),
-                                "desktop scroll → workspace"
-                            );
-                            self.focus_workspace_id(target);
-                        }
-                        return;
-                    }
-                }
-
-                let mut frame = AxisFrame::new(event.time_msec()).source(source);
-                if horizontal_amount != 0.0 {
-                    frame = frame.value(Axis::Horizontal, horizontal_amount);
-                    if let Some(discrete) = horizontal_discrete {
-                        frame = frame.v120(Axis::Horizontal, discrete as i32);
-                    }
-                }
-                if vertical_amount != 0.0 {
-                    frame = frame.value(Axis::Vertical, vertical_amount);
-                    if let Some(discrete) = vertical_discrete {
-                        frame = frame.v120(Axis::Vertical, discrete as i32);
-                    }
-                }
-                if source == AxisSource::Finger {
-                    if event.amount(Axis::Horizontal) == Some(0.0) {
-                        frame = frame.stop(Axis::Horizontal);
-                    }
-                    if event.amount(Axis::Vertical) == Some(0.0) {
-                        frame = frame.stop(Axis::Vertical);
-                    }
-                }
-
-                let pointer = self.seat.get_pointer().unwrap();
-                pointer.axis(self, frame);
-                pointer.frame(self);
-            }
+            InputEvent::PointerButton { event, .. } => self.handle_pointer_button::<I>(event),
+            InputEvent::PointerAxis { event, .. } => self.handle_pointer_axis::<I>(event),
             // Device hotplug. A tablet (Wacom et al.) must be registered on the
             // seat's tablet-seat before its tool events mean anything; touch
-            // needs the wl_touch capability added once a touchscreen appears. A
-            // single device can report both (some Wacom displays), so check each
-            // capability independently rather than guarding the whole arm.
-            InputEvent::DeviceAdded { device } => {
-                if device.has_capability(DeviceCapability::TabletTool) {
-                    self.seat
-                        .tablet_seat()
-                        .add_tablet::<Self>(&self.display_handle, &TabletDescriptor::from(&device));
-                }
-                if device.has_capability(DeviceCapability::Touch) && self.seat.get_touch().is_none()
-                {
-                    // Lazily advertise wl_touch so the capability isn't claimed
-                    // on a pointer/keyboard-only seat. Smithay has no
-                    // remove_touch, so once added it stays for the session.
-                    self.seat.add_touch();
-                }
-            }
+            // needs the wl_touch capability added once a touchscreen appears.
+            InputEvent::DeviceAdded { device } => self.handle_device_added::<I>(device),
             // Only tablets need teardown — smithay has no remove_touch, so the
             // wl_touch capability simply persists for the session.
             InputEvent::DeviceRemoved { device }
                 if device.has_capability(DeviceCapability::TabletTool) =>
             {
-                let tablet_seat = self.seat.tablet_seat();
-                tablet_seat.remove_tablet(&TabletDescriptor::from(&device));
-                // With no tablets left, the tools they spawned are stale.
-                if tablet_seat.count_tablets() == 0 {
-                    tablet_seat.clear_tools();
-                }
+                self.handle_tablet_removed::<I>(device)
             }
             InputEvent::TouchDown { event, .. } => self.on_touch_down::<I>(&event),
             InputEvent::TouchMotion { event, .. } => self.on_touch_motion::<I>(&event),
@@ -1300,6 +710,671 @@ impl ShoestringWm {
             InputEvent::GestureHoldBegin { event, .. } => self.on_gesture_hold_begin::<I>(&event),
             InputEvent::GestureHoldEnd { event, .. } => self.on_gesture_hold_end::<I>(&event),
             _ => {}
+        }
+    }
+
+    /// A key transition. Resolves the repeat-stop, then routes to one of three
+    /// modes — window picker, machine-axis capture, or normal keybinding — each
+    /// of which runs the key through xkb to keep modifier state consistent.
+    fn handle_keyboard_event<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = Event::time_msec(&event);
+        let key_state = event.state();
+        let keycode: u32 = event.key_code().into();
+        // Releasing the held repeat keycode stops the repeat.
+        // Done before the bind lookup so a chord that resolves
+        // to the same key (unusual but possible) still ends
+        // the prior repeat cleanly.
+        if key_state == KeyState::Released {
+            if let Some(kr) = self.key_repeat.as_ref() {
+                if kr.keycode == keycode {
+                    self.cancel_key_repeat();
+                }
+            }
+        }
+        // Picker mode: intercept everything before it reaches the
+        // focused surface. Escape cancels; every other key is
+        // swallowed so the user can't accidentally type into the
+        // window they're about to kill.
+        if self.pending_picker.is_some() {
+            self.handle_picker_key::<I>(&event, serial, time, key_state);
+            return;
+        }
+        // Machine-axis capture mode: a remote is the active view, so the
+        // local box is a KVM head — forward every key transition raw to that
+        // client and swallow it locally, *except* the axis binds (Super+J/K)
+        // and the break-out, which stay local so the user can always switch
+        // back.
+        if let Some(target) = self.captured_client() {
+            self.handle_captured_key::<I>(&event, target, serial, time, key_state, keycode);
+            return;
+        }
+        self.handle_keybinding::<I>(&event, serial, time, key_state, keycode);
+    }
+
+    /// Window-picker key handling: run the key through xkb so modifier state
+    /// stays consistent, but intercept it — picker keys never reach the focused
+    /// surface. Pull the resolved keysym out and hand it to the shared resolver
+    /// (Escape cancels), which the injected-key path also uses so the two can't
+    /// drift.
+    fn handle_picker_key<I: InputBackend>(
+        &mut self,
+        event: &I::KeyboardKeyEvent,
+        serial: Serial,
+        time: u32,
+        key_state: KeyState,
+    ) {
+        let sym = self.seat.get_keyboard().unwrap().input::<u32, _>(
+            self,
+            event.key_code(),
+            key_state,
+            serial,
+            time,
+            |_state, _mods, handle| {
+                let sym = handle
+                    .raw_latin_sym_or_raw_current_sym()
+                    .map(|s| s.raw())
+                    .unwrap_or(0);
+                FilterResult::Intercept(sym)
+            },
+        );
+        if let Some(sym) = sym {
+            self.picker_resolve_key(sym, key_state);
+        }
+    }
+
+    /// Machine-axis capture key handling: run the key through xkb (keeps
+    /// modifier state consistent) and intercept it; the resolved sym/mods only
+    /// decide local-vs-forward. The axis/break-out/screenshot/clipboard binds
+    /// stay local; everything else is forwarded raw to the active remote.
+    fn handle_captured_key<I: InputBackend>(
+        &mut self,
+        event: &I::KeyboardKeyEvent,
+        target: ClientId,
+        serial: Serial,
+        time: u32,
+        key_state: KeyState,
+        keycode: u32,
+    ) {
+        enum CapKey {
+            Local(Action),
+            Forward,
+        }
+        let decision = self.seat.get_keyboard().unwrap().input::<CapKey, _>(
+            self,
+            event.key_code(),
+            key_state,
+            serial,
+            time,
+            |state, mods, handle| {
+                if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
+                    let mask = ModMask::from_state(mods);
+                    if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
+                        if matches!(
+                            a,
+                            Action::FocusMachineRelative { .. }
+                                | Action::RemoteBreakout
+                                | Action::Screenshot
+                                | Action::ClipboardPush
+                                | Action::ClipboardPull
+                        ) {
+                            return FilterResult::Intercept(CapKey::Local(a.clone()));
+                        }
+                    }
+                }
+                FilterResult::Intercept(CapKey::Forward)
+            },
+        );
+        match decision {
+            // Axis key: act on press, and swallow its release so it
+            // never lands on the remote as a dangling key.
+            Some(CapKey::Local(a)) if key_state == KeyState::Pressed => {
+                self.dispatch_action(a);
+            }
+            Some(CapKey::Local(_)) => {}
+            // Everything else: forward the raw evdev transition. The
+            // wire carries the pre-`+8` evdev code (see inject.rs).
+            Some(CapKey::Forward) => {
+                self.forward_captured(
+                    target,
+                    shoestring_ipc::RawInput::Key {
+                        keycode: keycode.saturating_sub(8),
+                        pressed: key_state == KeyState::Pressed,
+                    },
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// Normal keybinding handling: look up the (pre-shift) keysym against the
+    /// configured binds and dispatch the matched action, honouring the session
+    /// lock and keyboard-shortcuts-inhibitor escape hatches. A matched
+    /// repeatable bind arms auto-repeat; any other bind cancels a prior repeat.
+    fn handle_keybinding<I: InputBackend>(
+        &mut self,
+        event: &I::KeyboardKeyEvent,
+        serial: Serial,
+        time: u32,
+        key_state: KeyState,
+        keycode: u32,
+    ) {
+        let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
+            self,
+            event.key_code(),
+            key_state,
+            serial,
+            time,
+            |state, mods, handle| {
+                if key_state != KeyState::Pressed {
+                    return FilterResult::Forward;
+                }
+                // Suppress binds while a session lock is up so the
+                // user can't Quit / Spawn out of the lock — with one
+                // exception: VT switching stays live as an escape
+                // hatch, so a misbehaving locker can never hard-lock
+                // the machine. Switching VT doesn't weaken the lock
+                // (the Wayland session stays locked; switching back
+                // shows the locker still up). Everything else is
+                // forwarded to the lock surface, which holds focus.
+                if state.is_locked() {
+                    if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
+                        let mask = ModMask::from_state(mods);
+                        if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
+                            if matches!(a, Action::ChangeVt { .. }) {
+                                return FilterResult::Intercept(a.clone());
+                            }
+                        }
+                    }
+                    return FilterResult::Forward;
+                }
+                // A focused client holding an active keyboard-shortcuts
+                // inhibitor (a game, VM/SPICE window, nested compositor,
+                // or remote-desktop viewer) asked for the raw key
+                // stream, so forward every bind to it. The sole
+                // exception is VT switching — kept live as a hard escape
+                // hatch so a client that grabs all keys can never lock
+                // the user out of the machine (same policy as the lock
+                // block above).
+                if state.seat.keyboard_shortcuts_inhibited() {
+                    if let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() {
+                        let mask = ModMask::from_state(mods);
+                        if let Some(a) = state.bindings.lookup(mask, sym.raw()) {
+                            if matches!(a, Action::ChangeVt { .. }) {
+                                return FilterResult::Intercept(a.clone());
+                            }
+                        }
+                    }
+                    return FilterResult::Forward;
+                }
+                // Use the keysym *before* shift/caps are applied so that
+                // a binding registered as "q" matches Super+Shift+q
+                // (which would otherwise produce keysym Q).
+                let Some(sym) = handle.raw_latin_sym_or_raw_current_sym() else {
+                    tracing::debug!("keypress: no raw_latin/current sym");
+                    return FilterResult::Forward;
+                };
+                let mask = ModMask::from_state(mods);
+                let matched = state.bindings.lookup(mask, sym.raw());
+                tracing::debug!(
+                    keysym = sym.raw(),
+                    keysym_name = %smithay::input::keyboard::xkb::keysym_get_name(sym),
+                    ?mask,
+                    matched = matched.is_some(),
+                    "keypress"
+                );
+                match matched {
+                    Some(a) => FilterResult::Intercept(a.clone()),
+                    None => FilterResult::Forward,
+                }
+            },
+        );
+        if let Some(a) = action {
+            let repeatable = is_repeatable(&a);
+            self.dispatch_action(a.clone());
+            if repeatable {
+                self.start_key_repeat(keycode, a);
+            } else {
+                // A non-repeatable bind cancels any prior
+                // held repeat — e.g. Super+H is repeating, the
+                // user mashes Super+Q. The Quit fires once and
+                // the workspace walk stops.
+                self.cancel_key_repeat();
+            }
+        }
+    }
+
+    /// Relative pointer motion (libinput / TTY backend). Forwards to the active
+    /// remote under machine-axis capture; otherwise applies pointer constraints
+    /// (lock/confine), clamps to the workspace bounds, moves the pointer, and
+    /// runs focus-follows-mouse.
+    fn handle_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {
+        // Machine-axis capture: advance the forwarded virtual pointer by
+        // the libinput delta (clamped to the remote's pixel size) and
+        // ship it as an absolute position. The local cursor doesn't move.
+        if let Some(target) = self.captured_client() {
+            if let Some((w, h)) = self
+                .active_machine()
+                .map(|c| (c.width as f64, c.height as f64))
+            {
+                let delta = event.delta();
+                let mut p = self.remote_pointer;
+                p.0 = (p.0 + delta.x).clamp(0.0, w);
+                p.1 = (p.1 + delta.y).clamp(0.0, h);
+                self.remote_pointer = p;
+                self.forward_captured(target, shoestring_ipc::RawInput::Motion { x: p.0, y: p.1 });
+            }
+            return;
+        }
+        // libinput (TTY backend) sends relative deltas. Add to the
+        // pointer's current location and clamp to the union of all
+        // mapped outputs so the cursor can't fly off the workspace.
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        let delta = event.delta();
+        let current = pointer.current_location();
+
+        // A pointer constraint on the surface under the cursor changes
+        // how this motion is applied: a *locked* pointer receives no
+        // absolute motion at all (only the relative deltas below —
+        // what FPS games and RDP/VNC clients want), while a *confined*
+        // pointer is clamped to its region/surface. An inactive or
+        // out-of-region constraint doesn't apply.
+        let under = self.surface_under(current);
+        let mut pointer_locked = false;
+        let mut pointer_confined = false;
+        let mut confine_region = None;
+        if let Some((surface, surface_loc)) = under.as_ref() {
+            with_pointer_constraint(surface, &pointer, |constraint| {
+                let Some(constraint) = constraint else {
+                    return;
+                };
+                if !constraint.is_active() {
+                    return;
+                }
+                // A region-scoped constraint only bites while the
+                // cursor is inside that surface-local region.
+                if !constraint
+                    .region()
+                    .is_none_or(|r| r.contains((current - *surface_loc).to_i32_round()))
+                {
+                    return;
+                }
+                match &*constraint {
+                    PointerConstraint::Locked(_) => pointer_locked = true,
+                    PointerConstraint::Confined(c) => {
+                        pointer_confined = true;
+                        confine_region = c.region().cloned();
+                    }
+                }
+            });
+        }
+
+        // Relative motion fires regardless of locking — for a locked
+        // pointer it is the only motion the client ever sees.
+        pointer.relative_motion(
+            self,
+            under.clone(),
+            &RelativeMotionEvent {
+                delta,
+                delta_unaccel: event.delta_unaccel(),
+                utime: event.time(),
+            },
+        );
+
+        // Locked: the cursor stays put. Flush the frame and stop —
+        // no absolute motion, no focus-follow.
+        if pointer_locked {
+            pointer.frame(self);
+            return;
+        }
+
+        let mut new = current + delta;
+        if let Some(bounds) = workspace_bounds(&self.space) {
+            new.x = new
+                .x
+                .clamp(bounds.loc.x as f64, (bounds.loc.x + bounds.size.w) as f64);
+            new.y = new
+                .y
+                .clamp(bounds.loc.y as f64, (bounds.loc.y + bounds.size.h) as f64);
+        }
+
+        let new_under = self.surface_under(new);
+
+        // Confined: reject any motion that would leave the constrained
+        // surface or step outside its confine region.
+        if pointer_confined {
+            if let Some((surface, surface_loc)) = under.as_ref() {
+                if new_under.as_ref().map(|(s, _)| s) != Some(surface) {
+                    pointer.frame(self);
+                    return;
+                }
+                if let Some(region) = &confine_region {
+                    if !region.contains((new - *surface_loc).to_i32_round()) {
+                        pointer.frame(self);
+                        return;
+                    }
+                }
+            }
+        }
+
+        pointer.motion(
+            self,
+            new_under.clone(),
+            &MotionEvent {
+                location: new,
+                serial,
+                time: event.time_msec(),
+            },
+        );
+        pointer.frame(self);
+        // Record what the client just saw so the post-dispatch
+        // refresh pass (see `refresh_pointer_focus`) doesn't re-send
+        // this same focus as a phantom move.
+        self.last_pointer_focus = new_under.clone();
+        self.maybe_pointer_focus(new);
+
+        // Activate a constraint once the cursor enters its region (the
+        // client armed it earlier, but it only takes hold in-region).
+        // A constraint created over the current location is activated
+        // directly in `new_constraint`.
+        if let Some((surface, surface_loc)) = new_under.as_ref() {
+            with_pointer_constraint(surface, &pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    if !constraint.is_active()
+                        && constraint
+                            .region()
+                            .is_none_or(|r| r.contains((new - *surface_loc).to_i32_round()))
+                    {
+                        constraint.activate();
+                    }
+                }
+            });
+        }
+    }
+
+    /// Absolute pointer motion (winit / tablet-style backends). Maps the
+    /// position onto the first output, forwards to the active remote under
+    /// machine-axis capture, otherwise moves the pointer and runs
+    /// focus-follows-mouse.
+    fn handle_pointer_motion_absolute<I: InputBackend>(
+        &mut self,
+        event: I::PointerMotionAbsoluteEvent,
+    ) {
+        let Some(output) = self.space.outputs().next() else {
+            return;
+        };
+        let Some(output_geo) = self.space.output_geometry(output) else {
+            return;
+        };
+        let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+        // Machine-axis capture: this backend reports an absolute
+        // position, so map the fraction within the output onto the
+        // remote's pixel space and forward it. The local cursor stays put.
+        if let Some(target) = self.captured_client() {
+            if let Some((w, h)) = self
+                .active_machine()
+                .map(|c| (c.width as f64, c.height as f64))
+            {
+                let fx =
+                    ((pos.x - output_geo.loc.x as f64) / output_geo.size.w as f64).clamp(0.0, 1.0);
+                let fy =
+                    ((pos.y - output_geo.loc.y as f64) / output_geo.size.h as f64).clamp(0.0, 1.0);
+                let (x, y) = (fx * w, fy * h);
+                self.remote_pointer = (x, y);
+                self.forward_captured(target, shoestring_ipc::RawInput::Motion { x, y });
+            }
+            return;
+        }
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        let under = self.surface_under(pos);
+        pointer.motion(
+            self,
+            under.clone(),
+            &MotionEvent {
+                location: pos,
+                serial,
+                time: event.time_msec(),
+            },
+        );
+        pointer.frame(self);
+        self.last_pointer_focus = under;
+        self.maybe_pointer_focus(pos);
+    }
+
+    /// Pointer button transition. Forwards raw to the active remote under
+    /// machine-axis capture; otherwise resolves picker clicks, super-drag,
+    /// click-to-focus, then delivers the button to the focused client.
+    fn handle_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+        let pointer = self.seat.get_pointer().unwrap();
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        let button = event.button_code();
+        let button_state = event.state();
+
+        // Machine-axis capture: forward the raw button transition to the
+        // active remote and swallow it locally (no click-to-focus, no
+        // super-drag — the remote applies its own focus policy).
+        if let Some(target) = self.captured_client() {
+            self.forward_captured(
+                target,
+                shoestring_ipc::RawInput::Button {
+                    button,
+                    pressed: button_state == ButtonState::Pressed,
+                },
+            );
+            return;
+        }
+
+        // Picker mode: a press resolves (left) or cancels (right /
+        // any other button). Releases are swallowed. The click is
+        // never delivered to the surface beneath, so the window
+        // about to be closed doesn't see a phantom click. Shared with
+        // the injected-click path so the two can't drift.
+        if self.picker_handle_button(button, button_state) {
+            return;
+        }
+
+        if ButtonState::Pressed == button_state && !pointer.is_grabbed() && !self.is_locked() {
+            let pos = pointer.current_location();
+            let target = self.space.element_under(pos).map(|(w, l)| (w.clone(), l));
+            let mods = keyboard.modifier_state();
+
+            if let Some((window, _)) = target
+                .as_ref()
+                .filter(|_| mods.logo && (button == BTN_LEFT || button == BTN_RIGHT))
+            {
+                let window = window.clone();
+                self.start_super_drag(button, &window, pos, serial);
+                // Don't deliver the press to the client — the grab owns the gesture.
+                return;
+            }
+
+            match target {
+                // A window geometrically under the pointer is only the
+                // real target if no Top/Overlay layer surface covers it.
+                // Clicking a layer surface (tray menu, picker) that sits
+                // above a window must not transfer focus to that window —
+                // doing so yanked the menu's keyboard focus and made it
+                // dismiss on its own clicks.
+                Some((window, _loc)) if !self.overlay_layer_under(pos) => {
+                    self.focus_window(&window)
+                }
+                Some(_) => {}
+                None => {
+                    // Only clear keyboard focus if nothing at all is
+                    // under the pointer. A layer-shell surface (e.g.
+                    // shoestring-region picker, menu) owns its own
+                    // focus via the layer_shell commit handler;
+                    // clicking it must not yank that focus away.
+                    if self.surface_under(pos).is_none() {
+                        self.clear_focus();
+                    }
+                }
+            }
+        }
+
+        pointer.button(
+            self,
+            &ButtonEvent {
+                button,
+                state: button_state,
+                serial,
+                time: event.time_msec(),
+            },
+        );
+        pointer.frame(self);
+    }
+
+    /// Pointer axis (scroll). Forwards to the active remote under machine-axis
+    /// capture; otherwise a real mouse wheel over the bare desktop switches
+    /// workspaces (accumulated in v120 units), and everything else is delivered
+    /// to the focused client as an axis frame.
+    fn handle_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
+        let source = event.source();
+        let horizontal_amount = event
+            .amount(Axis::Horizontal)
+            .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.);
+        let vertical_amount = event
+            .amount(Axis::Vertical)
+            .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.);
+        let horizontal_discrete = event.amount_v120(Axis::Horizontal);
+        let vertical_discrete = event.amount_v120(Axis::Vertical);
+
+        // Machine-axis capture: forward the scroll deltas to the active
+        // remote and swallow locally (no desktop-scroll workspace switch).
+        if let Some(target) = self.captured_client() {
+            self.forward_captured(
+                target,
+                shoestring_ipc::RawInput::Axis {
+                    horizontal: horizontal_amount,
+                    vertical: vertical_amount,
+                },
+            );
+            return;
+        }
+
+        // Desktop scroll: a mouse wheel over the bare desktop — no
+        // window or layer-shell surface under the pointer — switches
+        // workspaces (wheel up to the next, down to the previous),
+        // the way Openbox scrolls the root window. Restricted to real
+        // wheels so touchpad scrolling isn't hijacked, and skipped
+        // mid-grab, mid-pick, or while locked. The event is then
+        // consumed (there is no client under the pointer to deliver
+        // it to anyway).
+        if source == AxisSource::Wheel
+            && vertical_amount != 0.0
+            && self.pending_picker.is_none()
+            && !self.is_locked()
+        {
+            let pointer = self.seat.get_pointer().unwrap();
+            if !pointer.is_grabbed() && self.surface_under(pointer.current_location()).is_none() {
+                self.desktop_scroll_switch(vertical_amount, vertical_discrete);
+                return;
+            }
+        }
+
+        let mut frame = AxisFrame::new(event.time_msec()).source(source);
+        if horizontal_amount != 0.0 {
+            frame = frame.value(Axis::Horizontal, horizontal_amount);
+            if let Some(discrete) = horizontal_discrete {
+                frame = frame.v120(Axis::Horizontal, discrete as i32);
+            }
+        }
+        if vertical_amount != 0.0 {
+            frame = frame.value(Axis::Vertical, vertical_amount);
+            if let Some(discrete) = vertical_discrete {
+                frame = frame.v120(Axis::Vertical, discrete as i32);
+            }
+        }
+        if source == AxisSource::Finger {
+            if event.amount(Axis::Horizontal) == Some(0.0) {
+                frame = frame.stop(Axis::Horizontal);
+            }
+            if event.amount(Axis::Vertical) == Some(0.0) {
+                frame = frame.stop(Axis::Vertical);
+            }
+        }
+
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.axis(self, frame);
+        pointer.frame(self);
+    }
+
+    /// Step the active workspace by accumulated desktop-scroll wheel travel.
+    /// Travel is accumulated in v120 units (120 per physical detent) and only
+    /// steps once a full `desktop_scroll_notches` worth has built up — this
+    /// collapses the several sub-detent events a high-res wheel emits per notch
+    /// into one switch, and lets the user dial in a slower feel. Falls back to
+    /// scaling the continuous amount if the backend gave no v120.
+    fn desktop_scroll_switch(&mut self, vertical_amount: f64, vertical_discrete: Option<f64>) {
+        let v120 = vertical_discrete
+            .filter(|d| *d != 0.0)
+            .unwrap_or(vertical_amount * 120.0 / 15.0);
+        // Reset on direction reversal so a change of direction
+        // starts fresh rather than first cancelling leftover
+        // travel from the prior gesture.
+        if self.desktop_scroll_accum != 0.0 && (v120 > 0.0) != (self.desktop_scroll_accum > 0.0) {
+            self.desktop_scroll_accum = 0.0;
+        }
+        self.desktop_scroll_accum += v120;
+
+        let threshold = self.config.general.desktop_scroll_notches.max(1) as f64 * 120.0;
+        // Wayland axis convention: positive vertical is
+        // downward, so wheel up (negative accum) advances
+        // forward (delta +1), wheel down steps back (-1).
+        while self.desktop_scroll_accum.abs() >= threshold {
+            let delta = if self.desktop_scroll_accum < 0.0 {
+                self.desktop_scroll_accum += threshold;
+                1
+            } else {
+                self.desktop_scroll_accum -= threshold;
+                -1
+            };
+            let target = self.workspaces.shifted(self.workspaces.active(), delta);
+            if target == self.workspaces.active() {
+                // Clamped at an end — drop leftover travel so
+                // it doesn't spill into the next gesture.
+                self.desktop_scroll_accum = 0.0;
+                break;
+            }
+            tracing::debug!(
+                delta,
+                target = target.one_based(),
+                "desktop scroll → workspace"
+            );
+            self.focus_workspace_id(target);
+        }
+    }
+
+    /// A device appeared. A tablet (Wacom et al.) must be registered on the
+    /// seat's tablet-seat before its tool events mean anything; touch needs the
+    /// wl_touch capability added once a touchscreen appears. A single device can
+    /// report both (some Wacom displays), so check each capability independently.
+    fn handle_device_added<I: InputBackend>(&mut self, device: I::Device) {
+        if device.has_capability(DeviceCapability::TabletTool) {
+            self.seat
+                .tablet_seat()
+                .add_tablet::<Self>(&self.display_handle, &TabletDescriptor::from(&device));
+        }
+        if device.has_capability(DeviceCapability::Touch) && self.seat.get_touch().is_none() {
+            // Lazily advertise wl_touch so the capability isn't claimed
+            // on a pointer/keyboard-only seat. Smithay has no
+            // remove_touch, so once added it stays for the session.
+            self.seat.add_touch();
+        }
+    }
+
+    /// A tablet was removed — drop it from the tablet-seat and, if it was the
+    /// last one, clear the now-stale tools it spawned. (Touch needs no teardown:
+    /// smithay has no remove_touch, so the wl_touch capability simply persists.)
+    fn handle_tablet_removed<I: InputBackend>(&mut self, device: I::Device) {
+        let tablet_seat = self.seat.tablet_seat();
+        tablet_seat.remove_tablet(&TabletDescriptor::from(&device));
+        // With no tablets left, the tools they spawned are stale.
+        if tablet_seat.count_tablets() == 0 {
+            tablet_seat.clear_tools();
         }
     }
 
