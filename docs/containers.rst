@@ -1,0 +1,135 @@
+Containers and compositor isolation
+===================================
+
+The :doc:`headless backend <running>` plus :doc:`remote-desktop serve mode
+<bindings>` add up to something more than the sum of their parts: a complete,
+self-contained desktop session — its own compositor, its own apps, its own
+clipboard and seat — that has **no** dependency on the host's display, login
+session, or input devices, and that is fully **observable and driveable over a
+socket**. That is exactly the shape of a thing you put in a container.
+
+This page explains why the headless backend is container-friendly, the
+serve-mode topology that lets you view and drive a containerised session, and
+the "desktop per container" pattern it enables. A published image is still in
+progress (see the *Status* note below); the building blocks it packages —
+``--backend headless`` and ``shoestring-remote-server`` — work today.
+
+.. note::
+
+   **Status.** The headless serve-mode stack is verified end to end (a served
+   headless session driven from a separate machine over ``ssh -L``). A
+   ready-to-run ``Dockerfile`` and a CPU-only (GPU-less) rendering path are
+   tracked work, not yet shipped. The ``docker run`` recipe below is the
+   intended shape and requires a host GPU render node today.
+
+Why headless fits a container
+-----------------------------
+
+A normal compositor is hostile to containers: it wants DRM *master* (KMS
+modesetting), a ``logind`` / ``libseat`` session, and ``/dev/input`` devices.
+The headless backend needs none of these. It opens a single unprivileged DRM
+**render node** (``/dev/dri/renderD128``), builds a surfaceless GL renderer on
+it, and takes all of its input over IPC. Concretely:
+
+- **No seat, no VT, no display manager.** A render node is unprivileged — no
+  DRM master — so the container needs no ``--privileged``, no ``CAP_SYS_ADMIN``,
+  and no host session.
+- **No input devices.** Input arrives via ``inject_input`` / the remote
+  client's captured input (see :doc:`ipc`), so there is no ``/dev/input`` to map
+  in and no seat to acquire.
+- **No host display.** Nothing scans the frame out; it is read through the
+  capture path and streamed by the serve-mode server.
+- **Small image.** The compositor is a low-dependency Rust binary; the runtime
+  needs Mesa (for the GL renderer) and, optionally, ``xwayland`` for X11 apps.
+
+The one host dependency is the render node itself — see *GPU and CPU-only
+rendering* below.
+
+The serve-mode topology
+-----------------------
+
+The container is the **served** side; you view and drive it from a real desktop
+(the **viewer**). This is the same topology the machine axis uses (see
+:doc:`bindings`), only the served box is a container instead of another machine:
+
+.. code-block:: text
+
+   ┌─ container ───────────────────────────────┐
+   │  shoestring-wm --backend headless         │
+   │     ├─ apps (Wayland / XWayland clients)   │
+   │     └─ IPC socket  (automation + observe)  │
+   │  shoestring-remote-server  ─ TCP :7355 ────┼──► ssh -L / published port
+   └────────────────────────────────────────────┘
+                                                     │
+   ┌─ your desktop ──────────────────────────────────▼─┐
+   │  shoestring-remote-client --connect host:7355      │
+   │     → appears on the machine axis (Super+J/K)       │
+   └─────────────────────────────────────────────────────┘
+
+Inside the container an entrypoint starts the compositor, registers
+``shoestring-remote-server`` with it, and opens the remote gate (the server's
+listener stays closed until the gate is on — the same explicit, opt-in sharing
+gate described in :doc:`bindings`). From your desktop, ``shoestring-remote-client``
+connects to the published port (directly or over an ``ssh -L`` tunnel), and the
+session joins your machine axis: ``Super+J`` to view and drive it, ``Super+Escape``
+to break back out. Clipboard moves between you and the container with
+``Super+Shift+C`` / ``Super+Shift+V`` exactly as between two machines.
+
+A representative run, with the host GPU passed through::
+
+    docker run --rm \
+      --device /dev/dri/renderD128 \
+      -p 7355:7355 \
+      shoestring-wm-headless
+
+    # then, on your desktop:
+    shoestring-remote-client --connect <host>:7355 --label sandbox
+
+GPU and CPU-only rendering
+--------------------------
+
+The headless renderer is built on the render node via GBM, so today the
+container needs a real GPU node passed through (``--device /dev/dri/renderD128``).
+Point ``$SHOESTRING_WM_RENDER_NODE`` at a different node if the default is not
+the right one.
+
+Running with **no GPU at all** — for CI or a CPU-only cloud host — is an open
+item. The candidate paths are a surfaceless EGL platform on ``llvmpipe`` (software
+GL, no GBM) or a virtual DRM node (``vkms`` / ``vgem``) that Mesa's software
+rasteriser can drive. Until one of those lands, GPU passthrough is the supported
+configuration.
+
+What it buys you
+----------------
+
+Because the compositor *is* the automation and observation surface (see
+:doc:`ipc`), a containerised session is not just a remote desktop — it is a
+**scriptable, inspectable sandbox**:
+
+- **Disposable, reproducible desktops.** Spin one up, drive an app, tear it
+  down. The whole UI state is in the container.
+- **Parallel agent sandboxes.** Run many at once, each with its own clipboard,
+  seat, and ``event-stream``, each driven and inspected independently over IPC —
+  a natural fit for the project's automation goal of letting an agent drive both
+  the WM and the apps inside it.
+- **Structured observation, not screen-scraping.** ``windows``, ``outputs``,
+  ``metrics``, and the event stream describe the session directly, instead of
+  inferring state from pixels.
+
+For comparison, the classic "desktop in a container" rigs bolt VNC and
+``xdotool`` onto ``Xvfb`` + a minimal WM (or ``sway --headless`` + ``wayvnc``).
+The difference here is that automation and observation are first-class in the
+compositor, and the serve protocol is a native, damage-tracked tile stream
+rather than generic VNC.
+
+Isolation boundaries
+--------------------
+
+The isolation unit is the **container**: each is a separate session with its own
+compositor and apps. Within a single container the apps still share one seat and
+one clipboard (now gated, but shared) — this is session isolation, not a
+security sandbox *between* the apps in it.
+
+For true per-app isolation, run **one app per container** — the compositor
+hosting a single client. That is often the more useful pattern anyway: each app
+gets its own disposable, observable, individually-viewable desktop.

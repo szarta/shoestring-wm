@@ -33,6 +33,10 @@ only through the capture path (``shoestring-ctl screenshot``,
     Defaults to ``1920x1080``. A future remote client resizes the
     virtual output to its own pixel size.
 
+Because the headless backend needs only an unprivileged render node — no seat,
+master, or input devices — it is a natural fit for running the whole session in
+a container and viewing it over serve mode. See :doc:`containers`.
+
 Command-line flags
 ------------------
 

@@ -22,6 +22,7 @@ This is the user guide. For source-level architecture notes see
    bindings
    portals
    compatibility
+   containers
    ipc
 
 .. toctree::
