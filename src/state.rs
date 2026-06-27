@@ -41,8 +41,9 @@ use smithay::{
     },
 };
 
-// Held only by the tty/udev backend (see `dmabuf_global`); unused under winit.
-#[cfg(feature = "tty")]
+// Held by the GPU-exporting backends (udev + native headless); see
+// `dmabuf_global`. Unused under winit (no dmabuf export).
+#[cfg(any(feature = "tty", feature = "headless"))]
 use smithay::wayland::dmabuf::DmabufGlobal;
 
 /// Smithay z-index for always-on-top windows. Sits between
@@ -106,6 +107,13 @@ pub struct ShoestringWm {
 
     #[cfg(feature = "tty")]
     pub udev: Option<crate::backend::udev::UdevData>,
+
+    /// Native headless backend handle: the shared offscreen GLES renderer plus
+    /// its render node. `Some` only when the WM was started with the headless
+    /// backend; the dmabuf import test and the ext-image-copy dmabuf
+    /// constraints reach the renderer through it. See [`crate::backend::headless`].
+    #[cfg(feature = "headless")]
+    pub headless: Option<crate::backend::headless::HeadlessData>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -188,13 +196,16 @@ pub struct ShoestringWm {
     /// for readback) respects the gate.
     pub dmabuf_state: DmabufState,
     /// `Some` once the dmabuf global has been created (held so it stays
-    /// registered). Created at most once, on the first udev `device_added`,
-    /// so it only exists on the tty backend.
-    #[cfg(feature = "tty")]
+    /// registered). Created at most once: on the first udev `device_added`
+    /// (tty backend) or at headless init, so it exists only on the two
+    /// GPU-exporting backends.
+    #[cfg(any(feature = "tty", feature = "headless"))]
     pub dmabuf_global: Option<DmabufGlobal>,
-    /// dmabuf formats the primary GPU's renderer can import/render, captured
-    /// when the global is created. Reused to advertise the screencopy
-    /// `linux_dmabuf` event. `None` on the winit backend (no dmabuf export).
+    /// dmabuf formats the renderer can import/render, captured when the global
+    /// is created (the primary GPU's formats under udev, the headless render
+    /// node's under the native headless backend). Reused to advertise the
+    /// screencopy `linux_dmabuf` event. `None` on the winit backend (no dmabuf
+    /// export).
     pub dmabuf_formats: Option<FormatSet>,
     pub session_lock_state: SessionLockManagerState,
     /// wlr-gamma-control state: the manager global plus the live per-output
@@ -802,6 +813,8 @@ impl ShoestringWm {
             wallpaper: crate::wallpaper::Wallpaper::default(),
             #[cfg(feature = "tty")]
             udev: None,
+            #[cfg(feature = "headless")]
+            headless: None,
             compositor_state,
             xdg_shell_state,
             xdg_activation_state,
@@ -824,7 +837,7 @@ impl ShoestringWm {
             ext_screencopy,
             virtual_pointer,
             dmabuf_state: DmabufState::new(),
-            #[cfg(feature = "tty")]
+            #[cfg(any(feature = "tty", feature = "headless"))]
             dmabuf_global: None,
             dmabuf_formats: None,
             session_lock_state,
@@ -1878,13 +1891,17 @@ impl ShoestringWm {
 
     /// Validate that a client's dmabuf can actually be imported by our
     /// renderer — the import test the `zwp_linux_dmabuf_v1` protocol expects
-    /// before a buffer is created. Only the udev backend stands up the dmabuf
-    /// global (winit has no dmabuf export), so the winit path is never reached
-    /// in practice; we accept there rather than reject.
+    /// before a buffer is created. Only the GPU-exporting backends (udev,
+    /// native headless) stand up the dmabuf global; winit has no dmabuf export,
+    /// so its path is never reached in practice and we accept rather than reject.
     pub fn import_dmabuf_test(&mut self, dmabuf: &Dmabuf) -> bool {
         #[cfg(feature = "tty")]
         if let Some(udev) = self.udev.as_mut() {
             return udev.import_dmabuf_test(dmabuf);
+        }
+        #[cfg(feature = "headless")]
+        if let Some(headless) = self.headless.as_ref() {
+            return headless.import_dmabuf_test(dmabuf);
         }
         let _ = dmabuf;
         true
@@ -1927,50 +1944,58 @@ impl ShoestringWm {
             shm,
             // smithay only carries the `dma` field when its `backend_drm` is
             // compiled, which both our `tty` and `headless` features pull in
-            // (gbm → drm). The headless backend exports no dmabuf, so its arm
-            // resolves to `None` inside `ext_dmabuf_constraints`.
+            // (gbm → drm). Both backends export dmabuf, so the arm resolves to
+            // the renderer's constraints inside `ext_dmabuf_constraints`.
             #[cfg(any(feature = "tty", feature = "headless"))]
             dma: self.ext_dmabuf_constraints(),
         })
     }
 
     /// dmabuf format/modifier constraints for ext-image-copy-capture, grouped by
-    /// fourcc. `None` on winit/headless (no dmabuf export) or before the dmabuf
-    /// global is up. Offers only formats the primary GPU's renderer can actually
-    /// import, opaque first (screencast streams are opaque).
+    /// fourcc. `None` on winit (no dmabuf export) or before a GPU-exporting
+    /// backend is up. Offers only formats the renderer can actually import,
+    /// opaque first (screencast streams are opaque).
     #[cfg(any(feature = "tty", feature = "headless"))]
     pub fn ext_dmabuf_constraints(&self) -> Option<crate::ext_screencopy::DmabufConstraints> {
-        // The headless backend compiles smithay's backend_drm (via gbm) so the
-        // `dma` constraint type exists, but it exports no dmabuf — so there are
-        // no constraints to advertise.
-        #[cfg(not(feature = "tty"))]
-        {
-            None
+        use smithay::backend::allocator::Fourcc;
+        // The render node clients should allocate their dmabuf capture buffers
+        // on: the primary GPU under udev, the headless render node otherwise.
+        let node = self.dmabuf_render_node()?;
+        let formats = self.dmabuf_formats.as_ref()?;
+        let mut grouped = Vec::new();
+        for code in [Fourcc::Xrgb8888, Fourcc::Argb8888] {
+            let modifiers: Vec<_> = formats
+                .iter()
+                .filter(|f| f.code == code)
+                .map(|f| f.modifier)
+                .collect();
+            if !modifiers.is_empty() {
+                grouped.push((code, modifiers));
+            }
         }
+        if grouped.is_empty() {
+            return None;
+        }
+        Some(crate::ext_screencopy::DmabufConstraints {
+            node,
+            formats: grouped,
+        })
+    }
+
+    /// The DRM render node clients should allocate dmabuf buffers on: the
+    /// primary GPU under udev, the headless render node under the native
+    /// headless backend, `None` on winit / before a backend is up.
+    #[cfg(any(feature = "tty", feature = "headless"))]
+    fn dmabuf_render_node(&self) -> Option<smithay::backend::drm::DrmNode> {
         #[cfg(feature = "tty")]
-        {
-            use smithay::backend::allocator::Fourcc;
-            let node = self.udev.as_ref()?.primary_render_node();
-            let formats = self.dmabuf_formats.as_ref()?;
-            let mut grouped = Vec::new();
-            for code in [Fourcc::Xrgb8888, Fourcc::Argb8888] {
-                let modifiers: Vec<_> = formats
-                    .iter()
-                    .filter(|f| f.code == code)
-                    .map(|f| f.modifier)
-                    .collect();
-                if !modifiers.is_empty() {
-                    grouped.push((code, modifiers));
-                }
-            }
-            if grouped.is_empty() {
-                return None;
-            }
-            Some(crate::ext_screencopy::DmabufConstraints {
-                node,
-                formats: grouped,
-            })
+        if let Some(udev) = self.udev.as_ref() {
+            return Some(udev.primary_render_node());
         }
+        #[cfg(feature = "headless")]
+        if let Some(headless) = self.headless.as_ref() {
+            return headless.render_node;
+        }
+        None
     }
 
     /// Move the focused window to `target` workspace. If `target` differs from

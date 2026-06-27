@@ -506,8 +506,10 @@ fall into three tiers by how they are exposed:
 
 Both gates are **runtime-only**: flipping one over IPC never writes to disk,
 so the config file stays the source of truth at the next start. This is the
-same pattern for both, by design (principle 4). DRM-only facilities
-(wlr-gamma-control) and dmabuf import exist only on the `tty` backend.
+same pattern for both, by design (principle 4). DRM-scanout facilities
+(wlr-gamma-control) exist only on the `tty` backend; dmabuf import for GPU
+clients runs on both the `tty` backend and the native `headless` backend
+(off each one's renderer formats).
 
 The IPC server itself (`ipc.rs`) is newline-delimited JSON over a unix
 socket, served on a calloop `Generic` source per connection, with drop-on-

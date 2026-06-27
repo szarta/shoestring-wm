@@ -21,22 +21,28 @@
 //! context. Render nodes need no DRM master / logind seat, so this works for a
 //! user who simply logs into the box and launches the WM.
 //!
-//! Scope (keystone): shm clients and the capture path. GPU clients that need
-//! `zwp_linux_dmabuf_v1` aren't served yet — advertising the dmabuf global off
-//! the headless renderer's formats is a follow-up.
+//! GPU clients that need `zwp_linux_dmabuf_v1` are served too: at init we
+//! advertise a dmabuf global built from the offscreen renderer's
+//! `dmabuf_render_formats()` (task 182), mirroring udev's global minus DRM
+//! scanout. The same renderer backs both the per-frame composite and the
+//! [`DmabufHandler`](crate::handlers::dmabuf) import test, so it is shared
+//! (single-threaded calloop, never borrowed re-entrantly) via [`HeadlessData`].
 
+use std::cell::RefCell;
 use std::os::fd::OwnedFd;
+use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
-        allocator::{gbm::GbmDevice, Fourcc},
+        allocator::{dmabuf::Dmabuf, gbm::GbmDevice, Fourcc},
+        drm::DrmNode,
         egl::{EGLContext, EGLDisplay},
         renderer::{
             damage::OutputDamageTracker,
             gles::{GlesRenderer, GlesTexture},
-            Bind, Offscreen,
+            Bind, ImportDma, Offscreen,
         },
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -48,6 +54,39 @@ use smithay::{
 };
 
 use crate::{backend::scale_from_config, state::ShoestringWm};
+
+/// Native-headless backend handle stored in [`ShoestringWm::headless`]. Owns a
+/// shared reference to the offscreen GLES renderer (also held by the render
+/// timer) plus the DRM render node it runs on. Lets the `zwp_linux_dmabuf_v1`
+/// import test and the ext-image-copy dmabuf constraints reach the renderer
+/// without threading it through state.
+///
+/// The renderer is shared with the render loop via `Rc<RefCell<…>>`: the WM is
+/// single-threaded (one calloop), and the import test runs during client
+/// dispatch while the render loop runs in its own timer callback, so the two
+/// never borrow the renderer at the same time.
+#[cfg(feature = "headless")]
+pub struct HeadlessData {
+    renderer: Rc<RefCell<GlesRenderer>>,
+    /// The render node the offscreen renderer runs on, advertised to
+    /// ext-image-copy-capture clients as where to allocate dmabuf buffers.
+    /// `None` if the node couldn't be derived from the device path.
+    pub render_node: Option<DrmNode>,
+}
+
+#[cfg(feature = "headless")]
+impl HeadlessData {
+    /// Try to import `dmabuf` into the offscreen renderer. Backs
+    /// [`crate::state::ShoestringWm::import_dmabuf_test`] — the validation the
+    /// `zwp_linux_dmabuf_v1` protocol runs before creating a wl_buffer. Mirrors
+    /// the udev backend's test against the primary GPU.
+    pub fn import_dmabuf_test(&self, dmabuf: &Dmabuf) -> bool {
+        self.renderer
+            .borrow_mut()
+            .import_dmabuf(dmabuf, None)
+            .is_ok()
+    }
+}
 
 /// Default virtual-output size when neither config nor env overrides it. A
 /// laptop-ish 1080p so a screenshot of the virtual head is immediately useful.
@@ -123,6 +162,40 @@ pub fn init_headless(
     };
     tracing::info!(node = %path.display(), "headless renderer created");
 
+    // Advertise `zwp_linux_dmabuf_v1` off this renderer's import formats so
+    // GPU-accelerated clients can hand us dmabuf surface buffers (the udev
+    // backend does the same off the primary GPU). This is a general GPU
+    // facility, NOT behind the screen-capture gate — only the screencopy
+    // `linux_dmabuf` *event* respects that gate. There is no DRM scanout here,
+    // so unlike udev we never feed these formats to a DrmOutputManager.
+    let dmabuf_formats: smithay::backend::allocator::format::FormatSet = renderer
+        .egl_context()
+        .dmabuf_render_formats()
+        .iter()
+        .copied()
+        .collect();
+    if state.dmabuf_global.is_none() {
+        let dh = state.display_handle.clone();
+        let global = state
+            .dmabuf_state
+            .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
+        state.dmabuf_global = Some(global);
+        tracing::info!(
+            formats = dmabuf_formats.iter().count(),
+            "zwp_linux_dmabuf_v1 global created (headless)"
+        );
+        state.dmabuf_formats = Some(dmabuf_formats);
+    }
+    // The render node clients should allocate dmabuf buffers on, advertised to
+    // ext-image-copy-capture. Best-effort: capture works (shm) without it.
+    let render_node = match DrmNode::from_path(&path) {
+        Ok(node) => Some(node),
+        Err(e) => {
+            tracing::warn!(node = %path.display(), error = %e, "headless: DrmNode::from_path failed");
+            None
+        }
+    };
+
     // One virtual output, sized from the environment (a future remote client
     // will resize it to its own pixel size) at the configured scale.
     let (w, h) = virtual_size();
@@ -173,7 +246,15 @@ pub fn init_headless(
     crate::ext_workspace::broadcast_output_enter(state, &output);
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
-    let mut renderer = renderer;
+    // Share the renderer between the render loop (below) and the dmabuf import
+    // test ([`HeadlessData::import_dmabuf_test`]). Single-threaded calloop, so
+    // the `RefCell` is never borrowed re-entrantly: import runs during client
+    // dispatch, the loop runs in its own timer callback.
+    let renderer = Rc::new(RefCell::new(renderer));
+    state.headless = Some(HeadlessData {
+        renderer: renderer.clone(),
+        render_node,
+    });
     // The offscreen target: the texture, its size, and its buffer *age*.
     // Lazily (re)created to the output's current pixel size; nothing scans it
     // out — it exists so the scene is composited with real damage tracking and
@@ -196,7 +277,7 @@ pub fn init_headless(
             render_once(
                 state,
                 &output,
-                &mut renderer,
+                &mut renderer.borrow_mut(),
                 &mut damage_tracker,
                 &mut target,
             );

@@ -177,7 +177,8 @@ The protocol building blocks games rely on are implemented:
 - **Fullscreen** as a first-class window state, bypassing layer-shell
   surfaces (the bar) so the game owns the whole output.
 - **XWayland** for Windows games via Proton/Wine and for X11-only native
-  titles; **dmabuf** import for GPU clients on the udev/DRM backend.
+  titles; **dmabuf** import for GPU clients on the udev/DRM backend and the
+  native headless backend (remote-desktop serve mode).
 
 Known gaps to be aware of when testing:
 
