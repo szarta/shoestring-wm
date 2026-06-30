@@ -88,16 +88,25 @@ A representative run, with the host GPU passed through::
 GPU and CPU-only rendering
 --------------------------
 
-The headless renderer is built on the render node via GBM, so today the
-container needs a real GPU node passed through (``--device /dev/dri/renderD128``).
-Point ``$SHOESTRING_WM_RENDER_NODE`` at a different node if the default is not
-the right one.
+A GPU is **optional**. When a render node is passed through
+(``--device /dev/dri/renderD128``) the headless renderer builds on it via GBM,
+which is faster and additionally enables GPU dmabuf import/export for accelerated
+clients. Point ``$SHOESTRING_WM_RENDER_NODE`` at a different node if the default
+is not the right one.
 
-Running with **no GPU at all** — for CI or a CPU-only cloud host — is an open
-item. The candidate paths are a surfaceless EGL platform on ``llvmpipe`` (software
-GL, no GBM) or a virtual DRM node (``vkms`` / ``vgem``) that Mesa's software
-rasteriser can drive. Until one of those lands, GPU passthrough is the supported
-configuration.
+With **no GPU at all** — a CI runner or a CPU-only cloud host, or simply a
+``docker run`` without ``--device`` — the backend falls back automatically to a
+surfaceless EGL platform on Mesa's ``llvmpipe`` software rasteriser (no GBM, no
+DRM node). It logs a warning and renders real frames on the CPU; everything the
+capture and serve paths need works identically, only slower. Force this path on
+a GPU box with ``-e SHOESTRING_WM_HEADLESS_SOFTWARE=1`` (add
+``-e LIBGL_ALWAYS_SOFTWARE=1`` to guarantee llvmpipe). The container image must
+carry the Mesa software stack (``libgl1-mesa-dri`` / ``mesa-dri-drivers`` —
+which ships ``swrast``/``llvmpipe``) for the fallback to work.
+
+A GPU-less run is therefore just::
+
+    docker run --rm -p 7355:7355 shoestring-wm-headless
 
 What it buys you
 ----------------

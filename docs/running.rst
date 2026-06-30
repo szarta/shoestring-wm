@@ -10,23 +10,41 @@ from the environment; all can be forced with ``--backend``.
               ``$WAYLAND_DISPLAY`` or ``$DISPLAY`` is set.
 **tty**       Native DRM/KMS + libinput + libseat. The daily-driver
               path. Selected when both env vars are unset.
-**headless**  Surfaceless EGL on a DRM render node with one virtual
-              output and no physical display. Never auto-detected —
-              request it explicitly with ``--backend headless``. The
-              foundation for remote-desktop *serve mode*, and useful on
-              its own for CI, the WLCS harness, and automation. Compiled
-              only when the ``headless`` Cargo feature is enabled.
+**headless**  Surfaceless EGL with one virtual output and no physical
+              display — on a DRM render node when one is available, else
+              software (llvmpipe) so a host with no ``/dev/dri`` still
+              renders. Never auto-detected — request it explicitly with
+              ``--backend headless``. The foundation for remote-desktop
+              *serve mode*, and useful on its own for CI, the WLCS
+              harness, and automation. Compiled only when the
+              ``headless`` Cargo feature is enabled.
 ============  ===========================================================
 
-The headless backend opens an unprivileged render node — so it needs no
-seat, VT, or display manager — and drives its render at a fixed cadence
+The headless backend prefers an unprivileged GPU render node — so it needs
+no seat, VT, or display manager — and drives its render at a fixed cadence
 (there is no vblank). Nothing scans the rendered frame out; it is reached
 only through the capture path (``shoestring-ctl screenshot``,
-``wlr-screencopy`` / ``ext-image-copy-capture``). Two environment knobs:
+``wlr-screencopy`` / ``ext-image-copy-capture``).
+
+When no render node can be opened (no ``/dev/dri``, e.g. a CPU-only CI runner
+or a container started without ``--device``), it falls back automatically to a
+surfaceless EGL platform backed by Mesa's **llvmpipe** software rasterizer and
+logs a warning. The offscreen render target is a GLES texture rather than a
+GBM buffer, so compositing and the shm capture/stream path are identical; only
+GPU dmabuf import/export needs a real render node. Software rendering is slower
+but produces real frames — enough for CI, screenshots, and automation. Three
+environment knobs:
 
 ``$SHOESTRING_WM_RENDER_NODE``
     Render node to open. Defaults to the first existing of
-    ``/dev/dri/renderD128``–``renderD130``.
+    ``/dev/dri/renderD128``–``renderD130``. If it cannot be opened, the
+    backend falls back to software rendering rather than failing.
+
+``$SHOESTRING_WM_HEADLESS_SOFTWARE``
+    Set to ``1`` to force the software (surfaceless/llvmpipe) path even on a
+    box that has a GPU — useful for reproducing the CPU-only path in CI. Add
+    ``LIBGL_ALWAYS_SOFTWARE=1`` if a real GPU is present and you want to
+    *guarantee* llvmpipe rather than letting Mesa pick the device.
 
 ``$SHOESTRING_WM_HEADLESS_SIZE``
     Virtual output size as ``WIDTHxHEIGHT`` (e.g. ``2560x1440``).

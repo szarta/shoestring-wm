@@ -21,6 +21,17 @@
 //! context. Render nodes need no DRM master / logind seat, so this works for a
 //! user who simply logs into the box and launches the WM.
 //!
+//! **GPU-less hosts** (CI, cheap cloud, containers with no `/dev/dri`): when no
+//! render node can be opened we fall back to a *surfaceless EGL platform*
+//! (`EGL_MESA_platform_surfaceless`), which Mesa backs with the llvmpipe
+//! software rasterizer — no GBM, no DRM node, just CPU rendering. The offscreen
+//! render target is a GLES texture (not a GBM buffer), so compositing and the
+//! shm capture/stream path work identically; only dmabuf import/export needs a
+//! real GPU, so on the software path we simply don't advertise
+//! `zwp_linux_dmabuf_v1` (it would carry zero formats). `$SHOESTRING_WM_HEADLESS_SOFTWARE=1`
+//! forces this path even on a box that has a GPU (set `LIBGL_ALWAYS_SOFTWARE=1`
+//! too if a real GPU is present and you want to *guarantee* llvmpipe).
+//!
 //! GPU clients that need `zwp_linux_dmabuf_v1` are served too: at init we
 //! advertise a dmabuf global built from the offscreen renderer's
 //! `dmabuf_render_formats()` (task 182), mirroring udev's global minus DRM
@@ -38,7 +49,7 @@ use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, gbm::GbmDevice, Fourcc},
         drm::DrmNode,
-        egl::{EGLContext, EGLDisplay},
+        egl::{native::EGLSurfacelessDisplay, EGLContext, EGLDisplay},
         renderer::{
             damage::OutputDamageTracker,
             gles::{GlesRenderer, GlesTexture},
@@ -115,6 +126,79 @@ fn render_node_path() -> std::path::PathBuf {
     "/dev/dri/renderD128".into()
 }
 
+/// Whether `$name` is set to a truthy value (`1`/`true`/`yes`).
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Build the headless EGL display, preferring a real GPU render node (GBM, which
+/// gives dmabuf import/export) and falling back to a surfaceless software EGL
+/// platform (Mesa llvmpipe) when no node is usable. Returns the display and the
+/// DRM render node it bound — `None` on the software path, where there is no node
+/// to advertise to dmabuf clients.
+///
+/// Selection:
+/// - `$SHOESTRING_WM_HEADLESS_SOFTWARE=1` forces the surfaceless path outright
+///   (CPU-only CI even on a box that has a GPU).
+/// - otherwise try the GBM render node; if it can't be opened or EGL rejects it
+///   (no `/dev/dri`, permissions, ...) fall back to surfaceless rather than
+///   failing, so a GPU-less host still produces frames. The failure is logged at
+///   `warn` so a genuine GPU misconfiguration is still visible.
+fn create_egl_display() -> Result<(EGLDisplay, Option<DrmNode>)> {
+    if env_flag("SHOESTRING_WM_HEADLESS_SOFTWARE") {
+        tracing::info!(
+            "headless: SHOESTRING_WM_HEADLESS_SOFTWARE set; using surfaceless software EGL (llvmpipe)"
+        );
+        return Ok((surfaceless_display()?, None));
+    }
+    match gbm_display() {
+        Ok(pair) => Ok(pair),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "headless: no usable GPU render node; falling back to surfaceless software EGL (llvmpipe)"
+            );
+            Ok((surfaceless_display()?, None))
+        }
+    }
+}
+
+/// Open the configured DRM render node, wrap it in GBM, and build an EGL display
+/// on it. The display takes ownership of the GBM device (kept alive inside the
+/// renderer's context for the session). Also derives the [`DrmNode`] advertised
+/// to ext-image-copy-capture as where clients should allocate dmabuf buffers
+/// (best-effort: `None` if the path isn't a recognizable DRM node).
+fn gbm_display() -> Result<(EGLDisplay, Option<DrmNode>)> {
+    let path = render_node_path();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open render node {}", path.display()))?;
+    let fd: OwnedFd = file.into();
+    let gbm = GbmDevice::new(fd).context("create gbm device on render node")?;
+    let egl_display =
+        unsafe { EGLDisplay::new(gbm) }.context("create EGL display on render node")?;
+    let render_node = match DrmNode::from_path(&path) {
+        Ok(node) => Some(node),
+        Err(e) => {
+            tracing::warn!(node = %path.display(), error = %e, "headless: DrmNode::from_path failed");
+            None
+        }
+    };
+    Ok((egl_display, render_node))
+}
+
+/// Build a surfaceless EGL display (`EGL_MESA_platform_surfaceless`). No GBM, no
+/// DRM node — Mesa backs it with llvmpipe when no GPU is present.
+fn surfaceless_display() -> Result<EGLDisplay> {
+    unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }
+        .context("create surfaceless EGL display (software/llvmpipe)")
+}
+
 /// Parse `$SHOESTRING_WM_HEADLESS_SIZE` (`WIDTHxHEIGHT`, e.g. `2560x1440`),
 /// falling back to [`DEFAULT_SIZE`] when unset or malformed.
 fn virtual_size() -> (i32, i32) {
@@ -138,29 +222,21 @@ pub fn init_headless(
     event_loop: &mut EventLoop<'static, ShoestringWm>,
     state: &mut ShoestringWm,
 ) -> Result<()> {
-    // Open a render node and build a surfaceless GLES renderer on it. A render
-    // node (renderD*) is unprivileged — no DRM master, no seat — so this needs
-    // no logind/libseat session, matching "user logs into the box and launches
-    // the WM".
-    let path = render_node_path();
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open render node {}", path.display()))?;
-    let fd: OwnedFd = file.into();
-    let gbm = GbmDevice::new(fd).context("create gbm device on render node")?;
-    // EGLDisplay takes ownership of the gbm device (kept alive inside the
-    // renderer's context for the session).
-    let egl_display =
-        unsafe { EGLDisplay::new(gbm) }.context("create EGL display on render node")?;
+    // Build an EGL display and a surfaceless GLES renderer. Preference order: a
+    // real GPU render node via GBM (unprivileged renderD* — no DRM master, no
+    // seat — and gives dmabuf import/export), else a surfaceless software EGL
+    // platform (Mesa llvmpipe) so a host with no usable `/dev/dri` still renders
+    // real frames. `render_node` is `Some` only on the GPU path; `None` marks
+    // the software path (nothing to advertise to dmabuf clients).
+    let (egl_display, render_node) = create_egl_display()?;
+    let software = render_node.is_none();
     let egl_context = EGLContext::new(&egl_display).context("create EGL context")?;
     let renderer = unsafe {
         let caps = GlesRenderer::supported_capabilities(&egl_context)
             .context("query GLES capabilities")?;
         GlesRenderer::with_capabilities(egl_context, caps).context("create GLES renderer")?
     };
-    tracing::info!(node = %path.display(), "headless renderer created");
+    tracing::info!(software, "headless renderer created");
 
     // Advertise `zwp_linux_dmabuf_v1` off this renderer's import formats so
     // GPU-accelerated clients can hand us dmabuf surface buffers (the udev
@@ -175,26 +251,27 @@ pub fn init_headless(
         .copied()
         .collect();
     if state.dmabuf_global.is_none() {
-        let dh = state.display_handle.clone();
-        let global = state
-            .dmabuf_state
-            .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
-        state.dmabuf_global = Some(global);
-        tracing::info!(
-            formats = dmabuf_formats.iter().count(),
-            "zwp_linux_dmabuf_v1 global created (headless)"
-        );
-        state.dmabuf_formats = Some(dmabuf_formats);
-    }
-    // The render node clients should allocate dmabuf buffers on, advertised to
-    // ext-image-copy-capture. Best-effort: capture works (shm) without it.
-    let render_node = match DrmNode::from_path(&path) {
-        Ok(node) => Some(node),
-        Err(e) => {
-            tracing::warn!(node = %path.display(), error = %e, "headless: DrmNode::from_path failed");
-            None
+        if dmabuf_formats.iter().next().is_none() {
+            // Software/llvmpipe path: the renderer imports no dmabuf formats.
+            // Advertising a zero-format `zwp_linux_dmabuf_v1` is useless and only
+            // confuses GPU clients, so we skip the global entirely — every client
+            // still works over shm buffers.
+            tracing::info!(
+                "headless: renderer exposes no dmabuf formats (software); zwp_linux_dmabuf_v1 not advertised"
+            );
+        } else {
+            let dh = state.display_handle.clone();
+            let global = state
+                .dmabuf_state
+                .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
+            state.dmabuf_global = Some(global);
+            tracing::info!(
+                formats = dmabuf_formats.iter().count(),
+                "zwp_linux_dmabuf_v1 global created (headless)"
+            );
+            state.dmabuf_formats = Some(dmabuf_formats);
         }
-    };
+    }
 
     // One virtual output, sized from the environment (a future remote client
     // will resize it to its own pixel size) at the configured scale.
