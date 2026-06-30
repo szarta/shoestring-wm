@@ -65,7 +65,7 @@ The vertical counterpart to the workspace keys: you are always at
 is the local machine; each ``shoestring-remote-client`` connected to a remote
 box is the next index. While a remote is the active view the WM captures **all**
 input and forwards it raw to that machine (its own keymap and keybinds apply) —
-only these keys stay local.
+only these keys stay local. See :doc:`remote` for the design behind this.
 
 =====================================  ========================================
 Binding                                Action

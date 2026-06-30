@@ -405,6 +405,34 @@ Each request is a JSON object with a ``type`` discriminator:
        desktop produces no frames. Consumed by ``shoestring-remote-server``,
        which relays the frames over an ssh tunnel; see the
        ``shoestring-remote`` crate for the wire format.
+   * - ``{"type": "register_remote_server"}``
+     - Register this connection as **the** remote-desktop server
+       (``shoestring-remote-server``), the served-box handshake. Sent once at
+       the server's startup so the WM knows a server is available — which is
+       what makes the **remote gate** selectable (greyed until then). The
+       registration lives for the connection's lifetime: when the server
+       disconnects the WM clears it and forces the gate off. One server
+       registers at a time; a second registration replaces the first. Reply is
+       ``remote``, then ``remote_changed`` is pushed to this connection so the
+       server learns of later gate flips.
+   * - ``{"type": "set_remote", "enabled": true}``
+     - Toggle the runtime **remote gate** — the consent switch for serve mode.
+       Enabling *couples* the capture gate (so the served output can be
+       streamed) and the automation gate (so client input can be injected) and
+       opens the server's listener. Refused with ``error`` unless a server has
+       registered (``register_remote_server``). Reply is ``remote``;
+       ``remote_changed`` is broadcast when the value changes. Runtime-only, not
+       persisted — driven by the bar chip on a desktop, or by
+       ``shoestring-ctl remote on`` (the headless/container entrypoint). See
+       :doc:`remote`.
+   * - ``{"type": "remote_status"}``
+     - Read the remote-gate state without changing it. Reply is ``remote``
+       (``enabled`` / ``server_available`` / ``viewers``). Read-only, not gated.
+   * - ``{"type": "report_remote_viewers", "viewers": 2}``
+     - Report the number of connected viewers/controllers. Sent by the
+       ``shoestring-remote-server`` as clients connect and leave; the WM caches
+       it and broadcasts ``remote_changed`` so the bar's "being viewed"
+       indicator can light. Reply is ``remote``.
    * - ``{"type": "register_remote_client", "label": "dev-107", "width": 1920, "height": 1080}``
      - Register this connection as a **viewable machine** on the local
        machine-axis — the viewer-box half of remote desktop. A
@@ -565,6 +593,15 @@ The server replies with a single JSON object tagged by ``type``:
     <bool>, "camera_active": <bool>}}``. Returned for ``media_status``.
     ``state`` is omitted (``null``) when no ``shoestring-mediad`` monitor
     has reported yet — distinct from "reported, all false".
+
+``remote``
+    ``{"type": "remote", "enabled": <bool>, "server_available": <bool>,
+    "viewers": <int>}``. The remote-gate snapshot, returned for
+    ``register_remote_server``, ``set_remote``, ``remote_status``, and
+    ``report_remote_viewers``. ``enabled`` is the gate; ``server_available`` is
+    whether a ``shoestring-remote-server`` has registered (the bar greys the
+    toggle until then); ``viewers`` is the connected-client count (the "being
+    viewed" chip lights when > 0).
 
 ``remote_clients``
     ``{"type": "remote_clients", "machines": [{"index": 1, "label":
@@ -918,6 +955,14 @@ Each event is tagged by ``type``.
     being enabled. Rate-limited by the WM (a few per second) so a high-FPS
     cast doesn't flood subscribers; a bar can light a "recording" dot and
     let it decay after the events stop.
+
+``remote_changed``
+    ``{"type": "remote_changed", "enabled": <bool>, "server_available":
+    <bool>, "viewers": <int>}``. Fired when the remote gate flips, a server
+    registers or drops, or the viewer count changes — same payload as the
+    ``remote`` response. The ``shoestring-remote-server`` watches it to open or
+    close its listener; a bar uses it for the remote toggle and the "being
+    viewed" chip. See :doc:`remote`.
 
 ``media_changed``
     ``{"type": "media_changed", "audio_muted": <bool>, "mic_muted":

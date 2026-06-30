@@ -2,7 +2,7 @@ Containers and compositor isolation
 ===================================
 
 The :doc:`headless backend <running>` plus :doc:`remote-desktop serve mode
-<bindings>` add up to something more than the sum of their parts: a complete,
+<remote>` add up to something more than the sum of their parts: a complete,
 self-contained desktop session — its own compositor, its own apps, its own
 clipboard and seat — that has **no** dependency on the host's display, login
 session, or input devices, and that is fully **observable and driveable over a
