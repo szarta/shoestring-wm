@@ -1,0 +1,12 @@
+# shoestring-wm — container (headless serve-mode) config.
+#
+# A disposable, IPC-observable, remote-viewable desktop. No bar / mediad /
+# portal here — those want a session bus, PipeWire, and a human at a screen.
+# The only autostart is the remote bridge; the container entrypoint opens its
+# gate once it registers.
+#
+# For the one-app-per-container pattern, either pass $SHOESTRING_APP to the
+# container or add the app to `autostart` below.
+
+[general]
+autostart = ["shoestring-remote-server"]

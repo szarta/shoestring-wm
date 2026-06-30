@@ -1,0 +1,11 @@
+# Keep the build context small + reproducible. The container build needs only
+# the workspace sources + Cargo.lock; everything below is rebuilt inside the
+# image or irrelevant to it.
+target/
+**/target/
+.git/
+docs/_build/
+*.png
+*.sock
+.todo-sqlite-cli
+todo.sqlite

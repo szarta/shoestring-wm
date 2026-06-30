@@ -10,17 +10,19 @@ socket**. That is exactly the shape of a thing you put in a container.
 
 This page explains why the headless backend is container-friendly, the
 serve-mode topology that lets you view and drive a containerised session, and
-the "desktop per container" pattern it enables. A published image is still in
-progress (see the *Status* note below); the building blocks it packages —
-``--backend headless`` and ``shoestring-remote-server`` — work today.
+the "desktop per container" pattern it enables. A ready-to-run ``Dockerfile``
+ships in `packaging/docker/
+<https://github.com/barrendo/shoestring-wm/tree/main/packaging/docker>`_; see
+its ``README.md`` for the full build/run reference.
 
 .. note::
 
-   **Status.** The headless serve-mode stack is verified end to end (a served
-   headless session driven from a separate machine over ``ssh -L``). A
-   ready-to-run ``Dockerfile`` and a CPU-only (GPU-less) rendering path are
-   tracked work, not yet shipped. The ``docker run`` recipe below is the
-   intended shape and requires a host GPU render node today.
+   **Status.** Shipped: the headless serve-mode stack is verified end to end (a
+   served headless session driven from a separate machine over ``ssh -L``), the
+   ``Dockerfile`` in ``packaging/docker/`` builds and runs, and rendering is
+   **GPU-optional** — with a render node it uses the GPU, without one it falls
+   back to Mesa ``llvmpipe`` (so a plain ``docker run`` with no ``--device``
+   works). See *GPU and CPU-only rendering* below.
 
 Why headless fits a container
 -----------------------------
@@ -66,24 +68,30 @@ The container is the **served** side; you view and drive it from a real desktop
    │     → appears on the machine axis (Super+J/K)       │
    └─────────────────────────────────────────────────────┘
 
-Inside the container an entrypoint starts the compositor, registers
-``shoestring-remote-server`` with it, and opens the remote gate (the server's
-listener stays closed until the gate is on — the same explicit, opt-in sharing
-gate described in :doc:`bindings`). From your desktop, ``shoestring-remote-client``
-connects to the published port (directly or over an ``ssh -L`` tunnel), and the
-session joins your machine axis: ``Super+J`` to view and drive it, ``Super+Escape``
-to break back out. Clipboard moves between you and the container with
-``Super+Shift+C`` / ``Super+Shift+V`` exactly as between two machines.
+Inside the container the entrypoint (``packaging/docker/entrypoint.sh``) starts
+the compositor, waits for its IPC socket, lets the autostarted
+``shoestring-remote-server`` register, and opens the remote gate with
+``shoestring-ctl remote on`` (the server's listener stays closed until the gate
+is on — the same explicit, opt-in sharing gate described in :doc:`bindings`).
+From your desktop, ``shoestring-remote-client`` connects to the published port
+(directly or over an ``ssh -L`` tunnel), and the session joins your machine
+axis: ``Super+J`` to view and drive it, ``Super+Escape`` to break back out.
+Clipboard moves between you and the container with ``Super+Shift+C`` /
+``Super+Shift+V`` exactly as between two machines.
 
-A representative run, with the host GPU passed through::
+Build the image from the repository root, then run it (no GPU required)::
 
-    docker run --rm \
-      --device /dev/dri/renderD128 \
-      -p 7355:7355 \
-      shoestring-wm-headless
+    podman build -t shoestring-wm-headless -f packaging/docker/Dockerfile .
+
+    podman run --rm -p 127.0.0.1:7355:7355 shoestring-wm-headless
 
     # then, on your desktop:
-    shoestring-remote-client --connect <host>:7355 --label sandbox
+    shoestring-remote-client --connect 127.0.0.1:7355 --label sandbox
+
+Publishing to host loopback (``-p 127.0.0.1:7355:7355``) keeps the port off the
+network — reach a remote host's container with
+``ssh -L 7355:127.0.0.1:7355 host``. To use the host GPU, add
+``--device /dev/dri/renderD128 --group-add keep-groups``.
 
 GPU and CPU-only rendering
 --------------------------
@@ -106,7 +114,9 @@ which ships ``swrast``/``llvmpipe``) for the fallback to work.
 
 A GPU-less run is therefore just::
 
-    docker run --rm -p 7355:7355 shoestring-wm-headless
+    podman run --rm -p 127.0.0.1:7355:7355 shoestring-wm-headless
+
+The image carries the Mesa software stack, so this works out of the box.
 
 What it buys you
 ----------------
@@ -141,4 +151,9 @@ security sandbox *between* the apps in it.
 
 For true per-app isolation, run **one app per container** — the compositor
 hosting a single client. That is often the more useful pattern anyway: each app
-gets its own disposable, observable, individually-viewable desktop.
+gets its own disposable, observable, individually-viewable desktop. Pass the
+app's argv in ``$SHOESTRING_APP`` (or add it to the image's ``config.toml``
+``autostart``)::
+
+    podman run --rm -p 127.0.0.1:7355:7355 \
+        -e SHOESTRING_APP='alacritty' shoestring-wm-headless

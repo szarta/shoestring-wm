@@ -361,6 +361,15 @@ enum Command {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Read or toggle the runtime remote-desktop gate. Turning it on couples
+    /// the capture + automation gates so `shoestring-remote-server` can stream
+    /// the output and replay client input. Refused unless a server has
+    /// registered. Not persisted to disk — the headless/container entrypoint
+    /// opens it at boot; a desktop session toggles it from the bar chip.
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
     /// List the machine-axis: the remote machines registered as viewable
     /// (index 1..) and which index is the active view (0 = local). Read-only.
     RemoteClients,
@@ -382,6 +391,18 @@ enum AutomationAction {
     /// Turn the gate OFF.
     Off,
     /// Print the current state.
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+enum RemoteAction {
+    /// Turn the gate ON: couple the capture + automation gates and let the
+    /// registered server stream + replay input. Refused if no server has
+    /// registered yet.
+    On,
+    /// Turn the gate OFF: the server's listener closes and no port stays open.
+    Off,
+    /// Print the current state (gate, whether a server is registered, viewers).
     Status,
 }
 
@@ -533,6 +554,11 @@ fn main() -> Result<()> {
             gamma,
         },
         Command::ResetGamma { output } => Request::ResetGamma { output },
+        Command::Remote { action } => match action {
+            RemoteAction::On => Request::SetRemote { enabled: true },
+            RemoteAction::Off => Request::SetRemote { enabled: false },
+            RemoteAction::Status => Request::RemoteStatus,
+        },
         Command::RemoteClients => Request::RemoteClientStatus,
         Command::SetView { index } => Request::SetView { index },
     };
