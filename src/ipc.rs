@@ -88,6 +88,10 @@ pub(crate) struct Client {
     /// render loop (see [`crate::capture_stream`]). Once set, the connection no
     /// longer speaks newline-JSON.
     pub(crate) capture_sub: Option<crate::capture_stream::CaptureSub>,
+    /// `Some` after [`Request::CaptureWindow`]: like [`Self::capture_sub`], but
+    /// the binary stream carries a single **window** rendered offscreen (the
+    /// remote-desktop *graft* path, see [`crate::window_capture`]).
+    pub(crate) window_capture_sub: Option<crate::window_capture::WindowCaptureSub>,
 }
 
 impl Client {
@@ -195,7 +199,10 @@ impl Server {
             .values()
             .filter(|e| {
                 let c = e.client.borrow();
-                c.subscriber || c.metrics_sub.is_some() || c.capture_sub.is_some()
+                c.subscriber
+                    || c.metrics_sub.is_some()
+                    || c.capture_sub.is_some()
+                    || c.window_capture_sub.is_some()
             })
             .count()
     }
@@ -228,6 +235,18 @@ impl Server {
             .map(|(&id, e)| (id, Rc::clone(&e.client)))
             .collect()
     }
+
+    /// Every window-capture (graft) subscriber, as (id, handle) pairs the render
+    /// loop pushes offscreen-rendered window frames to. Unlike
+    /// [`Self::capture_subscribers`] there is no output key: each subscriber
+    /// names its own foreign-toplevel id internally.
+    pub(crate) fn window_capture_subscribers(&self) -> Vec<(ClientId, Rc<RefCell<Client>>)> {
+        self.clients
+            .iter()
+            .filter(|(_, e)| e.client.borrow().window_capture_sub.is_some())
+            .map(|(&id, e)| (id, Rc::clone(&e.client)))
+            .collect()
+    }
 }
 
 fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
@@ -244,6 +263,7 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
         spent: false,
         metrics_sub: None,
         capture_sub: None,
+        window_capture_sub: None,
     }));
 
     let source_client = Rc::clone(&client);
@@ -1046,6 +1066,49 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 tracing::debug!(?id, %output_name, "ipc client subscribed to capture stream");
                 return false;
             }
+            Request::CaptureWindow { id: ft_id } => {
+                // Gated by the screen-capture flag — same consent as CaptureStream.
+                if !state.screen_capture_enabled {
+                    let _ = write_response(client, &capture_off_error());
+                    return true;
+                }
+                // The window must exist now; it may later close (→ Bye) but we
+                // refuse to open a stream for a window that isn't there.
+                if window_by_ft_id(state, &ft_id).is_none() {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: format!("capture_window: no window with id {ft_id}"),
+                        },
+                    );
+                    return true;
+                }
+                // One Ok line, then upgrade to the binary frame stream (Ready,
+                // optional Meta, then Frame/Resize/Bye) pushed from the render loop.
+                if write_response(client, &Response::Ok).is_err() {
+                    return true;
+                }
+                {
+                    let mut c = client.borrow_mut();
+                    c.window_capture_sub =
+                        Some(crate::window_capture::WindowCaptureSub::new(ft_id.clone()));
+                    c.spent = true;
+                }
+                tracing::debug!(?id, %ft_id, "ipc client subscribed to window-capture stream");
+                return false;
+            }
+            Request::InjectInputToWindow { id: ft_id, event } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                let resp = match state.inject_input_to_window(&ft_id, event) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::DispatchAction { action } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
@@ -1219,6 +1282,22 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
         .collect()
 }
 
+/// Resolve a foreign-toplevel identifier (as reported in [`WindowSummary::id`])
+/// to its [`Window`]. Iterates `foreign_toplevels`, which holds *every* window
+/// regardless of workspace or mapped state — so graft capture/injection can
+/// target a window that is minimized or on a non-active workspace. `None` if no
+/// window carries that id (e.g. it has since closed).
+pub(crate) fn window_by_ft_id(
+    state: &ShoestringWm,
+    ft_id: &str,
+) -> Option<smithay::desktop::Window> {
+    state
+        .foreign_toplevels
+        .iter()
+        .find(|(_, handle)| handle.identifier() == ft_id)
+        .map(|(window, _)| window.clone())
+}
+
 /// OS process id of `window`'s owning client, when resolvable. The window's
 /// `wl_surface` carries the client; its peer credentials carry the pid.
 /// `None` when there's no surface yet, no client, or the platform reports no
@@ -1270,7 +1349,10 @@ pub(crate) fn window_z(state: &ShoestringWm, window: &smithay::desktop::Window) 
 /// Name of the output a window's center sits on, by point containment against
 /// each output's logical geometry. `None` when the window is unmapped or its
 /// center falls outside every output.
-fn window_output(state: &ShoestringWm, window: &smithay::desktop::Window) -> Option<String> {
+pub(crate) fn window_output(
+    state: &ShoestringWm,
+    window: &smithay::desktop::Window,
+) -> Option<String> {
     let geo = window_geometry(state, window)?;
     let (cx, cy) = (geo.x + geo.w / 2, geo.y + geo.h / 2);
     state

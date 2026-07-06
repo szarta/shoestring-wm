@@ -148,6 +148,23 @@ impl CompositorHandler for ShoestringWm {
                 // set an explicit position will have already cleared
                 // the pending flag.
                 self.try_recenter_pending(&window);
+                // A grafted window that's on the active workspace still needs
+                // its capture marked dirty so the offscreen pass re-renders it.
+                self.mark_window_capture_dirty(&window);
+            } else if self.has_window_capture_subscribers() {
+                // The committing surface isn't on the active workspace, but a
+                // graft subscriber may be streaming it (minimized / other
+                // workspace). Advance its buffer state and mark it dirty so the
+                // offscreen capture pass picks up the new content.
+                if let Some(window) = self
+                    .foreign_toplevels
+                    .keys()
+                    .find(|w| crate::window_ext::matches_surface(w, &root))
+                    .cloned()
+                {
+                    window.on_commit();
+                    self.mark_window_capture_dirty(&window);
+                }
             }
         }
 

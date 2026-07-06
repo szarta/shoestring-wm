@@ -69,7 +69,7 @@ impl CaptureSub {
 /// buffer coordinates. Returns `None` if it lies fully outside or is empty
 /// after clamping. (For the un-transformed served output, physical and buffer
 /// pixels coincide.)
-fn clamp_to_buffer(
+pub(crate) fn clamp_to_buffer(
     rect: Rectangle<i32, Physical>,
     w: i32,
     h: i32,
@@ -121,7 +121,7 @@ where
 }
 
 /// Encode a tile for one region by reading it back from the framebuffer.
-fn tile_for_region<R>(
+pub(crate) fn tile_for_region<R>(
     renderer: &mut R,
     framebuffer: &R::Framebuffer<'_>,
     region: Rectangle<i32, BufferCoord>,

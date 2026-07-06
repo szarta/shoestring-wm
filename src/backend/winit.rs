@@ -163,6 +163,12 @@ pub fn init_winit(
                         clear,
                     );
 
+                    // Graft mode: render subscribed single windows to their own
+                    // offscreen buffers and stream their tiles. Binds its own
+                    // target (like the screencopy passes), so it must precede the
+                    // window framebuffer's final bind in render_output below.
+                    crate::window_capture::push_window_capture(state, renderer);
+
                     // Diagnostics overlay on top of everything (index 0 = drawn
                     // first), added after screencopy so it stays out of captures.
                     if show_overlay {

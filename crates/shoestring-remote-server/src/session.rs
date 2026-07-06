@@ -59,26 +59,33 @@ pub fn serve(net: TcpStream, output: Option<String>, viewers: Arc<Viewers>) -> R
         .unwrap_or_else(|_| "<unknown>".into());
     net.set_nodelay(true).ok();
 
-    // The client's first message must be Hello — its output size/scale. We
-    // serve the WM's actual output size (echoed back via the WM's Ready), so
-    // for now Hello is advisory; exact-size negotiation (resize the virtual
-    // output to match) is a follow-up.
+    // The client's first message discriminates the mode:
+    // - `Hello` → **serve mode**: stream a whole output. Hello carries the
+    //   client's output size/scale (advisory today; the WM serves its own size).
+    // - `Graft { selector }` → **graft mode**: stream the single window matching
+    //   `selector`, resolved against the WM's window list.
     let mut net_in = BufReader::new(net.try_clone().context("clone net for read")?);
-    match read_framed::<_, ClientMessage>(&mut net_in) {
+    let (wm_capture, graft_id) = match read_framed::<_, ClientMessage>(&mut net_in) {
         Ok(ClientMessage::Hello {
             width,
             height,
             scale,
         }) => {
-            tracing::info!(%peer, width, height, scale, "client hello");
+            tracing::info!(%peer, width, height, scale, "client hello (serve mode)");
+            let (cap, _leftover) =
+                wm::open_capture_stream(output).context("opening WM capture stream for client")?;
+            (cap, None)
         }
-        Ok(other) => bail!("expected Hello first, got {other:?}"),
-        Err(e) => bail!("reading Hello: {e}"),
-    }
-
-    // Open the WM capture stream now that the client is committed.
-    let (wm_capture, _leftover) =
-        wm::open_capture_stream(output).context("opening WM capture stream for client")?;
+        Ok(ClientMessage::Graft { selector }) => {
+            tracing::info!(%peer, %selector, "client graft request");
+            let id = wm::resolve_window(&selector).context("resolving graft selector")?;
+            let cap = wm::open_window_capture_stream(&id)
+                .context("opening WM window-capture stream for client")?;
+            (cap, Some(id))
+        }
+        Ok(other) => bail!("expected Hello or Graft first, got {other:?}"),
+        Err(e) => bail!("reading first message: {e}"),
+    };
 
     let teardown = Arc::new(Teardown {
         net: net.try_clone().context("clone net for teardown")?,
@@ -108,7 +115,7 @@ pub fn serve(net: TcpStream, output: Option<String>, viewers: Arc<Viewers>) -> R
     };
 
     // Input loop on this thread: network → WM injection + clipboard brokering.
-    let input_result = forward_input(net_in, net_out, &teardown);
+    let input_result = forward_input(net_in, net_out, &teardown, graft_id);
     teardown.stop();
     let _ = frames.join();
 
@@ -144,6 +151,7 @@ fn forward_input(
     mut net_in: BufReader<TcpStream>,
     net_out: SharedNet,
     teardown: &Teardown,
+    graft_id: Option<String>,
 ) -> Result<()> {
     // Read ends the loop on EOF / shutdown / malformed.
     while let Ok(msg) = read_framed::<_, ClientMessage>(&mut net_in) {
@@ -182,12 +190,19 @@ fn forward_input(
                     tracing::debug!(error = %e, "set_clipboard failed");
                 }
             }
-            // Hello (re-sent) and anything non-input maps to None and is skipped.
+            // Hello/Graft (re-sent) and anything non-input maps to None and is
+            // skipped.
             other => {
                 let Some(event) = to_raw_input(&other) else {
                     continue;
                 };
-                if let Err(e) = wm::inject(event) {
+                // Graft mode targets the grafted window; serve mode drives the
+                // global seat.
+                let result = match &graft_id {
+                    Some(id) => wm::inject_to_window(id, event),
+                    None => wm::inject(event),
+                };
+                if let Err(e) = result {
                     // The gate likely flipped off mid-session; stop cleanly.
                     tracing::debug!(error = %e, "inject failed; ending session");
                     break;
@@ -216,6 +231,7 @@ fn to_raw_input(msg: &ClientMessage) -> Option<RawInput> {
             vertical,
         }),
         ClientMessage::Hello { .. }
+        | ClientMessage::Graft { .. }
         | ClientMessage::Bye
         | ClientMessage::GetClipboard { .. }
         | ClientMessage::SetClipboard { .. } => None,

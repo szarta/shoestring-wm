@@ -423,6 +423,12 @@ fn render_once(
         clear,
     );
 
+    // Graft mode: render any subscribed single windows to their own offscreen
+    // buffers and stream their damage tiles. Independent of the output's own
+    // damage (a grafted window may live on another workspace), so it runs here —
+    // next to the screencopy passes, before the main framebuffer is bound.
+    crate::window_capture::push_window_capture(state, renderer);
+
     // Diagnostics overlay on top of everything (index 0 = drawn first), added
     // after the capture pass so it stays out of captures.
     if show_overlay {

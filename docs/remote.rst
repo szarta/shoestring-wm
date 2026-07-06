@@ -182,8 +182,9 @@ clipboard manager (cliphist / wl-clipboard) observe selections. See
 Modes
 -----
 
-All three modes share the transport, input injection, and codec; only the frame
-source differs.
+All three modes share the transport and the tile codec; serve and mirror also
+share whole-output capture and global input injection, while graft scopes both
+to a single window (see its entry).
 
 - **Serve / headless mode** *(shipped).* The served box has no display; the
   remote view **is** the only output — a virtual head sized to the connecting
@@ -191,9 +192,22 @@ source differs.
 - **Mirror mode** *(planned).* The served box has a real display; the server
   streams an existing physical output's scene. The "drive an existing desktop"
   case. Needs no new backend — only a real-CRTC frame source for the server.
-- **Graft mode** *(planned).* Pull a single remote *window* into the local
-  workspace as a real window (waypipe-style protocol forwarding), using the
-  structural window awareness from serve mode.
+- **Graft mode** *(shipped).* Pull a single remote *window* into the local
+  workspace as a real, drivable local window. Rather than proxying the app's
+  Wayland connection (the waypipe approach), graft **scopes the serve-mode
+  pixel stream to one window**: the served WM renders just that window's surface
+  tree to its own offscreen buffer and streams its damage tiles, so the capture
+  is correct even when the window is occluded, minimized, or on a non-active
+  workspace. The viewer presents it as an ordinary ``xdg_toplevel`` the local WM
+  tiles/moves/closes like any app, and forwards the natural keyboard/pointer
+  input the window receives back to the served window (keyboard focus pinned to
+  it, pointer coordinates window-local). Run it with
+  ``shoestring-remote-client --graft <selector>`` where ``selector`` matches a
+  remote window's ``app_id`` / ``title`` / foreign-toplevel id; the server
+  resolves it against the served WM's window list. *v1 limitations:* one graft
+  at a time drives cleanly (it moves the served box's single seat); sizing is
+  remote-authoritative (a local resize viewport-scales); it is pixels, not
+  protocol (no client-side GPU; the cursor is the local one over the toplevel).
 
 Why native serve mode
 ---------------------

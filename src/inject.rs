@@ -302,6 +302,85 @@ impl ShoestringWm {
         pointer.frame(self);
     }
 
+    /// Inject one raw input transition into a **specific window** (remote-desktop
+    /// *graft mode*), rather than wherever the global seat happens to point.
+    /// Keyboard focus is pinned to the target window and pointer motion is taken
+    /// as **window-local** pixel coordinates, so input lands on the grafted
+    /// window even when it is occluded or on a non-active workspace. Returns an
+    /// error string (surfaced as [`shoestring_ipc::Response::Error`]) when the id
+    /// resolves to no window.
+    ///
+    /// Because it drives the single global seat, this moves the served box's own
+    /// focus/pointer to the grafted window — the documented "one graft at a time"
+    /// limitation.
+    pub fn inject_input_to_window(
+        &mut self,
+        ft_id: &str,
+        event: shoestring_ipc::RawInput,
+    ) -> Result<(), String> {
+        let window = crate::ipc::window_by_ft_id(self, ft_id)
+            .ok_or_else(|| format!("inject_input_to_window: no window with id {ft_id}"))?;
+        match event {
+            shoestring_ipc::RawInput::Key { keycode, pressed } => {
+                // Pin keyboard focus to the target, then inject past the binding
+                // table (the grafted app's own keymap applies). set_focus is a
+                // no-op when focus is already there, so repeated keys don't churn.
+                if let Some(kb) = self.seat.get_keyboard() {
+                    if let Some(target) = crate::window_ext::keyboard_focus(&window) {
+                        let serial = SERIAL_COUNTER.next_serial();
+                        kb.set_focus(self, Some(target), serial);
+                    }
+                }
+                self.inject_raw_keycode(keycode, pressed);
+            }
+            shoestring_ipc::RawInput::Motion { x, y } => {
+                self.inject_window_motion(&window, x, y);
+            }
+            shoestring_ipc::RawInput::Button { button, pressed } => {
+                self.inject_raw_button(button, pressed)
+            }
+            shoestring_ipc::RawInput::Axis {
+                horizontal,
+                vertical,
+            } => self.inject_raw_axis(horizontal, vertical),
+        }
+        Ok(())
+    }
+
+    /// Force the pointer onto `window`'s surface at window-local `(x, y)` and
+    /// emit a motion event there — the pointer half of graft injection. Unlike
+    /// [`inject_move_mouse`], focus is the grafted surface itself (not whatever
+    /// geometry-based `surface_under` finds), so an occluded/off-workspace window
+    /// still receives the motion. `(x, y)` are window-local logical pixels; the
+    /// global location is offset by the window's on-screen origin (or `(0, 0)`
+    /// when it isn't mapped).
+    fn inject_window_motion(&mut self, window: &smithay::desktop::Window, x: f64, y: f64) {
+        let Some(surface) = crate::window_ext::focus_surface(window) else {
+            return;
+        };
+        let origin = self
+            .space
+            .element_location(window)
+            .unwrap_or_default()
+            .to_f64();
+        let location = (origin.x + x, origin.y + y);
+        let focus = Some((surface, origin));
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        pointer.motion(
+            self,
+            focus.clone(),
+            &MotionEvent {
+                location: location.into(),
+                serial,
+                time: monotonic_msec(),
+            },
+        );
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.frame(self);
+        self.last_pointer_focus = focus;
+    }
+
     fn tap_key(&mut self, keycode: u32) {
         self.press_key(keycode);
         self.release_key(keycode);

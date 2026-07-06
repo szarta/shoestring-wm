@@ -516,6 +516,29 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
     },
+    /// Subscribe to a damage-tile stream of a **single window** — the capture
+    /// primitive behind remote-desktop *graft mode* (pull one remote window into
+    /// a local workspace). `id` is a foreign-toplevel identifier (as in
+    /// [`WindowSummary::id`]). Unlike [`Request::CaptureStream`], the window is
+    /// rendered to its own offscreen buffer, so the stream is correct even when
+    /// the window is occluded, minimized, or on a non-active workspace, and its
+    /// tiles carry window-local coordinates.
+    ///
+    /// Gated by the **screen-capture gate** exactly like [`Request::CaptureStream`],
+    /// and the reply uses the same **connection upgrade**: one [`Response::Ok`]
+    /// line, then a binary stream of `shoestring_remote::ServerMessage` frames
+    /// (`Ready`, optional `Meta`, then `Frame`/`Resize`/`Bye`). A `Bye` is sent
+    /// when the window closes.
+    CaptureWindow { id: String },
+    /// Inject a single raw input transition into a **specific window** — the
+    /// input primitive behind remote-desktop *graft mode*. Like
+    /// [`Request::InjectInput`] but the event is delivered to the window named by
+    /// `id` (a foreign-toplevel identifier) rather than wherever the global seat
+    /// happens to point: keyboard focus is pinned to that window and pointer
+    /// motion is interpreted in **window-local** pixel coordinates, so input
+    /// lands correctly even when the window is occluded or off-workspace. Gated
+    /// by `set_automation`. Reply is [`Response::Ok`].
+    InjectInputToWindow { id: String, event: RawInput },
     /// Set a per-output gamma ramp from a color temperature, server-side —
     /// the WM computes the ramp and drives the CRTC, so no external
     /// night-light daemon (wlsunset/gammastep) is needed. Shares the same
@@ -1855,6 +1878,38 @@ mod tests {
         );
         let back: Request = serde_json::from_str(r#"{"type":"capture_stream"}"#).unwrap();
         assert!(matches!(back, Request::CaptureStream { output: None }));
+
+        // capture_window: window id is required.
+        let cw = Request::CaptureWindow {
+            id: "toplevel-7".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&cw).unwrap(),
+            r#"{"type":"capture_window","id":"toplevel-7"}"#
+        );
+        let back: Request = serde_json::from_str(r#"{"type":"capture_window","id":"x"}"#).unwrap();
+        assert!(matches!(back, Request::CaptureWindow { id } if id == "x"));
+
+        // inject_input_to_window: id + raw event.
+        let iitw = Request::InjectInputToWindow {
+            id: "toplevel-7".into(),
+            event: RawInput::Button {
+                button: 0x110,
+                pressed: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&iitw).unwrap(),
+            r#"{"type":"inject_input_to_window","id":"toplevel-7","event":{"kind":"button","button":272,"pressed":true}}"#
+        );
+        let back: Request = serde_json::from_str(&serde_json::to_string(&iitw).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Request::InjectInputToWindow {
+                id,
+                event: RawInput::Button { button: 0x110, pressed: true }
+            } if id == "toplevel-7"
+        ));
     }
 
     #[test]

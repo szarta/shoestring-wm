@@ -1858,6 +1858,8 @@ impl ShoestringWm {
             // Streaming capture subscribers (remote-desktop serve mode) must
             // stop the instant consent is revoked: send a final Bye and drop.
             self.teardown_capture_subscribers();
+            // Same for graft-mode window-capture subscribers.
+            self.teardown_window_capture_subscribers();
         }
     }
 

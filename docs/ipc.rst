@@ -214,6 +214,17 @@ Each request is a JSON object with a ``type`` discriminator:
        down/up variants. Unlike ``inject_key`` / ``inject_click`` (atomic
        tap / press+release) each is a single event, so a held key, a chord,
        or a drag reproduces exactly. Gated by the automation gate.
+   * - ``{"type": "inject_input_to_window", "id": "<ft-id>", "event": {…}}``
+     - Like ``inject_input`` but delivered to the **single window** named by
+       ``id`` (a foreign-toplevel identifier from ``windows``) rather than the
+       global seat — the input primitive behind remote-desktop *graft mode*.
+       Keyboard focus is pinned to that window and pointer ``motion`` ``x`` /
+       ``y`` are interpreted as **window-local** logical pixels, so input lands
+       correctly even when the window is occluded or on a non-active workspace.
+       ``event`` is the same tagged ``key`` / ``button`` / ``motion`` / ``axis``
+       currency as ``inject_input``. Gated by the automation gate. Because it
+       drives the single global seat, it moves the served box's own focus to the
+       target window (one graft at a time).
    * - ``{"type": "get_clipboard"}`` (optional ``"primary": true``)
      - Read the WM's current selection and reply with ``clipboard``. The WM
        picks the best text mime the selection owner offers
@@ -405,6 +416,18 @@ Each request is a JSON object with a ``type`` discriminator:
        desktop produces no frames. Consumed by ``shoestring-remote-server``,
        which relays the frames over an ssh tunnel; see the
        ``shoestring-remote`` crate for the wire format.
+   * - ``{"type": "capture_window", "id": "<ft-id>"}``
+     - Subscribe to a **streaming damage capture of a single window** — the
+       capture primitive behind remote-desktop *graft mode*. ``id`` is a
+       foreign-toplevel identifier from ``windows``. Unlike ``capture_stream``
+       the window is rendered to its own offscreen buffer, so the stream is
+       correct even when the window is occluded, minimized, or on a non-active
+       workspace, and tiles carry **window-local** coordinates. **Gated by the
+       screen-capture gate** and torn down on gate-off, identically to
+       ``capture_stream``; the reply uses the same connection upgrade to a binary
+       ``ServerMessage`` stream (``Ready``, a ``Meta`` with the window's
+       ``app_id``/``title``, then ``Frame``/``Resize``, and a ``Bye`` when the
+       window closes).
    * - ``{"type": "register_remote_server"}``
      - Register this connection as **the** remote-desktop server
        (``shoestring-remote-server``), the served-box handshake. Sent once at

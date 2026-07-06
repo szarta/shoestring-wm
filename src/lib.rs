@@ -47,6 +47,7 @@ mod screencopy;
 pub mod state;
 mod virtual_pointer;
 pub mod wallpaper;
+pub mod window_capture;
 pub mod window_ext;
 mod window_rules;
 mod workspace;

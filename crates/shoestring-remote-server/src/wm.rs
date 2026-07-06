@@ -97,6 +97,62 @@ pub fn set_clipboard(primary: bool, mime: String, data: Vec<u8>) -> Result<()> {
     })
 }
 
+/// Resolve a graft `selector` to a foreign-toplevel id by querying the WM's
+/// window list. Match order (first wins), preferring the top-most window on
+/// ties: exact id, exact app_id, app_id substring, title substring. Returns an
+/// error naming the selector if nothing matches — the caller refuses the session.
+pub fn resolve_window(selector: &str) -> Result<String> {
+    let windows = match request(&Request::Windows)? {
+        Response::Windows { windows } => windows,
+        Response::Error { message } => bail!("WM error listing windows: {message}"),
+        other => bail!("unexpected windows response: {other:?}"),
+    };
+    // Top-most first so an ambiguous selector picks the front window.
+    let mut sorted = windows;
+    sorted.sort_by_key(|w| std::cmp::Reverse(w.z.unwrap_or(0)));
+
+    let pick = sorted
+        .iter()
+        .find(|w| w.id == selector)
+        .or_else(|| sorted.iter().find(|w| w.app_id == selector))
+        .or_else(|| sorted.iter().find(|w| w.app_id.contains(selector)))
+        .or_else(|| sorted.iter().find(|w| w.title.contains(selector)));
+
+    match pick {
+        Some(w) => {
+            tracing::info!(selector, id = %w.id, app_id = %w.app_id, title = %w.title, "resolved graft target");
+            Ok(w.id.clone())
+        }
+        None => bail!("no window matches graft selector {selector:?}"),
+    }
+}
+
+/// Replay one raw input transition into a **specific window** (graft mode) —
+/// the per-window counterpart of [`inject`]. Fresh connection per event, same as
+/// [`inject`]. Fails only if the automation gate flipped off (session ending).
+pub fn inject_to_window(id: &str, event: RawInput) -> Result<()> {
+    request_ok(&Request::InjectInputToWindow {
+        id: id.to_string(),
+        event,
+    })
+}
+
+/// Open a **window**-capture stream for the foreign-toplevel `id` (graft mode) —
+/// the per-window counterpart of [`open_capture_stream`]. Sends `capture_window`,
+/// consumes the `Ok` ack line, and returns the connection positioned at the start
+/// of the binary `ServerMessage` frames.
+pub fn open_window_capture_stream(id: &str) -> Result<UnixStream> {
+    let mut stream = connect()?;
+    write_request(&mut stream, &Request::CaptureWindow { id: id.to_string() })?;
+    let ack = read_one_json_line(&mut stream)?;
+    let resp: Response = serde_json::from_str(&ack).context("parse capture_window ack")?;
+    match resp {
+        Response::Ok => Ok(stream),
+        Response::Error { message } => bail!("capture_window refused: {message}"),
+        other => bail!("unexpected capture_window ack: {other:?}"),
+    }
+}
+
 /// Register this process as *the* remote server and return the connection (now
 /// a long-lived event subscriber) plus the gate's initial enabled state. The
 /// connection must be kept alive for the whole process: its drop tells the WM

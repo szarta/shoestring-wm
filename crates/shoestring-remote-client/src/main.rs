@@ -15,6 +15,7 @@
 //! See `docs/ipc.rst` (machine axis) and the `shoestring-remote` crate (wire).
 
 mod cursor;
+mod graft;
 mod net;
 mod wm;
 
@@ -70,8 +71,13 @@ fn main() -> Result<()> {
         }
     };
     init_tracing();
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), connect = %cli.connect, label = %cli.label, "shoestring-remote-client starting");
-    run(cli)
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), connect = %cli.connect, label = %cli.label, graft = ?cli.graft, "shoestring-remote-client starting");
+    // Graft mode presents a single remote window as a local xdg_toplevel; the
+    // default (serve) mode presents a whole remote desktop fullscreen.
+    match cli.graft.clone() {
+        Some(selector) => graft::run(cli, selector),
+        None => run(cli),
+    }
 }
 
 // ---- CLI -----------------------------------------------------------------
@@ -81,6 +87,10 @@ struct Cli {
     connect: String,
     /// Machine name shown on the local machine-axis (defaults to the host part).
     label: String,
+    /// `Some(selector)` selects **graft mode**: present the single remote window
+    /// matching `selector` (app_id / title / foreign-toplevel id) as a local
+    /// xdg_toplevel, instead of the whole desktop fullscreen.
+    graft: Option<String>,
 }
 
 enum CliAction {
@@ -92,6 +102,7 @@ enum CliAction {
 fn parse_cli() -> Result<CliAction> {
     let mut connect: Option<String> = None;
     let mut label: Option<String> = None;
+    let mut graft: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -104,6 +115,7 @@ fn parse_cli() -> Result<CliAction> {
                 )
             }
             "--label" => label = Some(args.next().context("--label needs a name argument")?),
+            "--graft" => graft = Some(args.next().context("--graft needs a selector argument")?),
             other => anyhow::bail!("unknown argument: {other} (try --help)"),
         }
     }
@@ -115,21 +127,29 @@ fn parse_cli() -> Result<CliAction> {
             .map(|(h, _)| h.to_string())
             .unwrap_or_else(|| connect.clone())
     });
-    Ok(CliAction::Run(Cli { connect, label }))
+    Ok(CliAction::Run(Cli {
+        connect,
+        label,
+        graft,
+    }))
 }
 
 fn help_text() -> String {
     format!(
         "shoestring-remote-client {}\n\
          View and drive a remote shoestring-wm desktop.\n\n\
-         USAGE:\n  shoestring-remote-client --connect <host:port> [--label <name>]\n\n\
+         USAGE:\n  shoestring-remote-client --connect <host:port> [--label <name>] [--graft <selector>]\n\n\
          OPTIONS:\n\
          \x20 --connect <host:port>  Remote shoestring-remote-server endpoint (e.g. an\n\
          \x20                        `ssh -L 7355:127.0.0.1:7355` tunnel: 127.0.0.1:7355).\n\
          \x20 --label <name>         Name shown on the local machine-axis (default: host).\n\
+         \x20 --graft <selector>     Graft ONE remote window into the local workspace as a\n\
+         \x20                        normal window (app_id / title / toplevel-id match),\n\
+         \x20                        instead of viewing the whole desktop fullscreen.\n\
          \x20 -h, --help             Print this help.\n\
          \x20 -V, --version          Print version.\n\n\
-         Switch to the remote with Super+J/K on the local WM; Super+Escape returns local.\n",
+         Fullscreen (default): switch with Super+J/K on the local WM; Super+Escape returns local.\n\
+         Graft (--graft): the window is a normal local window — focus/move/close it as usual.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -589,6 +609,11 @@ fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
                 } else {
                     tracing::info!("pulled remote clipboard into local selection");
                 }
+            }
+            ServerMessage::Meta { app_id, title } => {
+                // Serve-mode (fullscreen) presentation has no per-window label,
+                // so this is informational here; graft mode retitles its toplevel.
+                tracing::debug!(%app_id, %title, "remote meta (ignored in fullscreen mode)");
             }
             ServerMessage::Bye => return Ok(true),
         }

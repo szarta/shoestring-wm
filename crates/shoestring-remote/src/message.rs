@@ -189,6 +189,14 @@ pub enum ClientMessage {
     /// First message after connect: the client's output pixel size and scale.
     /// The server sizes its virtual output to match exactly (no rescale blur).
     Hello { width: u32, height: u32, scale: f64 },
+    /// Sent immediately after [`ClientMessage::Hello`] by a **graft-mode**
+    /// client: rather than serving the whole output, stream the single remote
+    /// window matching `selector` (an app_id / title regex, or an exact
+    /// foreign-toplevel identifier). The server resolves it (via the WM's
+    /// `find_windows`) and, on a match, streams that window as if it were the
+    /// output — `Ready`/`Frame`/`Resize` carry window-local pixels. A serve-mode
+    /// client never sends this.
+    Graft { selector: String },
     /// A key transition. `keycode` is a Linux/evdev keycode (the value before
     /// XKB's `+8` offset); `pressed` is down vs up.
     Key { keycode: u32, pressed: bool },
@@ -267,6 +275,10 @@ impl Message for ClientMessage {
                 put_bytes(out, data);
             }
             ClientMessage::Bye => put_u8(out, 5),
+            ClientMessage::Graft { selector } => {
+                put_u8(out, 8);
+                put_str(out, selector);
+            }
         }
     }
 
@@ -300,6 +312,9 @@ impl Message for ClientMessage {
                 primary: r.bool()?,
                 mime: r.string()?,
                 data: r.bytes()?,
+            },
+            8 => ClientMessage::Graft {
+                selector: r.string()?,
             },
             t => {
                 return Err(Error::BadTag {
@@ -335,6 +350,11 @@ pub enum ServerMessage {
     /// should reallocate its presentation surface. A fresh full-damage frame
     /// follows.
     Resize { width: u32, height: u32, scale: f64 },
+    /// Graft mode only: the grafted window's `app_id` and `title`. Sent after
+    /// [`ServerMessage::Ready`] and again whenever either changes, so the local
+    /// toplevel presenting the grafted window stays correctly labelled. Serve
+    /// mode never sends this (a whole output has no single app_id/title).
+    Meta { app_id: String, title: String },
     /// Reply to [`ClientMessage::GetClipboard`]: the served machine's current
     /// selection. Empty `mime` (and `data`) means the selection was empty / had
     /// no readable text. `primary` echoes which selection this is.
@@ -395,6 +415,11 @@ impl Message for ServerMessage {
                 put_bytes(out, data);
             }
             ServerMessage::Bye => put_u8(out, 4),
+            ServerMessage::Meta { app_id, title } => {
+                put_u8(out, 6);
+                put_str(out, app_id);
+                put_str(out, title);
+            }
         }
     }
 
@@ -427,6 +452,10 @@ impl Message for ServerMessage {
                 primary: r.bool()?,
                 mime: r.string()?,
                 data: r.bytes()?,
+            },
+            6 => ServerMessage::Meta {
+                app_id: r.string()?,
+                title: r.string()?,
             },
             t => {
                 return Err(Error::BadTag {
@@ -476,6 +505,12 @@ mod tests {
             primary: false,
             mime: "text/plain;charset=utf-8".to_string(),
             data: b"hello over the wire".to_vec(),
+        });
+        roundtrip(ClientMessage::Graft {
+            selector: "firefox".to_string(),
+        });
+        roundtrip(ClientMessage::Graft {
+            selector: String::new(),
         });
         roundtrip(ClientMessage::Bye);
     }
@@ -527,6 +562,14 @@ mod tests {
             primary: true,
             mime: String::new(),
             data: vec![],
+        });
+        roundtrip(ServerMessage::Meta {
+            app_id: "org.mozilla.firefox".to_string(),
+            title: "Mozilla Firefox".to_string(),
+        });
+        roundtrip(ServerMessage::Meta {
+            app_id: String::new(),
+            title: String::new(),
         });
         roundtrip(ServerMessage::Bye);
     }
