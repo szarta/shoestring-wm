@@ -775,58 +775,9 @@ fn event_loop(
     let mut tray = tray::Tray::new();
 
     while state.running {
-        // 1. Repaint if the clock string has changed since the last paint.
-        //    Comparing the rendered string (rather than a minute counter)
-        //    means sub-minute formats like `iso` redraw every second
-        //    without any extra plumbing, while minute formats stay cheap
-        //    (string equality is fast, and we still only allocate one
-        //    String per tick).
-        let now_clock = format_clock_now(&state.cfg.clock_format);
-        if state.last_clock != now_clock {
-            state.last_clock = now_clock;
-            state.dirty = true;
-        }
-
-        // Decay the live capture indicator: once no `screen_captured` event
-        // has arrived for CAPTURE_DOT_TTL, drop back from the red "active"
-        // state. The ~1Hz poll tick below bounds how long the stale red
-        // lingers after a cast ends.
-        if state
-            .last_capture
-            .is_some_and(|t| t.elapsed() >= CAPTURE_DOT_TTL)
-        {
-            state.last_capture = None;
-            state.dirty = true;
-        }
-
-        // Re-poll the battery at most once per second. The poll() call
-        // below caps at 1000ms, so this naturally rate-limits to ~1Hz
-        // without any timer plumbing. Only mark dirty when the reading
-        // actually changed — otherwise a static 85% battery would
-        // force a full redraw every tick.
-        if let Some(src) = state.battery_source.as_ref() {
-            let due = state
-                .last_battery_poll
-                .elapsed()
-                .map(|e| e.as_secs() >= 1)
-                .unwrap_or(true);
-            if due {
-                state.last_battery_poll = SystemTime::now();
-                let new_reading = src.read();
-                if state.battery_reading != new_reading {
-                    state.battery_reading = new_reading;
-                    state.dirty = true;
-                }
-            }
-        }
-        if state.dirty {
-            if let Some((w, h)) = state.size {
-                state.dirty = false;
-                if let Err(e) = redraw(state, qh, w, h, tray.as_mut()) {
-                    tracing::error!(error = ?e, "redraw failed");
-                }
-            }
-        }
+        // 1. Per-tick housekeeping: clock refresh, capture-dot decay, ~1Hz
+        //    battery re-poll, and a repaint if any of it went dirty.
+        run_periodic_updates(state, qh, tray.as_mut());
 
         // 2. Flush any queued requests, then prepare to read.
         conn.flush()?;
@@ -928,83 +879,12 @@ fn event_loop(
 
         // 4. Tray-menu commands queued by the input handlers, executed here
         //    where the D-Bus connection (`tray`) is in scope.
-        if let Some(idx) = state.pending_open_menu.take() {
-            open_tray_menu(state, qh, tray.as_mut(), idx);
-        }
-        if std::mem::take(&mut state.pending_open_control) {
-            open_control_menu(state, qh);
-        }
-        if let Some(id) = state.pending_menu_click.take() {
-            if let (Some(t), Some(m)) = (tray.as_mut(), state.menu.as_ref()) {
-                let ti = m.tray_idx;
-                t.menu_clicked(ti, id);
-            }
-            if let Some(m) = state.menu.take() {
-                m.destroy();
-            }
-        }
-        if let Some((parent, label)) = state.pending_menu_nav.take() {
-            // Close any deeper levels, then fetch this submenu by its label path
-            // and open it as a child popup of `parent`.
-            if let Some(m) = state.menu.as_mut() {
-                m.truncate_to(parent);
-            }
-            let ctx = state.menu.as_ref().map(|m| {
-                let mut path = m.path_to(parent);
-                path.push(label.clone());
-                (m.tray_idx, path)
-            });
-            if let (Some(t), Some((ti, path))) = (tray.as_mut(), ctx) {
-                match t.fetch_level(ti, &path) {
-                    Some(entries) => {
-                        tracing::debug!(%label, count = entries.len(), "tray submenu fetched");
-                        let fs = state.cfg.font_size;
-                        if let Some(m) = state.menu.as_mut() {
-                            m.push_child(
-                                parent,
-                                label,
-                                entries,
-                                &state.compositor,
-                                state.viewporter.as_ref(),
-                                qh,
-                                &state.font,
-                                fs,
-                            );
-                        }
-                        state.menu_dirty = true;
-                    }
-                    None => tracing::warn!(%label, "tray submenu fetch failed"),
-                }
-            }
-        }
+        apply_pending_menu_commands(state, qh, tray.as_mut());
+
         // 5. Live-update an open tray menu whose dbusmenu layout changed
         //    (LayoutUpdated/ItemsPropertiesUpdated) — re-fetch its open levels in
         //    place so toggles/labels update without a close+reopen.
-        let layout_dirty = tray
-            .as_mut()
-            .map(|t| t.take_layout_dirty())
-            .unwrap_or_default();
-        if !layout_dirty.is_empty() && !state.menu_is_control {
-            if let Some(ti) = state.menu.as_ref().map(|m| m.tray_idx) {
-                if layout_dirty.contains(&ti) {
-                    let fs = state.cfg.font_size;
-                    let n = state.menu.as_ref().map(|m| m.level_count()).unwrap_or(0);
-                    for d in 0..n {
-                        let path = state
-                            .menu
-                            .as_ref()
-                            .map(|m| m.path_to(d))
-                            .unwrap_or_default();
-                        let entries = tray.as_mut().and_then(|t| t.fetch_level(ti, &path));
-                        if let (Some(entries), Some(m)) = (entries, state.menu.as_mut()) {
-                            if m.refresh_level_rows(d, &entries, &state.font, fs) {
-                                state.menu_dirty = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        refresh_open_menu_layout(state, tray.as_mut());
 
         if state.menu_dirty {
             state.menu_dirty = false;
@@ -1012,6 +892,160 @@ fn event_loop(
         }
     }
     Ok(())
+}
+
+/// Per-tick housekeeping for the bar, split out of `event_loop` so the loop
+/// body stays under the complexity gate. Refreshes the clock string, decays
+/// the live-capture dot, re-polls the battery at ~1Hz, and repaints if any of
+/// that (or an earlier event) left the bar dirty.
+fn run_periodic_updates(state: &mut State, qh: &QueueHandle<State>, tray: Option<&mut tray::Tray>) {
+    // Repaint if the clock string has changed since the last paint. Comparing
+    // the rendered string (rather than a minute counter) means sub-minute
+    // formats like `iso` redraw every second without any extra plumbing, while
+    // minute formats stay cheap (string equality is fast, and we still only
+    // allocate one String per tick).
+    let now_clock = format_clock_now(&state.cfg.clock_format);
+    if state.last_clock != now_clock {
+        state.last_clock = now_clock;
+        state.dirty = true;
+    }
+
+    // Decay the live capture indicator: once no `screen_captured` event has
+    // arrived for CAPTURE_DOT_TTL, drop back from the red "active" state. The
+    // ~1Hz poll tick bounds how long the stale red lingers after a cast ends.
+    if state
+        .last_capture
+        .is_some_and(|t| t.elapsed() >= CAPTURE_DOT_TTL)
+    {
+        state.last_capture = None;
+        state.dirty = true;
+    }
+
+    // Re-poll the battery at most once per second. The poll() call in the loop
+    // caps at 1000ms, so this naturally rate-limits to ~1Hz without any timer
+    // plumbing. Only mark dirty when the reading actually changed — otherwise a
+    // static 85% battery would force a full redraw every tick.
+    if let Some(src) = state.battery_source.as_ref() {
+        let due = state
+            .last_battery_poll
+            .elapsed()
+            .map(|e| e.as_secs() >= 1)
+            .unwrap_or(true);
+        if due {
+            state.last_battery_poll = SystemTime::now();
+            let new_reading = src.read();
+            if state.battery_reading != new_reading {
+                state.battery_reading = new_reading;
+                state.dirty = true;
+            }
+        }
+    }
+
+    if state.dirty {
+        if let Some((w, h)) = state.size {
+            state.dirty = false;
+            if let Err(e) = redraw(state, qh, w, h, tray) {
+                tracing::error!(error = ?e, "redraw failed");
+            }
+        }
+    }
+}
+
+/// Execute the tray-menu commands queued by the input handlers during a loop
+/// iteration: open a tray icon's menu, open the control menu, deliver a menu
+/// click, or navigate into a submenu. Runs from `event_loop` where the D-Bus
+/// connection (`tray`) is in scope; split out for the complexity gate.
+fn apply_pending_menu_commands(
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    mut tray: Option<&mut tray::Tray>,
+) {
+    if let Some(idx) = state.pending_open_menu.take() {
+        open_tray_menu(state, qh, tray.as_deref_mut(), idx);
+    }
+    if std::mem::take(&mut state.pending_open_control) {
+        open_control_menu(state, qh);
+    }
+    if let Some(id) = state.pending_menu_click.take() {
+        if let (Some(t), Some(m)) = (tray.as_deref_mut(), state.menu.as_ref()) {
+            let ti = m.tray_idx;
+            t.menu_clicked(ti, id);
+        }
+        if let Some(m) = state.menu.take() {
+            m.destroy();
+        }
+    }
+    let Some((parent, label)) = state.pending_menu_nav.take() else {
+        return;
+    };
+    // Close any deeper levels, then fetch this submenu by its label path and
+    // open it as a child popup of `parent`.
+    if let Some(m) = state.menu.as_mut() {
+        m.truncate_to(parent);
+    }
+    let ctx = state.menu.as_ref().map(|m| {
+        let mut path = m.path_to(parent);
+        path.push(label.clone());
+        (m.tray_idx, path)
+    });
+    let (Some(t), Some((ti, path))) = (tray, ctx) else {
+        return;
+    };
+    match t.fetch_level(ti, &path) {
+        Some(entries) => {
+            tracing::debug!(%label, count = entries.len(), "tray submenu fetched");
+            let fs = state.cfg.font_size;
+            if let Some(m) = state.menu.as_mut() {
+                m.push_child(
+                    parent,
+                    label,
+                    entries,
+                    &state.compositor,
+                    state.viewporter.as_ref(),
+                    qh,
+                    &state.font,
+                    fs,
+                );
+            }
+            state.menu_dirty = true;
+        }
+        None => tracing::warn!(%label, "tray submenu fetch failed"),
+    }
+}
+
+/// Live-update an open tray menu whose dbusmenu layout changed
+/// (LayoutUpdated/ItemsPropertiesUpdated) — re-fetch its open levels in place
+/// so toggles/labels update without a close+reopen. Split from `event_loop`
+/// for the complexity gate.
+fn refresh_open_menu_layout(state: &mut State, mut tray: Option<&mut tray::Tray>) {
+    let layout_dirty = tray
+        .as_deref_mut()
+        .map(|t| t.take_layout_dirty())
+        .unwrap_or_default();
+    if layout_dirty.is_empty() || state.menu_is_control {
+        return;
+    }
+    let Some(ti) = state.menu.as_ref().map(|m| m.tray_idx) else {
+        return;
+    };
+    if !layout_dirty.contains(&ti) {
+        return;
+    }
+    let fs = state.cfg.font_size;
+    let n = state.menu.as_ref().map(|m| m.level_count()).unwrap_or(0);
+    for d in 0..n {
+        let path = state
+            .menu
+            .as_ref()
+            .map(|m| m.path_to(d))
+            .unwrap_or_default();
+        let entries = tray.as_deref_mut().and_then(|t| t.fetch_level(ti, &path));
+        if let (Some(entries), Some(m)) = (entries, state.menu.as_mut()) {
+            if m.refresh_level_rows(d, &entries, &state.font, fs) {
+                state.menu_dirty = true;
+            }
+        }
+    }
 }
 
 fn apply_ipc_event(state: &mut State, event: IpcEvent) {
