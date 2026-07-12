@@ -521,6 +521,15 @@ Each request is a JSON object with a ``type`` discriminator:
        output's logical coords and requires ``output`` to be set. Reply
        is ``screenshot`` with the absolute path. Gated by the
        automation gate.
+   * - ``{"type": "screenshot_window", "id": "<ft-id>"}``
+     - Capture a **single toplevel**, cropped to just that window, as a PNG.
+       ``id`` is a foreign-toplevel identifier from ``windows``. The window's
+       own surface tree is rendered to an offscreen buffer, so the capture is
+       correct even when the window is occluded or on another workspace. Reply
+       is ``screenshot`` with the absolute path (same shape as ``screenshot``),
+       or an ``error`` if the window is unknown or the active backend can't
+       render a window offscreen (the ``udev``/DRM backend can't; ``winit`` and
+       ``headless`` can). Gated by the automation gate.
    * - ``{"type": "run_command", "argv": ["...", ...], "timeout_ms": null}``
      - Spawn a child process under the WM's environment and return its
        captured output once it exits. ``argv`` must be non-empty;
@@ -563,7 +572,7 @@ The following requests refuse with an ``error`` while
 it): ``inject_key``, ``inject_text``, ``inject_click``,
 ``inject_click_to_window``, ``move_mouse``,
 ``inject_input``, ``get_clipboard``, ``set_clipboard``, ``dispatch_action``,
-``screenshot``, ``run_command``. The error message
+``screenshot``, ``screenshot_window``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
 
@@ -646,7 +655,8 @@ The server replies with a single JSON object tagged by ``type``:
     current machine-axis view index (0 = local).
 
 ``screenshot``
-    ``{"type": "screenshot", "path": "/absolute/path.png"}``.
+    ``{"type": "screenshot", "path": "/absolute/path.png"}``. Returned for
+    both ``screenshot`` and ``screenshot_window``.
 
 ``clipboard``
     ``{"type": "clipboard", "mime": "text/plain;charset=utf-8", "data": [...]}``.

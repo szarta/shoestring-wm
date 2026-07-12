@@ -305,6 +305,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<ScreenshotRegion>,
     },
+    /// Capture a **single toplevel**, cropped to just that window (its own
+    /// surface tree rendered to an offscreen buffer — correct even when the
+    /// window is occluded or on another workspace), and write it as a PNG. `id`
+    /// is a [`WindowSummary::id`]. Replies with [`Response::Screenshot`] carrying
+    /// the file path, or [`Response::Error`] if the window is unknown or the
+    /// active backend can't render offscreen (udev — winit and headless can).
+    /// Gated by `set_automation`.
+    ScreenshotWindow { id: String },
     /// Spawn a child process under the WM's environment (inherits
     /// `WAYLAND_DISPLAY`, `SHOESTRING_WM_SOCKET`, etc.) and return its
     /// captured output once it exits. `argv[0]` is the executable; the
@@ -1803,6 +1811,14 @@ mod tests {
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"screenshot","path":"/tmp/foo.png"}"#
         );
+        // Per-window capture shares the Screenshot response shape.
+        let win = Request::ScreenshotWindow { id: "wl-7".into() };
+        assert_eq!(
+            serde_json::to_string(&win).unwrap(),
+            r#"{"type":"screenshot_window","id":"wl-7"}"#
+        );
+        let back: Request = serde_json::from_str(&serde_json::to_string(&win).unwrap()).unwrap();
+        assert!(matches!(back, Request::ScreenshotWindow { ref id } if id == "wl-7"));
     }
 
     #[test]

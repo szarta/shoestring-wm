@@ -35,15 +35,33 @@ use smithay::{
         },
     },
     desktop::{space::SpaceRenderElements, Window},
-    utils::{Physical, Point, Scale, Size, Transform},
+    utils::{Physical, Point, Rectangle, Scale, Size, Transform},
 };
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use shoestring_remote::{write_framed, PixelFormat, ServerMessage, Tile};
 
-use crate::capture_stream::{clamp_to_buffer, tile_for_region};
+use crate::capture_stream::{clamp_to_buffer, readback, tile_for_region};
 use crate::drawing::OutputRenderElements;
-use crate::ipc::{Client, ClientId};
+use crate::ipc::{write_response, Client, ClientId};
 use crate::state::ShoestringWm;
+
+/// A pending one-shot `screenshot_window` request, parked on
+/// [`ShoestringWm::pending_window_screenshots`] by the IPC handler until the next
+/// render tick can render the window and reply. Holds the connection open (its
+/// `Rc<RefCell<Client>>`) so the deferred [`shoestring_ipc::Response::Screenshot`]
+/// still has somewhere to go.
+pub(crate) struct PendingWindowShot {
+    /// IPC connection id, for `drop_ipc_client` after the reply is written.
+    pub id: ClientId,
+    /// Foreign-toplevel id of the window to capture.
+    pub ft_id: String,
+    /// The connection to reply on (kept alive past `handle_readable`).
+    pub client: Rc<RefCell<Client>>,
+}
 
 /// A transparent clear so the window's own alpha (rounded/CSD corners, shadows
 /// the client draws into its buffer) survives to the viewer, which composites
@@ -395,4 +413,153 @@ impl ShoestringWm {
             .as_ref()
             .is_some_and(|s| !s.window_capture_subscribers().is_empty())
     }
+}
+
+/// Render `window` to a fresh offscreen buffer once and read the whole thing back
+/// as tightly-packed little-endian `Argb8888` (BGRA-in-memory) bytes. Returns
+/// `(width, height, bytes)` in physical pixels. The single-frame sibling of
+/// [`push_window_capture`]: no damage tracking or subscriber state, just one full
+/// render for the one-shot `screenshot_window` path.
+fn render_window_argb<R>(
+    state: &ShoestringWm,
+    renderer: &mut R,
+    window: &Window,
+) -> Result<(u32, u32, Vec<u8>), String>
+where
+    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R::TextureId: Clone + Texture + 'static,
+    <R as RendererSuper>::Error: Display,
+    OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
+{
+    let scale = window_scale(state, window);
+    let logical = window.geometry().size;
+    let phys: Size<i32, Physical> = logical.to_f64().to_physical(scale).to_i32_round();
+    let (pw, ph) = (phys.w.max(1), phys.h.max(1));
+
+    let elements = window_elements(renderer, window, scale);
+    let mut texture = renderer
+        .create_buffer(Fourcc::Argb8888, (pw, ph).into())
+        .map_err(|e| format!("create_buffer: {e}"))?;
+
+    // Render the full window (fresh tracker ⇒ full damage) into the target.
+    let mut tracker = OutputDamageTracker::new(
+        Size::<i32, Physical>::from((pw, ph)),
+        scale,
+        Transform::Normal,
+    );
+    {
+        let mut fb = renderer
+            .bind(&mut texture)
+            .map_err(|e| format!("bind offscreen: {e}"))?;
+        tracker
+            .render_output(renderer, &mut fb, 0, &elements, CLEAR_TRANSPARENT)
+            .map_err(|e| format!("render_output: {e}"))?;
+    }
+
+    // Read the whole buffer back (rebind: the previous framebuffer borrow ended
+    // with the block above).
+    let fb = renderer
+        .bind(&mut texture)
+        .map_err(|e| format!("rebind for readback: {e}"))?;
+    let region = Rectangle::new(Point::from((0, 0)), Size::from((pw, ph)));
+    let bytes = readback(renderer, &fb, region)?;
+    Ok((pw as u32, ph as u32, bytes))
+}
+
+/// Encode a tightly-packed `Argb8888` (little-endian BGRA-in-memory) buffer as an
+/// RGBA PNG. Swizzles B/R and keeps alpha, matching `shoestring-screenshot`'s
+/// output-capture path so window and full-screen captures encode identically.
+fn argb8888_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let (w, h) = (width as usize, height as usize);
+    let expected = w * h * 4;
+    if bytes.len() < expected {
+        return Err(format!("short buffer: {} < {expected}", bytes.len()));
+    }
+    let mut rgba = vec![0u8; expected];
+    for i in 0..(w * h) {
+        let s = i * 4;
+        rgba[s] = bytes[s + 2]; // R
+        rgba[s + 1] = bytes[s + 1]; // G
+        rgba[s + 2] = bytes[s]; // B
+        rgba[s + 3] = bytes[s + 3]; // A
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc
+            .write_header()
+            .map_err(|e| format!("png write_header: {e}"))?;
+        writer
+            .write_image_data(&rgba)
+            .map_err(|e| format!("png write_image_data: {e}"))?;
+    }
+    Ok(out)
+}
+
+/// Service every parked one-shot `screenshot_window` request: render the window,
+/// encode a PNG, write it to disk, and reply with its path (or an `error`). Call
+/// once per render tick from a backend that supports offscreen window rendering
+/// (winit, headless), next to [`push_window_capture`]. A no-op when the queue is
+/// empty, so it costs nothing when unused.
+pub fn process_pending_window_screenshots<R>(state: &mut ShoestringWm, renderer: &mut R)
+where
+    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R::TextureId: Clone + Texture + 'static,
+    <R as RendererSuper>::Error: Display,
+    OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
+{
+    if state.pending_window_screenshots.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut state.pending_window_screenshots);
+    let mut captured_any = false;
+    for shot in pending {
+        let response = match capture_window_to_file(state, renderer, &shot.ft_id) {
+            Ok(path) => {
+                captured_any = true;
+                shoestring_ipc::Response::Screenshot {
+                    path: path.to_string_lossy().into_owned(),
+                }
+            }
+            Err(message) => shoestring_ipc::Response::Error { message },
+        };
+        let _ = write_response(&shot.client, &response);
+        state.drop_ipc_client(shot.id);
+    }
+    if captured_any {
+        // Same "your screen is being read" signal as the other capture paths.
+        state.note_screen_capture("window-screenshot");
+    }
+}
+
+/// Resolve, render, encode, and write one window screenshot; returns the file
+/// path on success. Split out so [`process_pending_window_screenshots`] stays a
+/// thin drain loop.
+fn capture_window_to_file<R>(
+    state: &ShoestringWm,
+    renderer: &mut R,
+    ft_id: &str,
+) -> Result<PathBuf, String>
+where
+    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R::TextureId: Clone + Texture + 'static,
+    <R as RendererSuper>::Error: Display,
+    OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
+{
+    let window = crate::ipc::window_by_ft_id(state, ft_id)
+        .ok_or_else(|| format!("screenshot_window: no window with id {ft_id}"))?;
+    let (w, h, bytes) = render_window_argb(state, renderer, &window)?;
+    let png = argb8888_to_png(&bytes, w, h)?;
+    let path = ShoestringWm::auto_screenshot_path();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+    }
+    std::fs::write(&path, &png).map_err(|e| format!("write {}: {e}", path.display()))?;
+    tracing::info!(?path, ft_id, w, h, "wrote window screenshot");
+    Ok(path)
 }

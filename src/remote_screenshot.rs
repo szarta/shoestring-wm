@@ -86,7 +86,7 @@ impl ShoestringWm {
     /// resort). The AUTO infix is per the task spec so user-triggered
     /// and agent-triggered captures don't visually collide in a file
     /// browser.
-    fn auto_screenshot_path() -> PathBuf {
+    pub(crate) fn auto_screenshot_path() -> PathBuf {
         let dir = std::env::var_os("XDG_PICTURES_DIR")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Pictures")))

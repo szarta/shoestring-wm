@@ -325,6 +325,17 @@ pub struct ShoestringWm {
     pub last_pointer_focus: Option<(WlSurface, Point<f64, Logical>)>,
 
     pub ipc: Option<crate::ipc::Server>,
+    /// Whether the active backend can render a single window to an offscreen
+    /// buffer — true for winit and headless, false for udev (whose
+    /// `MultiRenderer` doesn't satisfy the `Offscreen<GlesTexture>` bounds the
+    /// graft/window-capture path needs). Gates the `screenshot_window` IPC so it
+    /// refuses with a clear error instead of enqueuing a request no render tick
+    /// will ever service. Set by the backend at init.
+    pub window_capture_supported: bool,
+    /// One-shot `screenshot_window` requests awaiting the next render tick, where
+    /// the renderer is in scope. Drained by
+    /// [`crate::window_capture::process_pending_window_screenshots`].
+    pub(crate) pending_window_screenshots: Vec<crate::window_capture::PendingWindowShot>,
     /// Diagnostics registry: the latest sampled process/WM metrics plus
     /// the fd-leak detector's state. Fed by the sampler timer started in
     /// `main` (when `[diagnostics].enabled`) and read by the `metrics`
@@ -859,6 +870,8 @@ impl ShoestringWm {
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
             ipc: None,
+            window_capture_supported: false,
+            pending_window_screenshots: Vec::new(),
             metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
             // on for the real session backend once the backend is chosen.

@@ -216,6 +216,9 @@ pub fn init_headless(
     event_loop: &mut EventLoop<'static, ShoestringWm>,
     state: &mut ShoestringWm,
 ) -> Result<()> {
+    // The headless GlesRenderer can render a single window offscreen, so
+    // per-window capture (graft, screenshot_window) is available.
+    state.window_capture_supported = true;
     // Build an EGL display and a surfaceless GLES renderer. Preference order: a
     // real GPU render node via GBM (unprivileged renderD* — no DRM master, no
     // seat — and gives dmabuf import/export), else a surfaceless software EGL
@@ -422,6 +425,9 @@ fn render_once(
     // damage (a grafted window may live on another workspace), so it runs here —
     // next to the screencopy passes, before the main framebuffer is bound.
     crate::window_capture::push_window_capture(state, renderer);
+    // One-shot per-window screenshots parked by the IPC handler, serviced here
+    // where the renderer is in scope (same reason as graft above).
+    crate::window_capture::process_pending_window_screenshots(state, renderer);
 
     // Diagnostics overlay on top of everything (index 0 = drawn first), added
     // after the capture pass so it stays out of captures.

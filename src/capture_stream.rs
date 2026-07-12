@@ -98,7 +98,7 @@ fn to_remote_rect(r: Rectangle<i32, BufferCoord>) -> RemoteRect {
 
 /// Read back one region of the bound framebuffer into a tightly-packed,
 /// row-major `Argb8888` byte buffer.
-fn readback<R>(
+pub(crate) fn readback<R>(
     renderer: &mut R,
     framebuffer: &R::Framebuffer<'_>,
     region: Rectangle<i32, BufferCoord>,

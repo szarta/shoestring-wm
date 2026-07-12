@@ -309,6 +309,12 @@ enum Command {
         /// coords. Format: `X,Y,W,H`. Implies `--output` is required.
         #[arg(long, value_name = "X,Y,W,H", requires = "output")]
         region: Option<String>,
+        /// Capture just this toplevel (id from `windows`), cropped to the
+        /// window. Renders the window's own surface tree, so it works even
+        /// when occluded or off-screen. Mutually exclusive with
+        /// --output/--region; winit and headless backends only.
+        #[arg(long, conflicts_with_all = ["output", "region"])]
+        window: Option<String>,
     },
     /// Read the WM's current selection and write the raw bytes to stdout.
     /// The WM picks the best text mime the owner offers. Requires the
@@ -526,10 +532,17 @@ fn main() -> Result<()> {
                 enabled: matches!(state, OnOff::On),
             },
         },
-        Command::Screenshot { output, region } => {
-            let region = region.as_deref().map(parse_region).transpose()?;
-            Request::Screenshot { output, region }
-        }
+        Command::Screenshot {
+            output,
+            region,
+            window,
+        } => match window {
+            Some(id) => Request::ScreenshotWindow { id },
+            None => {
+                let region = region.as_deref().map(parse_region).transpose()?;
+                Request::Screenshot { output, region }
+            }
+        },
         Command::RunCommand { argv, timeout_ms } => Request::RunCommand { argv, timeout_ms },
         Command::ReloadConfig => Request::ReloadConfig,
         Command::PickWindow => Request::PickWindow,

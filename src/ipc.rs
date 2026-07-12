@@ -721,6 +721,45 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     }
                 }
             }
+            Request::ScreenshotWindow { id: ft_id } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                if !state.window_capture_supported {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "screenshot_window: not supported on this backend \
+                                      (winit and headless only)"
+                                .into(),
+                        },
+                    );
+                    return true;
+                }
+                // Fail fast if the window is already gone; otherwise defer the
+                // capture to the next render tick (where the renderer is in scope)
+                // and hold the connection open for the reply — same deferred shape
+                // as the full-screen screenshot.
+                if window_by_ft_id(state, &ft_id).is_none() {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: format!("screenshot_window: no window with id {ft_id}"),
+                        },
+                    );
+                    return true;
+                }
+                client.borrow_mut().spent = true;
+                state
+                    .pending_window_screenshots
+                    .push(crate::window_capture::PendingWindowShot {
+                        id,
+                        ft_id,
+                        client: Rc::clone(client),
+                    });
+                return false;
+            }
             Request::RunCommand { argv, timeout_ms } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
