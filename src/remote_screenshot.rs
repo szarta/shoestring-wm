@@ -61,6 +61,9 @@ pub struct Pending {
     stderr_open: bool,
     stdout_token: Option<RegistrationToken>,
     stderr_token: Option<RegistrationToken>,
+    /// Destination the child was told to `--file` to; the finalized reply
+    /// reports it directly rather than re-parsing the child's printed path.
+    dest: PathBuf,
 }
 
 /// Generic<T> wrapper that satisfies AsFd on a stdout/stderr pipe. We
@@ -110,17 +113,20 @@ impl ShoestringWm {
         client: Rc<RefCell<crate::ipc::Client>>,
         output: Option<&str>,
         region: Option<ScreenshotRegion>,
-    ) -> Result<PathBuf> {
-        let path = Self::auto_screenshot_path();
-        if let Some(parent) = path.parent() {
+        path: Option<PathBuf>,
+    ) -> Result<()> {
+        // Write to the requested path (or the auto-generated one), creating
+        // parent dirs first. `screenshot --stdout` supplies a tmpfs path here
+        // and streams it client-side, so no PNG blob crosses the IPC socket.
+        let dest = path.unwrap_or_else(Self::auto_screenshot_path);
+        if let Some(parent) = dest.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create screenshot dir {}", parent.display()))?;
             }
         }
-
         let mut cmd = std::process::Command::new("shoestring-screenshot");
-        cmd.arg("--file").arg(&path);
+        cmd.arg("--file").arg(&dest);
         if let Some(name) = output {
             cmd.arg("--output").arg(name);
         }
@@ -162,6 +168,7 @@ impl ShoestringWm {
             stderr_open: true,
             stdout_token: None,
             stderr_token: None,
+            dest: dest.clone(),
         };
         self.pending_screenshots.insert(pending_id, pending);
 
@@ -172,8 +179,8 @@ impl ShoestringWm {
             p.stderr_token = Some(stderr_token);
         }
 
-        tracing::info!(?path, "remote screenshot started");
-        Ok(path)
+        tracing::info!(?dest, "remote screenshot started");
+        Ok(())
     }
 
     fn next_remote_screenshot_id(&mut self) -> u64 {
@@ -232,18 +239,10 @@ impl ShoestringWm {
         let status = pending.exit_status.expect("ready implies status present");
 
         let response = if status.success() {
-            // Path is the first non-empty line on stdout.
-            let stdout = String::from_utf8_lossy(&pending.stdout_buf);
-            let path = stdout
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(|s| s.to_string());
-            match path {
-                Some(p) => Response::Screenshot { path: p },
-                None => Response::Error {
-                    message: "screenshot: child exited cleanly but printed no path".into(),
-                },
+            // We know the destination we passed via --file; report it directly
+            // rather than re-parsing the child's printed path.
+            Response::Screenshot {
+                path: pending.dest.to_string_lossy().into_owned(),
             }
         } else {
             let stderr = String::from_utf8_lossy(&pending.stderr_buf)

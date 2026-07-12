@@ -679,7 +679,11 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
-            Request::Screenshot { output, region } => {
+            Request::Screenshot {
+                output,
+                region,
+                path,
+            } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
                     return true;
@@ -704,8 +708,9 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     Rc::clone(client),
                     output.as_deref(),
                     region,
+                    path.map(std::path::PathBuf::from),
                 ) {
-                    Ok(_path) => {
+                    Ok(()) => {
                         // Hold the connection open; finalize_remote_screenshot
                         // will write the response and drop_ipc_client.
                         return false;
@@ -721,7 +726,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     }
                 }
             }
-            Request::ScreenshotWindow { id: ft_id } => {
+            Request::ScreenshotWindow { id: ft_id, path } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
                     return true;
@@ -757,6 +762,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                         id,
                         ft_id,
                         client: Rc::clone(client),
+                        path: path.map(std::path::PathBuf::from),
                     });
                 return false;
             }

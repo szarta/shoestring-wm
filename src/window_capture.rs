@@ -61,6 +61,8 @@ pub(crate) struct PendingWindowShot {
     pub ft_id: String,
     /// The connection to reply on (kept alive past `handle_readable`).
     pub client: Rc<RefCell<Client>>,
+    /// Destination path override; `None` → the auto-generated path.
+    pub path: Option<PathBuf>,
 }
 
 /// A transparent clear so the window's own alpha (rounded/CSD corners, shadows
@@ -516,11 +518,14 @@ where
     let pending = std::mem::take(&mut state.pending_window_screenshots);
     let mut captured_any = false;
     for shot in pending {
-        let response = match capture_window_to_file(state, renderer, &shot.ft_id) {
-            Ok(path) => {
+        let response = match capture_window_png(state, renderer, &shot.ft_id) {
+            Ok(png) => {
                 captured_any = true;
-                shoestring_ipc::Response::Screenshot {
-                    path: path.to_string_lossy().into_owned(),
+                match write_png(shot.path.clone(), &png) {
+                    Ok(path) => shoestring_ipc::Response::Screenshot {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                    Err(message) => shoestring_ipc::Response::Error { message },
                 }
             }
             Err(message) => shoestring_ipc::Response::Error { message },
@@ -534,14 +539,13 @@ where
     }
 }
 
-/// Resolve, render, encode, and write one window screenshot; returns the file
-/// path on success. Split out so [`process_pending_window_screenshots`] stays a
-/// thin drain loop.
-fn capture_window_to_file<R>(
+/// Resolve, render, and encode one window to PNG bytes. Split out so
+/// [`process_pending_window_screenshots`] stays a thin drain loop.
+fn capture_window_png<R>(
     state: &ShoestringWm,
     renderer: &mut R,
     ft_id: &str,
-) -> Result<PathBuf, String>
+) -> Result<Vec<u8>, String>
 where
     R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
     R::TextureId: Clone + Texture + 'static,
@@ -551,15 +555,20 @@ where
     let window = crate::ipc::window_by_ft_id(state, ft_id)
         .ok_or_else(|| format!("screenshot_window: no window with id {ft_id}"))?;
     let (w, h, bytes) = render_window_argb(state, renderer, &window)?;
-    let png = argb8888_to_png(&bytes, w, h)?;
-    let path = ShoestringWm::auto_screenshot_path();
+    argb8888_to_png(&bytes, w, h)
+}
+
+/// Write PNG bytes to `dest` (or the auto-generated path when `None`), creating
+/// parent dirs, and return the path written.
+fn write_png(dest: Option<PathBuf>, png: &[u8]) -> Result<PathBuf, String> {
+    let path = dest.unwrap_or_else(ShoestringWm::auto_screenshot_path);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
     }
-    std::fs::write(&path, &png).map_err(|e| format!("write {}: {e}", path.display()))?;
-    tracing::info!(?path, ft_id, w, h, "wrote window screenshot");
+    std::fs::write(&path, png).map_err(|e| format!("write {}: {e}", path.display()))?;
+    tracing::info!(?path, bytes = png.len(), "wrote window screenshot");
     Ok(path)
 }

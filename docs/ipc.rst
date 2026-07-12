@@ -514,22 +514,30 @@ Each request is a JSON object with a ``type`` discriminator:
      - Re-read the TOML config the WM was launched with and recompile
        the binding table. Broadcasts ``config_reloaded`` on success.
        Reply is ``ok`` or ``error``.
-   * - ``{"type": "screenshot", "output": null, "region": null}``
+   * - ``{"type": "screenshot", "output": null, "region": null, "path": null}``
      - Capture a PNG via the WM's wlr-screencopy server. ``output`` is
        the output name (omit / null → first advertised output).
        ``region`` is ``{"x":..,"y":..,"w":..,"h":..}`` in the named
-       output's logical coords and requires ``output`` to be set. Reply
-       is ``screenshot`` with the absolute path. Gated by the
-       automation gate.
-   * - ``{"type": "screenshot_window", "id": "<ft-id>"}``
+       output's logical coords and requires ``output`` to be set.
+       ``path`` (optional) writes the PNG there instead of the default
+       ``$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`` (parent dirs are
+       created). Reply is ``screenshot`` with the absolute path. Gated by
+       the automation gate.
+   * - ``{"type": "screenshot_window", "id": "<ft-id>", "path": null}``
      - Capture a **single toplevel**, cropped to just that window, as a PNG.
        ``id`` is a foreign-toplevel identifier from ``windows``. The window's
        own surface tree is rendered to an offscreen buffer, so the capture is
-       correct even when the window is occluded or on another workspace. Reply
-       is ``screenshot`` with the absolute path (same shape as ``screenshot``),
-       or an ``error`` if the window is unknown or the active backend can't
-       render a window offscreen (the ``udev``/DRM backend can't; ``winit`` and
-       ``headless`` can). Gated by the automation gate.
+       correct even when the window is occluded or on another workspace.
+       ``path`` behaves as on ``screenshot``. Reply is ``screenshot`` with the
+       absolute path (same shape as ``screenshot``), or an ``error`` if the
+       window is unknown or the active backend can't render a window offscreen
+       (the ``udev``/DRM backend can't; ``winit`` and ``headless`` can). Gated
+       by the automation gate.
+
+   Both requests support ``shoestring-ctl screenshot --stdout`` client-side:
+   ``ctl`` passes a ``$XDG_RUNTIME_DIR`` (tmpfs) ``path``, then streams that file
+   to its own stdout and unlinks it — so a capture pipes without a large PNG
+   crossing the IPC socket.
    * - ``{"type": "run_command", "argv": ["...", ...], "timeout_ms": null}``
      - Spawn a child process under the WM's environment and return its
        captured output once it exits. ``argv`` must be non-empty;

@@ -517,6 +517,7 @@ impl App {
         let req = Request::Screenshot {
             output: Some(out_name),
             region: Some(region),
+            path: None,
         };
         match ipc::request(&self.socket, &req) {
             Ok(Response::Screenshot { path }) => {

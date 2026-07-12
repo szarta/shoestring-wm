@@ -315,6 +315,15 @@ enum Command {
         /// --output/--region; winit and headless backends only.
         #[arg(long, conflicts_with_all = ["output", "region"])]
         window: Option<String>,
+        /// Write the PNG here instead of the default
+        /// `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`. Parent dirs are
+        /// created. Works with --window too.
+        #[arg(long, value_name = "FILE", conflicts_with = "stdout")]
+        path: Option<String>,
+        /// Stream the raw PNG bytes to stdout instead of writing a file —
+        /// for piping captures (`... screenshot --stdout > shot.png`).
+        #[arg(long)]
+        stdout: bool,
     },
     /// Read the WM's current selection and write the raw bytes to stdout.
     /// The WM picks the best text mime the owner offers. Requires the
@@ -471,6 +480,12 @@ fn main() -> Result<()> {
         Command::EventStream | Command::Metrics { watch: true, .. }
     );
 
+    // Set by `screenshot --stdout`: the tmpfs file the WM writes, which we then
+    // stream to our stdout and unlink. Routing the bytes through a file (rather
+    // than an IPC response) keeps the non-blocking IPC socket clear of a
+    // send-buffer-sized PNG blob.
+    let mut screenshot_stream_temp: Option<PathBuf> = None;
+
     let request = match cli.cmd {
         Command::Workspaces => Request::Workspaces,
         Command::Windows => Request::Windows,
@@ -536,13 +551,29 @@ fn main() -> Result<()> {
             output,
             region,
             window,
-        } => match window {
-            Some(id) => Request::ScreenshotWindow { id },
-            None => {
-                let region = region.as_deref().map(parse_region).transpose()?;
-                Request::Screenshot { output, region }
+            path,
+            stdout,
+        } => {
+            // --stdout: have the WM write to a tmpfs file we stream and unlink.
+            let dest = if stdout {
+                let tmp = screenshot_stdout_temp();
+                screenshot_stream_temp = Some(tmp.clone());
+                Some(tmp.to_string_lossy().into_owned())
+            } else {
+                path
+            };
+            match window {
+                Some(id) => Request::ScreenshotWindow { id, path: dest },
+                None => {
+                    let region = region.as_deref().map(parse_region).transpose()?;
+                    Request::Screenshot {
+                        output,
+                        region,
+                        path: dest,
+                    }
+                }
             }
-        },
+        }
         Command::RunCommand { argv, timeout_ms } => Request::RunCommand { argv, timeout_ms },
         Command::ReloadConfig => Request::ReloadConfig,
         Command::PickWindow => Request::PickWindow,
@@ -650,6 +681,13 @@ fn main() -> Result<()> {
         }
         use std::io::Write as _;
         std::io::stdout().write_all(data)?;
+    } else if let (Some(tmp), Response::Screenshot { .. }) = (&screenshot_stream_temp, &response) {
+        // `screenshot --stdout`: the WM wrote the PNG to our tmpfs file; stream
+        // it to stdout so it pipes like a file, then remove it.
+        use std::io::Write as _;
+        let bytes = std::fs::read(tmp).with_context(|| format!("read {}", tmp.display()))?;
+        std::io::stdout().write_all(&bytes)?;
+        let _ = std::fs::remove_file(tmp);
     } else {
         print_value(&response, cli.pretty)?;
     }
@@ -684,6 +722,16 @@ fn parse_action(s: &str) -> Result<serde_json::Value> {
             .with_context(|| format!("dispatch-action: not valid JSON: {trimmed}"));
     }
     Ok(serde_json::json!({ "type": trimmed }))
+}
+
+/// A tmpfs destination for `screenshot --stdout`: the WM writes the PNG here
+/// and we stream + unlink it. `$XDG_RUNTIME_DIR` (RAM-backed) when set, else the
+/// system temp dir. One capture per `ctl` process, so the pid disambiguates.
+fn screenshot_stdout_temp() -> PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!("shoestring-shot-{}.png", std::process::id()))
 }
 
 fn parse_region(s: &str) -> Result<ScreenshotRegion> {

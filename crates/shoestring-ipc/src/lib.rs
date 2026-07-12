@@ -304,6 +304,12 @@ pub enum Request {
         output: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<ScreenshotRegion>,
+        /// Write the PNG here instead of the auto-generated
+        /// `$XDG_PICTURES_DIR/Screenshot-AUTO-<ts>.png`. Parent dirs are
+        /// created. `shoestring-ctl screenshot --stdout` uses this with a
+        /// tmpfs path it then streams, so no large blob crosses the IPC socket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// Capture a **single toplevel**, cropped to just that window (its own
     /// surface tree rendered to an offscreen buffer — correct even when the
@@ -311,8 +317,12 @@ pub enum Request {
     /// is a [`WindowSummary::id`]. Replies with [`Response::Screenshot`] carrying
     /// the file path, or [`Response::Error`] if the window is unknown or the
     /// active backend can't render offscreen (udev — winit and headless can).
-    /// Gated by `set_automation`.
-    ScreenshotWindow { id: String },
+    /// Gated by `set_automation`. `path` behaves as on [`Request::Screenshot`].
+    ScreenshotWindow {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     /// Spawn a child process under the WM's environment (inherits
     /// `WAYLAND_DISPLAY`, `SHOESTRING_WM_SOCKET`, etc.) and return its
     /// captured output once it exits. `argv[0]` is the executable; the
@@ -1779,7 +1789,9 @@ mod tests {
         let bare = Request::Screenshot {
             output: None,
             region: None,
+            path: None,
         };
+        // path default-skips so the simple shape is unchanged on the wire.
         assert_eq!(
             serde_json::to_string(&bare).unwrap(),
             r#"{"type":"screenshot"}"#
@@ -1792,6 +1804,7 @@ mod tests {
                 w: 800,
                 h: 600,
             }),
+            path: Some("/tmp/x.png".into()),
         };
         let s = serde_json::to_string(&with_region).unwrap();
         let back: Request = serde_json::from_str(&s).unwrap();
@@ -1802,8 +1815,13 @@ mod tests {
                 region: Some(ScreenshotRegion {
                     x: 10, y: 20, w: 800, h: 600,
                 }),
-            } if n == "eDP-1"
+                path: Some(ref p),
+            } if n == "eDP-1" && p == "/tmp/x.png"
         ));
+        // A legacy client without `path` still deserializes.
+        let legacy: Request =
+            serde_json::from_str(r#"{"type":"screenshot","output":"eDP-1"}"#).unwrap();
+        assert!(matches!(legacy, Request::Screenshot { path: None, .. }));
         let resp = Response::Screenshot {
             path: "/tmp/foo.png".into(),
         };
@@ -1811,14 +1829,28 @@ mod tests {
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"screenshot","path":"/tmp/foo.png"}"#
         );
-        // Per-window capture shares the Screenshot response shape.
-        let win = Request::ScreenshotWindow { id: "wl-7".into() };
+        // Per-window capture, with a path override and the default.
+        let win = Request::ScreenshotWindow {
+            id: "wl-7".into(),
+            path: Some("/tmp/w.png".into()),
+        };
         assert_eq!(
             serde_json::to_string(&win).unwrap(),
-            r#"{"type":"screenshot_window","id":"wl-7"}"#
+            r#"{"type":"screenshot_window","id":"wl-7","path":"/tmp/w.png"}"#
+        );
+        let bare_win = Request::ScreenshotWindow {
+            id: "wl-8".into(),
+            path: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare_win).unwrap(),
+            r#"{"type":"screenshot_window","id":"wl-8"}"#
         );
         let back: Request = serde_json::from_str(&serde_json::to_string(&win).unwrap()).unwrap();
-        assert!(matches!(back, Request::ScreenshotWindow { ref id } if id == "wl-7"));
+        assert!(matches!(
+            back,
+            Request::ScreenshotWindow { ref id, path: Some(ref p) } if id == "wl-7" && p == "/tmp/w.png"
+        ));
     }
 
     #[test]
