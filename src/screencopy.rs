@@ -33,7 +33,7 @@ use smithay::{
         wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         wayland_server::{backend::GlobalId, protocol::wl_buffer::WlBuffer, Resource},
     },
-    utils::{Buffer as BufferCoord, Rectangle},
+    utils::{Buffer as BufferCoord, Rectangle, Transform},
     wayland::{
         dmabuf::get_dmabuf,
         shm::{with_buffer_contents_mut, BufferAccessError},
@@ -193,8 +193,13 @@ pub fn process_pending<R>(
                 continue;
             }
         };
-        let mut damage_tracker =
-            OutputDamageTracker::new(output_size, scale, output.current_transform());
+        // Capture logical-upright, NOT output.current_transform(). The scanout
+        // render applies the output transform so the image is correct on a
+        // physically-rotated panel; a capture must not bake that rotation into
+        // the pixels, or a flipped-180 output (e.g. the winit dev backend)
+        // yields an upside-down buffer. Identity on a `normal` output, so real
+        // KMS hardware is unaffected. (task 188)
+        let mut damage_tracker = OutputDamageTracker::new(output_size, scale, Transform::Normal);
         let result = render_into::<R>(
             &mut damage_tracker,
             renderer,
@@ -256,11 +261,13 @@ pub fn process_pending<R>(
                 return;
             }
         };
-        // Use the output's actual transform so the offscreen render matches
-        // the on-screen orientation byte-for-byte. Otherwise a winit dev
-        // backend (which uses Flipped180) ends up with a 180°-rotated PNG.
-        let mut damage_tracker =
-            OutputDamageTracker::new(output_size, scale, output.current_transform());
+        // Capture logical-upright (Transform::Normal), not the scanout
+        // transform. Baking output.current_transform() in made a flipped-180
+        // output (the winit dev backend) produce a 180°-rotated PNG, because
+        // nothing un-applies it before the pixels reach the client / encoder.
+        // Identity on a `normal` output, so tty/KMS captures are unchanged.
+        // (task 188 — orthogonal to the #158 YInvert policy in finish_frame.)
+        let mut damage_tracker = OutputDamageTracker::new(output_size, scale, Transform::Normal);
 
         let render_result = render_into::<R>(
             &mut damage_tracker,
