@@ -197,6 +197,16 @@ Each request is a JSON object with a ``type`` discriminator:
        ``"right"`` / ``"middle"``, or a numeric Linux ``BTN_*`` code as a
        string. Pass ``"x"`` and ``"y"`` (both, as numbers) to move the
        pointer to those compositor-space coordinates first.
+   * - ``{"type": "inject_click_to_window", "id": "<ft-id>", "button": "left", "wx": 12.0, "wy": 34.0}``
+     - Like ``inject_click`` but ``wx`` / ``wy`` are **window-local** logical
+       pixels (``0,0`` = the window's top-left) relative to the toplevel named
+       by ``id`` (a foreign-toplevel identifier from ``windows``). The WM
+       translates them by the window's current on-screen origin, so callers stay
+       immune to where the compositor placed the window — the key primitive for
+       automating apps whose dialogs spawn at variable positions. Runs the same
+       click-to-focus + press/release as ``inject_click`` (so a following
+       ``inject_text`` lands in the clicked window). Returns an ``error`` if the
+       window is unknown or not currently mapped. Gated by the automation gate.
    * - ``{"type": "move_mouse", "x": 100.0, "y": 200.0}``
      - Move the pointer to compositor-space ``(x, y)`` without clicking.
        Parity with ``xdotool mousemove``; useful for hover-only tests
@@ -550,7 +560,8 @@ Automation gate
 The following requests refuse with an ``error`` while
 ``[general].automation_enabled`` is off (and the CLI flag
 ``--enable-automation`` / the IPC ``set_automation`` haven't flipped
-it): ``inject_key``, ``inject_text``, ``inject_click``, ``move_mouse``,
+it): ``inject_key``, ``inject_text``, ``inject_click``,
+``inject_click_to_window``, ``move_mouse``,
 ``inject_input``, ``get_clipboard``, ``set_clipboard``, ``dispatch_action``,
 ``screenshot``, ``run_command``. The error message
 is stable enough to scrape on:

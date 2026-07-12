@@ -106,6 +106,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         y: Option<f64>,
     },
+    /// Like [`Request::InjectClick`], but the click lands at coordinates
+    /// **relative to a specific toplevel's origin** rather than in
+    /// compositor-global space. `id` is a [`WindowSummary::id`]; `wx` / `wy`
+    /// are window-local logical pixels (`0,0` = the window's top-left). The WM
+    /// translates them by the window's current on-screen position, so callers
+    /// stay immune to where the compositor placed the window — the key win for
+    /// automating apps whose dialogs spawn at variable positions. Runs the same
+    /// click-to-focus + press/release as [`Request::InjectClick`]. Errors if the
+    /// window is unknown or not currently mapped. Gated by `set_automation`.
+    /// Reply is [`Response::Ok`].
+    InjectClickToWindow {
+        id: String,
+        button: String,
+        wx: f64,
+        wy: f64,
+    },
     /// Move the pointer to compositor-space `(x, y)` without clicking.
     /// Parity with `xdotool mousemove`; useful for hover-only tests and
     /// for setting up a drag (move → press → move → release). Does not
@@ -1307,6 +1323,22 @@ mod tests {
                 x: Some(_),
                 y: Some(_)
             } if button == "right"
+        ));
+        let wclick = Request::InjectClickToWindow {
+            id: "wl-3".into(),
+            button: "left".into(),
+            wx: 12.0,
+            wy: 34.5,
+        };
+        assert_eq!(
+            serde_json::to_string(&wclick).unwrap(),
+            r#"{"type":"inject_click_to_window","id":"wl-3","button":"left","wx":12.0,"wy":34.5}"#
+        );
+        let back: Request = serde_json::from_str(&serde_json::to_string(&wclick).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Request::InjectClickToWindow { ref id, ref button, wx, wy }
+                if id == "wl-3" && button == "left" && wx == 12.0 && wy == 34.5
         ));
     }
 

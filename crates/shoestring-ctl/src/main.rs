@@ -113,16 +113,28 @@ enum Command {
     },
     /// Synthesize a single mouse click. BUTTON is "left", "right",
     /// "middle", or a numeric BTN_* code. Pass --x/--y together to move
-    /// the pointer to those compositor-space coordinates first.
+    /// the pointer to those compositor-space coordinates first, or
+    /// --window with --wx/--wy to click at coordinates relative to a
+    /// window's origin (immune to where the window was placed).
     Click {
         /// Button name or numeric BTN_* code.
         button: String,
         /// X coordinate to move the pointer to before clicking. Requires --y.
-        #[arg(long, requires = "y")]
+        #[arg(long, requires = "y", conflicts_with = "window")]
         x: Option<f64>,
         /// Y coordinate to move the pointer to before clicking. Requires --x.
-        #[arg(long, requires = "x")]
+        #[arg(long, requires = "x", conflicts_with = "window")]
         y: Option<f64>,
+        /// Toplevel id (from `windows`) to click relative to. Requires
+        /// --wx and --wy; mutually exclusive with --x/--y.
+        #[arg(long, requires_all = ["wx", "wy"])]
+        window: Option<String>,
+        /// Window-local X (logical px, 0 = left edge). Requires --window.
+        #[arg(long, requires = "window")]
+        wx: Option<f64>,
+        /// Window-local Y (logical px, 0 = top edge). Requires --window.
+        #[arg(long, requires = "window")]
+        wy: Option<f64>,
     },
     /// Move the pointer to compositor-space (X, Y) without clicking. Same
     /// coordinate system as `click --x --y`. Useful for hover-only tests
@@ -475,7 +487,23 @@ fn main() -> Result<()> {
             Request::InjectKey { keysym, modifiers }
         }
         Command::Type { text } => Request::InjectText { text },
-        Command::Click { button, x, y } => Request::InjectClick { button, x, y },
+        Command::Click {
+            button,
+            x,
+            y,
+            window,
+            wx,
+            wy,
+        } => match window {
+            // requires_all guarantees wx/wy are present when --window is.
+            Some(id) => Request::InjectClickToWindow {
+                id,
+                button,
+                wx: wx.unwrap(),
+                wy: wy.unwrap(),
+            },
+            None => Request::InjectClick { button, x, y },
+        },
         Command::MoveMouse { x, y } => Request::MoveMouse { x, y },
         Command::PointerPosition => Request::PointerPosition,
         Command::Lock => Request::Lock,

@@ -914,6 +914,20 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::InjectClickToWindow { id, button, wx, wy } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                let resp = match state.inject_click_to_window(&id, &button, wx, wy) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::MoveMouse { x, y } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());

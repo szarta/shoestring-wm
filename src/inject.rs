@@ -43,6 +43,8 @@ pub enum InjectError {
     UnsupportedChar(char),
     #[error("unknown button: {0:?} (expected left/right/middle or a numeric BTN_* code)")]
     UnknownButton(String),
+    #[error("{0}")]
+    Window(String),
 }
 
 impl ShoestringWm {
@@ -240,6 +242,30 @@ impl ShoestringWm {
         );
         pointer.frame(self);
         Ok(())
+    }
+
+    /// Window-relative variant of [`Self::inject_click`]: click at window-local
+    /// `(wx, wy)` on the toplevel named by `ft_id`. Translates the window-local
+    /// point by the window's current on-screen origin and defers to
+    /// `inject_click`, so it inherits the same click-to-focus + press/release
+    /// (and the focus update lets a subsequent `type` land in the clicked
+    /// dialog). Errors if the window is unknown or not mapped — an unmapped
+    /// window has no origin to translate against.
+    pub fn inject_click_to_window(
+        &mut self,
+        ft_id: &str,
+        button: &str,
+        wx: f64,
+        wy: f64,
+    ) -> Result<(), InjectError> {
+        let window = crate::ipc::window_by_ft_id(self, ft_id)
+            .ok_or_else(|| InjectError::Window(format!("no window with id {ft_id}")))?;
+        let origin = self
+            .space
+            .element_location(&window)
+            .ok_or_else(|| InjectError::Window(format!("window {ft_id} is not mapped")))?
+            .to_f64();
+        self.inject_click(button, Some((origin.x + wx, origin.y + wy)))
     }
 
     /// Inject one raw key transition by **evdev keycode** (the value libinput
