@@ -193,10 +193,12 @@ Each request is a JSON object with a ``type`` discriminator:
        letters, digits, and space; other codepoints return an ``error``
        so the caller knows to break the string up.
    * - ``{"type": "inject_click", "button": "left"}``
-     - Synthesize a single mouse click. ``button`` is one of ``"left"`` /
+     - Synthesize a mouse click. ``button`` is one of ``"left"`` /
        ``"right"`` / ``"middle"``, or a numeric Linux ``BTN_*`` code as a
        string. Pass ``"x"`` and ``"y"`` (both, as numbers) to move the
-       pointer to those compositor-space coordinates first.
+       pointer to those compositor-space coordinates first. Optional
+       ``"count"`` repeats the press/release cycle at the same spot —
+       ``2`` for a double-click; absent means 1.
    * - ``{"type": "inject_click_to_window", "id": "<ft-id>", "button": "left", "wx": 12.0, "wy": 34.0}``
      - Like ``inject_click`` but ``wx`` / ``wy`` are **window-local** logical
        pixels (``0,0`` = the window's top-left) relative to the toplevel named
@@ -205,12 +207,24 @@ Each request is a JSON object with a ``type`` discriminator:
        immune to where the compositor placed the window — the key primitive for
        automating apps whose dialogs spawn at variable positions. Runs the same
        click-to-focus + press/release as ``inject_click`` (so a following
-       ``inject_text`` lands in the clicked window). Returns an ``error`` if the
-       window is unknown or not currently mapped. Gated by the automation gate.
+       ``inject_text`` lands in the clicked window); ``"count"`` gives a
+       double-click. Returns an ``error`` if the window is unknown or not
+       currently mapped. Gated by the automation gate.
+   * - ``{"type": "drag", "from_x": 10.0, "from_y": 20.0, "to_x": 200.0, "to_y": 20.0}``
+     - Press ``button`` (default ``"left"``) at ``from``, move to ``to`` with
+       interpolated motion, then release — the press/move/release the space map
+       and other drag surfaces need, without hand-composing it from ``move_mouse``
+       and raw button events. Coordinates are compositor-space, unless ``"id"`` (a
+       foreign-toplevel identifier) is set, in which case ``from`` / ``to`` are
+       window-local like ``inject_click_to_window``. Focus is pinned to the
+       surface under the press for the whole gesture (a real implicit grab), so a
+       drag that slides off the pressed widget still reads as one continuous
+       drag. Returns an ``error`` if ``id`` is unknown/unmapped or ``button`` is
+       bad. Gated by the automation gate.
    * - ``{"type": "move_mouse", "x": 100.0, "y": 200.0}``
      - Move the pointer to compositor-space ``(x, y)`` without clicking.
-       Parity with ``xdotool mousemove``; useful for hover-only tests
-       and for composing drags (``move_mouse`` → ``inject_click``).
+       Parity with ``xdotool mousemove``; useful for hover-only tests.
+       For a button-held drag prefer ``drag`` over composing this by hand.
        Does not change keyboard focus.
    * - ``{"type": "inject_input", "event": {"kind": "key", "keycode": 30, "pressed": true}}``
      - Inject one **raw input transition** straight into the seat — the
@@ -546,12 +560,11 @@ Each request is a JSON object with a ``type`` discriminator:
        absolute path (same shape as ``screenshot``), or an ``error`` if the
        window is unknown or the active backend can't render a window offscreen
        (the ``udev``/DRM backend can't; ``winit`` and ``headless`` can). Gated
-       by the automation gate.
-
-   Both requests support ``shoestring-ctl screenshot --stdout`` client-side:
-   ``ctl`` passes a ``$XDG_RUNTIME_DIR`` (tmpfs) ``path``, then streams that file
-   to its own stdout and unlinks it — so a capture pipes without a large PNG
-   crossing the IPC socket.
+       by the automation gate. Both ``screenshot`` and ``screenshot_window``
+       back ``shoestring-ctl screenshot --stdout``: ``ctl`` passes a
+       ``$XDG_RUNTIME_DIR`` (tmpfs) ``path``, then streams that file to its own
+       stdout and unlinks it — so a capture pipes without a large PNG crossing
+       the IPC socket.
    * - ``{"type": "run_command", "argv": ["...", ...], "timeout_ms": null}``
      - Spawn a child process under the WM's environment and return its
        captured output once it exits. ``argv`` must be non-empty;
@@ -592,7 +605,7 @@ The following requests refuse with an ``error`` while
 ``[general].automation_enabled`` is off (and the CLI flag
 ``--enable-automation`` / the IPC ``set_automation`` haven't flipped
 it): ``inject_key``, ``inject_text``, ``inject_click``,
-``inject_click_to_window``, ``move_mouse``,
+``inject_click_to_window``, ``drag``, ``move_mouse``,
 ``inject_input``, ``get_clipboard``, ``set_clipboard``, ``paste``,
 ``dispatch_action``,
 ``screenshot``, ``screenshot_window``, ``run_command``. The error message

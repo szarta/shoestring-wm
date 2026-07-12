@@ -155,6 +155,27 @@ enum Command {
         /// Window-local Y (logical px, 0 = top edge). Requires --window.
         #[arg(long, requires = "window")]
         wy: Option<f64>,
+        /// Press/release cycles at the same spot. 2 = double-click. Default 1.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+    },
+    /// Drag with a button held: press at --from, move to --to, release.
+    /// Coordinates are compositor-space, unless --window is given, in which case
+    /// --from/--to are window-local (immune to window placement). Requires the
+    /// automation gate.
+    Drag {
+        /// Start point `X,Y`.
+        #[arg(long, value_name = "X,Y")]
+        from: String,
+        /// End point `X,Y`.
+        #[arg(long, value_name = "X,Y")]
+        to: String,
+        /// Button to hold: left/right/middle or a numeric BTN_* code.
+        #[arg(long, default_value = "left")]
+        button: String,
+        /// Toplevel id (from `windows`); makes --from/--to window-local.
+        #[arg(long)]
+        window: Option<String>,
     },
     /// Move the pointer to compositor-space (X, Y) without clicking. Same
     /// coordinate system as `click --x --y`. Useful for hover-only tests
@@ -558,6 +579,7 @@ fn main() -> Result<()> {
             window,
             wx,
             wy,
+            count,
         } => match window {
             // requires_all guarantees wx/wy are present when --window is.
             Some(id) => Request::InjectClickToWindow {
@@ -565,9 +587,32 @@ fn main() -> Result<()> {
                 button,
                 wx: wx.unwrap(),
                 wy: wy.unwrap(),
+                count: Some(count),
             },
-            None => Request::InjectClick { button, x, y },
+            None => Request::InjectClick {
+                button,
+                x,
+                y,
+                count: Some(count),
+            },
         },
+        Command::Drag {
+            from,
+            to,
+            button,
+            window,
+        } => {
+            let (from_x, from_y) = parse_xy(&from)?;
+            let (to_x, to_y) = parse_xy(&to)?;
+            Request::Drag {
+                id: window,
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            }
+        }
         Command::MoveMouse { x, y } => Request::MoveMouse { x, y },
         Command::PointerPosition => Request::PointerPosition,
         Command::Lock => Request::Lock,
@@ -775,6 +820,22 @@ fn screenshot_stdout_temp() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     dir.join(format!("shoestring-shot-{}.png", std::process::id()))
+}
+
+/// Parse an `X,Y` coordinate pair (floats) for `drag --from/--to`.
+fn parse_xy(s: &str) -> Result<(f64, f64)> {
+    let (x, y) = s
+        .split_once(',')
+        .with_context(|| format!("expected X,Y (got {s:?})"))?;
+    let x: f64 = x
+        .trim()
+        .parse()
+        .with_context(|| format!("bad X in {s:?}"))?;
+    let y: f64 = y
+        .trim()
+        .parse()
+        .with_context(|| format!("bad Y in {s:?}"))?;
+    Ok((x, y))
 }
 
 fn parse_region(s: &str) -> Result<ScreenshotRegion> {

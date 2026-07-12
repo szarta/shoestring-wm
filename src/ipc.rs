@@ -932,7 +932,12 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
-            Request::InjectClick { button, x, y } => {
+            Request::InjectClick {
+                button,
+                x,
+                y,
+                count,
+            } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
                     return true;
@@ -950,7 +955,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                         return true;
                     }
                 };
-                let resp = match state.inject_click(&button, xy) {
+                let resp = match state.inject_click(&button, xy, count.unwrap_or(1)) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
                         message: e.to_string(),
@@ -959,17 +964,47 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
-            Request::InjectClickToWindow { id, button, wx, wy } => {
+            Request::InjectClickToWindow {
+                id,
+                button,
+                wx,
+                wy,
+                count,
+            } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
                     return true;
                 }
-                let resp = match state.inject_click_to_window(&id, &button, wx, wy) {
-                    Ok(()) => Response::Ok,
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                    },
-                };
+                let resp =
+                    match state.inject_click_to_window(&id, &button, wx, wy, count.unwrap_or(1)) {
+                        Ok(()) => Response::Ok,
+                        Err(e) => Response::Error {
+                            message: e.to_string(),
+                        },
+                    };
+                let _ = write_response(client, &resp);
+                return true;
+            }
+            Request::Drag {
+                id,
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                let resp =
+                    match state.inject_drag(id.as_deref(), &button, (from_x, from_y), (to_x, to_y))
+                    {
+                        Ok(()) => Response::Ok,
+                        Err(e) => Response::Error {
+                            message: e.to_string(),
+                        },
+                    };
                 let _ = write_response(client, &resp);
                 return true;
             }

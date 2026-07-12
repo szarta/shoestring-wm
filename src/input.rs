@@ -261,7 +261,7 @@ impl ShoestringWm {
                 }
             }
             Action::InjectClick { button } => {
-                if let Err(e) = self.inject_click(&button, None) {
+                if let Err(e) = self.inject_click(&button, None, 1) {
                     tracing::warn!(button, error = %e, "inject_click failed");
                 }
             }

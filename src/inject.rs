@@ -24,7 +24,8 @@ use smithay::{
         keyboard::{xkb, FilterResult, Keysym},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    utils::SERIAL_COUNTER,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point, SERIAL_COUNTER},
 };
 
 use crate::state::ShoestringWm;
@@ -167,6 +168,7 @@ impl ShoestringWm {
         &mut self,
         button: &str,
         xy: Option<(f64, f64)>,
+        count: u32,
     ) -> Result<(), InjectError> {
         let code = parse_button(button)?;
         let pointer = self.seat.get_pointer().expect("seat must have pointer");
@@ -216,31 +218,37 @@ impl ShoestringWm {
             }
         }
 
-        let press_serial = SERIAL_COUNTER.next_serial();
-        let pointer = self.seat.get_pointer().unwrap();
-        pointer.button(
-            self,
-            &ButtonEvent {
-                button: code,
-                state: ButtonState::Pressed,
-                serial: press_serial,
-                time: monotonic_msec(),
-            },
-        );
-        pointer.frame(self);
+        // `count` press/release cycles at the same spot: 1 = single click, 2 =
+        // double-click, etc. They fire microseconds apart, inside any
+        // double-click threshold. `count == 0` is treated as 1 so a click always
+        // happens.
+        for _ in 0..count.max(1) {
+            let press_serial = SERIAL_COUNTER.next_serial();
+            let pointer = self.seat.get_pointer().unwrap();
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button: code,
+                    state: ButtonState::Pressed,
+                    serial: press_serial,
+                    time: monotonic_msec(),
+                },
+            );
+            pointer.frame(self);
 
-        let release_serial = SERIAL_COUNTER.next_serial();
-        let pointer = self.seat.get_pointer().unwrap();
-        pointer.button(
-            self,
-            &ButtonEvent {
-                button: code,
-                state: ButtonState::Released,
-                serial: release_serial,
-                time: monotonic_msec(),
-            },
-        );
-        pointer.frame(self);
+            let release_serial = SERIAL_COUNTER.next_serial();
+            let pointer = self.seat.get_pointer().unwrap();
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button: code,
+                    state: ButtonState::Released,
+                    serial: release_serial,
+                    time: monotonic_msec(),
+                },
+            );
+            pointer.frame(self);
+        }
         Ok(())
     }
 
@@ -257,15 +265,107 @@ impl ShoestringWm {
         button: &str,
         wx: f64,
         wy: f64,
+        count: u32,
     ) -> Result<(), InjectError> {
+        let origin = self.window_origin(ft_id)?;
+        self.inject_click(button, Some((origin.0 + wx, origin.1 + wy)), count)
+    }
+
+    /// Resolve a mapped window's on-screen origin in global logical coords, for
+    /// translating window-local coordinates. Errors if the window is unknown or
+    /// not currently mapped. Shared by the window-relative click and drag.
+    fn window_origin(&self, ft_id: &str) -> Result<(f64, f64), InjectError> {
         let window = crate::ipc::window_by_ft_id(self, ft_id)
             .ok_or_else(|| InjectError::Window(format!("no window with id {ft_id}")))?;
-        let origin = self
+        let loc = self
             .space
             .element_location(&window)
             .ok_or_else(|| InjectError::Window(format!("window {ft_id} is not mapped")))?
             .to_f64();
-        self.inject_click(button, Some((origin.x + wx, origin.y + wy)))
+        Ok((loc.x, loc.y))
+    }
+
+    /// Press `button` at `from`, move to `to` with interpolated motion, then
+    /// release — a press/move/release drag. When `ft_id` is `Some`, `from`/`to`
+    /// are window-local and translated by the window's origin (placement-immune,
+    /// like [`Self::inject_click_to_window`]); otherwise they are global logical
+    /// coords.
+    ///
+    /// Focus is **pinned** to the surface under the press point for the whole
+    /// gesture — the pointer half of a real implicit grab. Plain
+    /// [`inject_move_mouse`] recomputes `surface_under` per motion, so a drag
+    /// whose path crosses off the pressed surface (e.g. a select-drag that
+    /// slides past the edge of an entry widget) would send that surface a
+    /// `leave` and cancel the app's in-progress selection. Holding the focus
+    /// keeps every motion on the pressed surface, so the drag reads as one
+    /// continuous gesture.
+    pub fn inject_drag(
+        &mut self,
+        ft_id: Option<&str>,
+        button: &str,
+        from: (f64, f64),
+        to: (f64, f64),
+    ) -> Result<(), InjectError> {
+        let code = parse_button(button)?;
+        // Resolve global from/to plus the pinned focus. For a window drag the
+        // focus is the window's own surface (so an occluded/off-workspace target
+        // still works); for a global drag it's whatever sits under the press.
+        let (focus, (fx, fy), (tx, ty)) = match ft_id {
+            Some(id) => {
+                let window = crate::ipc::window_by_ft_id(self, id)
+                    .ok_or_else(|| InjectError::Window(format!("no window with id {id}")))?;
+                let surface = crate::window_ext::focus_surface(&window)
+                    .ok_or_else(|| InjectError::Window(format!("window {id} has no surface")))?;
+                let origin = self
+                    .space
+                    .element_location(&window)
+                    .ok_or_else(|| InjectError::Window(format!("window {id} is not mapped")))?
+                    .to_f64();
+                let focus = Some((surface, origin));
+                (
+                    focus,
+                    (origin.x + from.0, origin.y + from.1),
+                    (origin.x + to.0, origin.y + to.1),
+                )
+            }
+            None => (self.surface_under(from.into()), from, to),
+        };
+
+        self.drag_motion(&focus, (fx, fy));
+        self.inject_raw_button(code, true);
+        // Interpolate so apps that track motion deltas see a continuous drag,
+        // not a teleport from press to release.
+        const STEPS: u32 = 16;
+        for i in 1..=STEPS {
+            let t = i as f64 / STEPS as f64;
+            self.drag_motion(&focus, (fx + (tx - fx) * t, fy + (ty - fy) * t));
+        }
+        self.inject_raw_button(code, false);
+        Ok(())
+    }
+
+    /// Emit one pointer motion during [`Self::inject_drag`], keeping the
+    /// caller's pinned `focus` rather than recomputing `surface_under` — see
+    /// that method's doc for why the drag must hold focus.
+    fn drag_motion(
+        &mut self,
+        focus: &Option<(WlSurface, Point<f64, Logical>)>,
+        location: (f64, f64),
+    ) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        pointer.motion(
+            self,
+            focus.clone(),
+            &MotionEvent {
+                location: location.into(),
+                serial,
+                time: monotonic_msec(),
+            },
+        );
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.frame(self);
+        self.last_pointer_focus = focus.clone();
     }
 
     /// Inject one raw key transition by **evdev keycode** (the value libinput

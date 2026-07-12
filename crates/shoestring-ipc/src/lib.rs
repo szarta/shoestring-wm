@@ -105,6 +105,11 @@ pub enum Request {
         x: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         y: Option<f64>,
+        /// Number of press/release cycles at the same spot (`2` = double-click).
+        /// Absent / `null` means 1. All cycles fire microseconds apart, well
+        /// inside any double-click threshold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u32>,
     },
     /// Like [`Request::InjectClick`], but the click lands at coordinates
     /// **relative to a specific toplevel's origin** rather than in
@@ -121,6 +126,29 @@ pub enum Request {
         button: String,
         wx: f64,
         wy: f64,
+        /// Press/release cycles (`2` = double-click); absent means 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u32>,
+    },
+    /// Press a button at `from`, move to `to` (with interpolated motion so
+    /// apps tracking pointer deltas register the drag), then release — the
+    /// press/move/release the space map and other drag surfaces need, without
+    /// the caller hand-composing it from `move_mouse` + raw button events.
+    /// Coordinates are compositor-global logical pixels, unless `id` is set — a
+    /// [`WindowSummary::id`] — in which case `from` / `to` are window-local and
+    /// the WM translates them by the window's origin (placement-immune, like
+    /// [`Request::InjectClickToWindow`]). `button` as in [`Request::InjectClick`]
+    /// (default `"left"`). Errors if `id` is given but unknown/unmapped, or the
+    /// button name is bad. Gated by `set_automation`. Reply is [`Response::Ok`].
+    Drag {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default = "default_drag_button")]
+        button: String,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
     },
     /// Move the pointer to compositor-space `(x, y)` without clicking.
     /// Parity with `xdotool mousemove`; useful for hover-only tests and
@@ -929,6 +957,11 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Default drag button for [`Request::Drag`] — the left mouse button.
+fn default_drag_button() -> String {
+    "left".to_string()
+}
+
 /// Default paste keysym for [`Request::Paste`] — the `v` of `Ctrl+V`.
 fn default_paste_keysym() -> String {
     "v".to_string()
@@ -1351,32 +1384,36 @@ mod tests {
             button: "left".into(),
             x: None,
             y: None,
+            count: None,
         };
-        // x/y are skipped when None so simple cases stay terse.
+        // x/y/count are skipped when absent so simple cases stay terse, and a
+        // legacy payload (no count) still deserializes.
         assert_eq!(
             serde_json::to_string(&click_no_xy).unwrap(),
             r#"{"type":"inject_click","button":"left"}"#
         );
-        let click_xy = Request::InjectClick {
-            button: "right".into(),
+        let legacy: Request =
+            serde_json::from_str(r#"{"type":"inject_click","button":"left"}"#).unwrap();
+        assert!(matches!(legacy, Request::InjectClick { count: None, .. }));
+        // A double-click carries count.
+        let dbl = Request::InjectClick {
+            button: "left".into(),
             x: Some(100.5),
             y: Some(200.0),
+            count: Some(2),
         };
-        let s = serde_json::to_string(&click_xy).unwrap();
-        let back: Request = serde_json::from_str(&s).unwrap();
+        let back: Request = serde_json::from_str(&serde_json::to_string(&dbl).unwrap()).unwrap();
         assert!(matches!(
             back,
-            Request::InjectClick {
-                ref button,
-                x: Some(_),
-                y: Some(_)
-            } if button == "right"
+            Request::InjectClick { ref button, x: Some(_), y: Some(_), count: Some(2) }
+                if button == "left"
         ));
         let wclick = Request::InjectClickToWindow {
             id: "wl-3".into(),
             button: "left".into(),
             wx: 12.0,
             wy: 34.5,
+            count: None,
         };
         assert_eq!(
             serde_json::to_string(&wclick).unwrap(),
@@ -1385,8 +1422,32 @@ mod tests {
         let back: Request = serde_json::from_str(&serde_json::to_string(&wclick).unwrap()).unwrap();
         assert!(matches!(
             back,
-            Request::InjectClickToWindow { ref id, ref button, wx, wy }
+            Request::InjectClickToWindow { ref id, ref button, wx, wy, count: None }
                 if id == "wl-3" && button == "left" && wx == 12.0 && wy == 34.5
+        ));
+        // Drag: default button fills in, id skips when absent, round-trips.
+        let d: Request = serde_json::from_str(
+            r#"{"type":"drag","from_x":1.0,"from_y":2.0,"to_x":3.0,"to_y":4.0}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            d,
+            Request::Drag { id: None, ref button, from_x, from_y, to_x, to_y }
+                if button == "left" && from_x == 1.0 && from_y == 2.0 && to_x == 3.0 && to_y == 4.0
+        ));
+        let dw = Request::Drag {
+            id: Some("wl-9".into()),
+            button: "middle".into(),
+            from_x: 5.0,
+            from_y: 6.0,
+            to_x: 7.0,
+            to_y: 8.0,
+        };
+        let back: Request = serde_json::from_str(&serde_json::to_string(&dw).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Request::Drag { id: Some(ref id), ref button, .. }
+                if id == "wl-9" && button == "middle"
         ));
     }
 
