@@ -105,11 +105,31 @@ enum Command {
         #[arg(short = 'm', long = "mod", value_name = "NAME")]
         modifiers: Vec<String>,
     },
-    /// Type a literal string into the focused surface. v1 supports ASCII
-    /// letters, digits, and space; other characters return an error.
+    /// Type a literal string into the focused surface. Per-keystroke synthesis
+    /// supports ASCII letters, digits, and space; other characters return an
+    /// error — use --via-clipboard for arbitrary text (Unicode, punctuation,
+    /// long strings).
     Type {
         /// Text to type.
         text: String,
+        /// Enter the text via the clipboard + a paste chord instead of
+        /// per-keystroke synthesis. Sets the selection to TEXT, then pastes it
+        /// into the focused surface — handles anything plain typing can't.
+        #[arg(long)]
+        via_clipboard: bool,
+        /// Paste chord for --via-clipboard (e.g. "Ctrl+Shift+v",
+        /// "Shift+Insert"). Defaults to Ctrl+V.
+        #[arg(long, default_value = "Ctrl+v", requires = "via_clipboard")]
+        paste_key: String,
+    },
+    /// Paste the current selection into the focused surface by synthesizing the
+    /// paste chord (default Ctrl+V). Pair with `set-clipboard` for arbitrary
+    /// text entry, or use `type --via-clipboard` to set + paste in one call.
+    /// Requires the automation gate.
+    Paste {
+        /// Paste chord (e.g. "Ctrl+Shift+v", "Shift+Insert"). Defaults to Ctrl+V.
+        #[arg(long, default_value = "Ctrl+v")]
+        key: String,
     },
     /// Synthesize a single mouse click. BUTTON is "left", "right",
     /// "middle", or a numeric BTN_* code. Pass --x/--y together to move
@@ -507,7 +527,30 @@ fn main() -> Result<()> {
             let (keysym, modifiers) = split_chord(&keysym, modifiers);
             Request::InjectKey { keysym, modifiers }
         }
-        Command::Type { text } => Request::InjectText { text },
+        Command::Type {
+            text,
+            via_clipboard,
+            paste_key,
+        } => {
+            if via_clipboard {
+                let (keysym, modifiers) = split_chord(&paste_key, vec![]);
+                Request::Paste {
+                    text: Some(text),
+                    keysym,
+                    modifiers,
+                }
+            } else {
+                Request::InjectText { text }
+            }
+        }
+        Command::Paste { key } => {
+            let (keysym, modifiers) = split_chord(&key, vec![]);
+            Request::Paste {
+                text: None,
+                keysym,
+                modifiers,
+            }
+        }
         Command::Click {
             button,
             x,

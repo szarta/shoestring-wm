@@ -1026,6 +1026,35 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::Paste {
+                text,
+                keysym,
+                modifiers,
+            } => {
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                // Optionally load the selection first, then synthesize the paste
+                // chord so the focused client requests it back. Setting the
+                // selection is infallible; only the key injection can fail (a
+                // paste chord absent from the current keymap), so we surface that.
+                if let Some(t) = text {
+                    state.handle_set_clipboard(
+                        false,
+                        "text/plain;charset=utf-8".to_string(),
+                        t.into_bytes(),
+                    );
+                }
+                let resp = match state.inject_key(&keysym, &modifiers) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::PointerPosition => {
                 let (x, y) = state.pointer_position();
                 let _ = write_response(client, &Response::PointerPosition { x, y });

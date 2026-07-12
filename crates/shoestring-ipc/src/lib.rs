@@ -161,6 +161,26 @@ pub enum Request {
         mime: String,
         data: Vec<u8>,
     },
+    /// Enter text into the focused surface **via the clipboard**: if `text` is
+    /// given, set the selection to it (UTF-8 `text/plain`, like `set_clipboard`),
+    /// then synthesize the paste chord (`modifiers` + `keysym`, default
+    /// `Ctrl` + `v`) to the focused window. Unlike [`Request::InjectText`] — which
+    /// only handles ASCII letters/digits/space through the keymap — this carries
+    /// arbitrary Unicode, punctuation, and long strings, because the bytes travel
+    /// through the selection rather than per-keystroke. With `text` omitted it
+    /// just pastes whatever the selection already holds. Override `keysym` /
+    /// `modifiers` for apps whose paste isn't `Ctrl+V` (terminals often use
+    /// `Ctrl`+`Shift`+`v` or `Shift`+`Insert`). Gated by `set_automation`. Reply
+    /// is [`Response::Ok`] (or [`Response::Error`] if the paste chord can't be
+    /// resolved in the current keymap).
+    Paste {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default = "default_paste_keysym")]
+        keysym: String,
+        #[serde(default = "default_paste_modifiers")]
+        modifiers: Vec<String>,
+    },
     /// Read the current pointer location in compositor-space logical
     /// coords. Reply is [`Response::PointerPosition`]. Read-only and not
     /// gated by automation — pure observation, useful for verifying that
@@ -909,6 +929,16 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Default paste keysym for [`Request::Paste`] — the `v` of `Ctrl+V`.
+fn default_paste_keysym() -> String {
+    "v".to_string()
+}
+
+/// Default paste modifiers for [`Request::Paste`] — `Ctrl` (of `Ctrl+V`).
+fn default_paste_modifiers() -> Vec<String> {
+    vec!["Ctrl".to_string()]
+}
+
 /// A window's on-screen rectangle in compositor-global logical coords:
 /// `(x, y)` is the top-left, `(w, h)` the size. Same coordinate system as
 /// [`Request::MoveMouse`] / [`Response::PointerPosition`], so a script can
@@ -1539,6 +1569,29 @@ mod tests {
             Event::RemoteClipboard {
                 op: ClipboardOp::Pull
             }
+        ));
+    }
+
+    #[test]
+    fn paste_request_shapes() {
+        // A bare paste defaults to Ctrl+V of the current selection.
+        let bare: Request = serde_json::from_str(r#"{"type":"paste"}"#).unwrap();
+        assert!(matches!(
+            bare,
+            Request::Paste { text: None, ref keysym, ref modifiers }
+                if keysym == "v" && modifiers == &["Ctrl"]
+        ));
+        // Set-and-paste with an overridden chord round-trips.
+        let p = Request::Paste {
+            text: Some("~/Stars! Games/α.m1".into()),
+            keysym: "Insert".into(),
+            modifiers: vec!["Shift".into()],
+        };
+        let back: Request = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            Request::Paste { text: Some(ref t), ref keysym, ref modifiers }
+                if t == "~/Stars! Games/α.m1" && keysym == "Insert" && modifiers == &["Shift"]
         ));
     }
 

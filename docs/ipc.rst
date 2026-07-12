@@ -253,6 +253,20 @@ Each request is a JSON object with a ``type`` discriminator:
        every paster finds the atom it asks for. ``primary`` sets the primary
        selection. The receiving half of cross-machine copy/paste; locally a
        focus-free ``wl-copy``. Reply is ``ok``. Gated by automation.
+   * - ``{"type": "paste", "text": "…", "keysym": "v", "modifiers": ["Ctrl"]}``
+     - Enter text into the focused surface **via the clipboard**. If ``text`` is
+       present, set the selection to it (UTF-8 ``text/plain``) first; then
+       synthesize the paste chord (``modifiers`` + ``keysym``, defaulting to
+       ``Ctrl`` + ``v``) so the focused client requests the selection back. All
+       three fields are optional: omit ``text`` to paste the current selection,
+       and override ``keysym`` / ``modifiers`` for apps whose paste isn't
+       ``Ctrl+V`` (e.g. ``Ctrl+Shift+v`` or ``Shift+Insert`` for terminals).
+       Unlike ``inject_text`` (ASCII letters/digits/space only, per keystroke),
+       this carries arbitrary Unicode, punctuation, and long strings, since the
+       bytes travel through the selection rather than the keymap. ``shoestring-ctl
+       type --via-clipboard`` and ``shoestring-ctl paste`` drive it. Reply is
+       ``ok`` (or ``error`` if the paste chord isn't in the current keymap).
+       Gated by automation.
    * - ``{"type": "pointer_position"}``
      - Read the current pointer location. Reply is ``pointer_position``.
        Read-only and not gated by automation.
@@ -579,7 +593,8 @@ The following requests refuse with an ``error`` while
 ``--enable-automation`` / the IPC ``set_automation`` haven't flipped
 it): ``inject_key``, ``inject_text``, ``inject_click``,
 ``inject_click_to_window``, ``move_mouse``,
-``inject_input``, ``get_clipboard``, ``set_clipboard``, ``dispatch_action``,
+``inject_input``, ``get_clipboard``, ``set_clipboard``, ``paste``,
+``dispatch_action``,
 ``screenshot``, ``screenshot_window``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
