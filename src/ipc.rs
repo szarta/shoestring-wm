@@ -766,7 +766,13 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     });
                 return false;
             }
-            Request::RunCommand { argv, timeout_ms } => {
+            Request::RunCommand {
+                argv,
+                timeout_ms,
+                cwd,
+                env,
+                detach,
+            } => {
                 if !state.automation_enabled {
                     let _ = write_response(client, &automation_off_error());
                     return true;
@@ -780,11 +786,30 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     );
                     return true;
                 }
+                if detach {
+                    // Fire-and-forget: spawn detached and reply with the PID
+                    // now. No deferred reply, no pending-command bookkeeping.
+                    let resp = match state.spawn_detached_command(&argv, cwd.as_deref(), &env) {
+                        Ok(pid) => Response::CommandStarted { pid },
+                        Err(e) => Response::Error {
+                            message: format!("run_command spawn failed: {e}"),
+                        },
+                    };
+                    let _ = write_response(client, &resp);
+                    return true;
+                }
                 // Hold the connection open across the deferred reply,
                 // same as Screenshot. Mark spent so a misbehaving
                 // client can't slip in a second request.
                 client.borrow_mut().spent = true;
-                match state.spawn_remote_command(id, Rc::clone(client), &argv, timeout_ms) {
+                match state.spawn_remote_command(
+                    id,
+                    Rc::clone(client),
+                    &argv,
+                    timeout_ms,
+                    cwd.as_deref(),
+                    &env,
+                ) {
                     Ok(()) => return false,
                     Err(e) => {
                         let _ = write_response(

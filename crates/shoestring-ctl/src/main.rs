@@ -226,9 +226,20 @@ enum Command {
     RunCommand {
         /// Kill the child with SIGKILL after this many milliseconds.
         /// The reply still includes any output captured before the
-        /// kill.
-        #[arg(long, value_name = "MS")]
+        /// kill. Ignored with --detach.
+        #[arg(long, value_name = "MS", conflicts_with = "detach")]
         timeout_ms: Option<u32>,
+        /// Run the child in this working directory instead of the WM's.
+        #[arg(long, value_name = "DIR")]
+        cwd: Option<String>,
+        /// Extra environment variable as KEY=VALUE, layered onto the
+        /// inherited environment. Repeatable.
+        #[arg(long = "env", value_name = "K=V")]
+        env: Vec<String>,
+        /// Spawn the child detached (own session, stdio to /dev/null) and
+        /// return its PID immediately instead of waiting for it to exit.
+        #[arg(long)]
+        detach: bool,
         /// Command and arguments. The first value is the executable.
         #[arg(required = true, trailing_var_arg = true)]
         argv: Vec<String>,
@@ -662,7 +673,25 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::RunCommand { argv, timeout_ms } => Request::RunCommand { argv, timeout_ms },
+        Command::RunCommand {
+            argv,
+            timeout_ms,
+            cwd,
+            env,
+            detach,
+        } => {
+            let env = env
+                .iter()
+                .map(|kv| parse_env_kv(kv))
+                .collect::<Result<Vec<_>>>()?;
+            Request::RunCommand {
+                argv,
+                timeout_ms,
+                cwd,
+                env,
+                detach,
+            }
+        }
         Command::ReloadConfig => Request::ReloadConfig,
         Command::PickWindow => Request::PickWindow,
         Command::CloseWindow { id } => Request::CloseWindow { id },
@@ -820,6 +849,16 @@ fn screenshot_stdout_temp() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     dir.join(format!("shoestring-shot-{}.png", std::process::id()))
+}
+
+/// Split a `KEY=VALUE` argument for `run-command --env`. The value may itself
+/// contain `=`; only the first `=` splits. An empty key is rejected.
+fn parse_env_kv(s: &str) -> Result<(String, String)> {
+    let (k, v) = s
+        .split_once('=')
+        .with_context(|| format!("--env expected KEY=VALUE (got {s:?})"))?;
+    anyhow::ensure!(!k.is_empty(), "--env has an empty key in {s:?}");
+    Ok((k.to_string(), v.to_string()))
 }
 
 /// Parse an `X,Y` coordinate pair (floats) for `drag --from/--to`.

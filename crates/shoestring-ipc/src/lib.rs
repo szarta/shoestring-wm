@@ -378,10 +378,21 @@ pub enum Request {
     ///
     /// `timeout_ms`: if set, the child is sent `SIGKILL` after this many
     /// milliseconds. The reply still includes whatever output was
-    /// captured up to that point.
+    /// captured up to that point. Ignored when `detach` is set.
     ///
-    /// Output is capped at [`RUN_COMMAND_OUTPUT_CAP`] bytes per stream;
-    /// further bytes are drained from the pipe (so the child does not
+    /// `cwd`: run the child in this working directory instead of the WM's
+    /// (Stars!'s save dialog, for one, defaults to the process cwd). `env`:
+    /// extra `KEY`/`VALUE` pairs layered onto the inherited environment.
+    ///
+    /// `detach`: spawn the child in its own session (`setsid`, stdio to
+    /// `/dev/null`) and reply immediately with [`Response::CommandStarted`]
+    /// carrying its PID — the WM neither waits for it nor captures output. Lets
+    /// one long-lived WM launch many independent jobs (e.g. an oracle game per
+    /// output dir) without blocking the connection. Without it the reply is the
+    /// blocking [`Response::CommandResult`].
+    ///
+    /// Output (non-detached) is capped at [`RUN_COMMAND_OUTPUT_CAP`] bytes per
+    /// stream; further bytes are drained from the pipe (so the child does not
     /// block on a full pipe buffer) but discarded, and the response's
     /// `truncated` field is set.
     ///
@@ -391,6 +402,12 @@ pub enum Request {
         argv: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detach: bool,
     },
     /// Re-read the TOML config file the WM was launched with, recompile
     /// the binding table, and swap both. Equivalent to the
@@ -868,6 +885,12 @@ pub enum Response {
         stdout: String,
         stderr: String,
         truncated: bool,
+    },
+    /// Reply to a `run_command` with `detach: true`: the child was started in
+    /// its own session with stdio nulled, and `pid` is its process id. The WM
+    /// does not wait for it or capture output — the caller owns its lifetime.
+    CommandStarted {
+        pid: i32,
     },
     /// Result of [`Request::PickWindow`]. `window` is `Some` when the
     /// user clicked a toplevel, `None` if they cancelled (Escape /
@@ -1972,23 +1995,41 @@ mod tests {
         let bare = Request::RunCommand {
             argv: vec!["echo".into(), "hi".into()],
             timeout_ms: None,
+            cwd: None,
+            env: vec![],
+            detach: false,
         };
+        // cwd/env/detach default-skip so the simple shape is unchanged, and a
+        // legacy client (no cwd/env/detach) still deserializes.
         assert_eq!(
             serde_json::to_string(&bare).unwrap(),
             r#"{"type":"run_command","argv":["echo","hi"]}"#
         );
-        let with_timeout = Request::RunCommand {
-            argv: vec!["sleep".into(), "5".into()],
+        let legacy: Request =
+            serde_json::from_str(r#"{"type":"run_command","argv":["echo"]}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            Request::RunCommand { detach: false, cwd: None, ref env, .. } if env.is_empty()
+        ));
+        let full = Request::RunCommand {
+            argv: vec!["wine".into(), "stars.exe".into()],
             timeout_ms: Some(250),
+            cwd: Some("/games/g1".into()),
+            env: vec![("WINEPREFIX".into(), "/p1".into())],
+            detach: true,
         };
-        let s = serde_json::to_string(&with_timeout).unwrap();
+        let s = serde_json::to_string(&full).unwrap();
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(
             back,
             Request::RunCommand {
                 ref argv,
                 timeout_ms: Some(250),
-            } if argv == &["sleep", "5"]
+                cwd: Some(ref d),
+                ref env,
+                detach: true,
+            } if argv == &["wine", "stars.exe"] && d == "/games/g1"
+                && env == &[("WINEPREFIX".to_string(), "/p1".to_string())]
         ));
         let resp = Response::CommandResult {
             exit_code: 0,
@@ -1999,6 +2040,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"command_result","exit_code":0,"stdout":"hi\n","stderr":"","truncated":false}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Response::CommandStarted { pid: 4321 }).unwrap(),
+            r#"{"type":"command_started","pid":4321}"#
         );
     }
 

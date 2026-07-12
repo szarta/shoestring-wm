@@ -571,7 +571,15 @@ Each request is a JSON object with a ``type`` discriminator:
        ``timeout_ms`` (optional) sends ``SIGKILL`` after the given
        milliseconds. Output is capped at 64 KiB per stream; extra bytes
        are drained but discarded and ``truncated`` is set. Reply is
-       ``command_result``. Gated by the automation gate.
+       ``command_result``. Optional ``"cwd"`` runs the child in that working
+       directory (Stars!'s save dialog defaults to the process cwd); optional
+       ``"env"`` is a list of ``["KEY", "VALUE"]`` pairs layered onto the
+       inherited environment. Optional ``"detach": true`` spawns the child in
+       its own session (``setsid``, stdio to ``/dev/null``) and replies
+       immediately with ``command_started`` carrying its PID — the WM does not
+       wait for it or capture output, so one long-lived WM can launch many
+       independent jobs. ``timeout_ms`` is ignored with ``detach``. Gated by the
+       automation gate.
    * - ``{"type": "set_gamma", "output": null, "temperature": 3000, "brightness": null, "gamma": null}``
      - Drive the color temperature of an output's CRTC gamma ramp (the
        same machinery ``zwlr_gamma_control_v1`` clients like gammastep
@@ -711,6 +719,11 @@ The server replies with a single JSON object tagged by ``type``:
     child's real code; ``-1`` means killed by signal (typically the
     timeout-driven ``SIGKILL``). ``truncated`` is true if either
     stream exceeded the 64 KiB cap.
+
+``command_started``
+    ``{"type": "command_started", "pid": <int>}``. The reply to a
+    ``run_command`` with ``"detach": true`` — the child's PID. The WM does not
+    wait for it or capture output; the caller owns its lifetime.
 
 .. _ipc-metrics:
 

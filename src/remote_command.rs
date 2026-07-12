@@ -77,6 +77,8 @@ impl ShoestringWm {
         client: Rc<RefCell<crate::ipc::Client>>,
         argv: &[String],
         timeout_ms: Option<u32>,
+        cwd: Option<&str>,
+        env: &[(String, String)],
     ) -> Result<()> {
         anyhow::ensure!(!argv.is_empty(), "run_command: argv must be non-empty");
 
@@ -85,6 +87,7 @@ impl ShoestringWm {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        apply_cwd_env(&mut cmd, cwd, env);
 
         let mut child = cmd
             .spawn()
@@ -140,6 +143,45 @@ impl ShoestringWm {
 
         tracing::info!(?argv, ?timeout_ms, "remote command started");
         Ok(())
+    }
+
+    /// Spawn a `run_command` with `detach: true`: its own session (`setsid`,
+    /// so it outlives the request and isn't in the WM's process group), stdio
+    /// to `/dev/null`, no pipes and no pending-command bookkeeping. Returns the
+    /// child PID. When it exits, the global SIGCHLD reaper collects it (see
+    /// [`ShoestringWm::note_child_reaped`], which lets unmatched pids go), so it
+    /// never zombies while the WM lives.
+    pub(crate) fn spawn_detached_command(
+        &mut self,
+        argv: &[String],
+        cwd: Option<&str>,
+        env: &[(String, String)],
+    ) -> Result<i32> {
+        use std::os::unix::process::CommandExt;
+        anyhow::ensure!(!argv.is_empty(), "run_command: argv must be non-empty");
+
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apply_cwd_env(&mut cmd, cwd, env);
+        // New session: detaches from the WM's controlling terminal / process
+        // group so a signal aimed at the WM doesn't take the child with it.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("spawn {:?}", argv[0]))?;
+        let pid = child.id() as i32;
+        // Drop the Child handle: we deliberately do not wait on it. The global
+        // SIGCHLD reaper waitpid()s it on exit.
+        tracing::info!(?argv, pid, "detached command started");
+        Ok(pid)
     }
 
     fn next_remote_command_id(&mut self) -> u64 {
@@ -241,6 +283,19 @@ impl ShoestringWm {
 enum PipeKind {
     Stdout,
     Stderr,
+}
+
+/// Apply a `run_command`'s optional `cwd` and extra `env` pairs to a
+/// [`Command`](std::process::Command). The env pairs layer onto the WM's
+/// inherited environment (they don't clear it), so `WAYLAND_DISPLAY` etc.
+/// survive; a repeated key takes its last value.
+fn apply_cwd_env(cmd: &mut std::process::Command, cwd: Option<&str>, env: &[(String, String)]) {
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
 }
 
 fn register_pipe<T>(
