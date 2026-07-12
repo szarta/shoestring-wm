@@ -239,6 +239,14 @@ fn main() -> Result<()> {
     // nested instance's now-throwaway displays.
     state.session_integration = matches!(backend, BackendKind::Tty);
 
+    // Nested/automation backends become their own process-group leader before
+    // spawning any children, so the IPC `shutdown` request can SIGTERM the whole
+    // group (our children) without ever reaching the parent. The live tty
+    // session keeps the session's group untouched (systemd scopes its cleanup).
+    if !state.session_integration {
+        establish_process_group();
+    }
+
     match backend {
         BackendKind::Winit => {
             #[cfg(feature = "winit")]
@@ -330,7 +338,37 @@ fn main() -> Result<()> {
     event_loop.run(None, &mut state, |state| {
         state.refresh_pointer_focus();
     })?;
+
+    // The event loop stopped (Quit keybind or IPC `shutdown`). smithay's Wayland
+    // listener does not remove its socket + lock on drop, so unlink them here —
+    // a stale $XDG_RUNTIME_DIR/wayland-N{,.lock} otherwise lingers and blocks
+    // that display name's reuse on the next run. The IPC socket is unlinked by
+    // `ipc::Server`'s Drop.
+    unlink_wayland_socket(&state.socket_name);
     Ok(())
+}
+
+/// Remove the Wayland display socket and its `.lock` for `socket_name` (e.g.
+/// `wayland-1`) under `$XDG_RUNTIME_DIR`. No-op when the name is empty (the
+/// headless client-injection path opens no socket) or the files are already
+/// gone. Best-effort — this is teardown and nothing downstream depends on it.
+fn unlink_wayland_socket(socket_name: &std::ffi::OsStr) {
+    if socket_name.is_empty() {
+        return;
+    }
+    let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return;
+    };
+    let base = std::path::Path::new(&rt);
+    let mut lock_name = socket_name.to_os_string();
+    lock_name.push(".lock");
+    for p in [base.join(socket_name), base.join(&lock_name)] {
+        match std::fs::remove_file(&p) {
+            Ok(()) => tracing::debug!(path = %p.display(), "unlinked wayland socket file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(path = %p.display(), error = %e, "unlink wayland socket"),
+        }
+    }
 }
 
 fn write_default_config(path: Option<&std::path::Path>, force: bool) -> Result<()> {
@@ -603,6 +641,22 @@ fn sd_notify_ready() {
         tracing::warn!(error = %std::io::Error::last_os_error(), "sd_notify: sendto() failed");
     } else {
         tracing::info!("sd_notify READY=1 sent");
+    }
+}
+
+/// Make this process its own process-group leader (`setpgid(0, 0)`), so a later
+/// `kill(-pgid)` from the IPC `shutdown` reaches our children but never the
+/// parent. Best-effort: `EPERM` means we're already a session leader (already
+/// our own group), which is exactly what we wanted, so the error is ignored.
+/// Called only for nested backends — see the call site.
+pub(crate) fn establish_process_group() {
+    // SAFETY: setpgid with (0, 0) has no memory effects and only moves this
+    // process into a new group led by itself.
+    if unsafe { libc::setpgid(0, 0) } != 0 {
+        tracing::debug!(
+            error = %std::io::Error::last_os_error(),
+            "setpgid(0,0) skipped (already a session/group leader?)"
+        );
     }
 }
 

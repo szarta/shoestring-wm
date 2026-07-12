@@ -194,6 +194,12 @@ enum Command {
     /// (`general.lock_command` in the WM config, default
     /// `shoestring-lock`).
     Lock,
+    /// Quit the window manager cleanly (not the machine — that's `power off`).
+    /// Signals the WM's process group so its children exit too, then stops the
+    /// compositor, unlinking the IPC and Wayland sockets. Unlike the Quit
+    /// keybind there's no confirmation prompt — the deterministic teardown for
+    /// scripted / batch sessions. Requires the automation gate.
+    Shutdown,
     /// Read or toggle the runtime automation gate. Affects future
     /// inject_* / remote-automation IPC calls. Not persisted to disk;
     /// the WM's config file is the source of truth at next start.
@@ -627,6 +633,7 @@ fn main() -> Result<()> {
         Command::MoveMouse { x, y } => Request::MoveMouse { x, y },
         Command::PointerPosition => Request::PointerPosition,
         Command::Lock => Request::Lock,
+        Command::Shutdown => Request::Shutdown,
         Command::Automation { action } => match action {
             AutomationAction::On => Request::SetAutomation { enabled: true },
             AutomationAction::Off => Request::SetAutomation { enabled: false },

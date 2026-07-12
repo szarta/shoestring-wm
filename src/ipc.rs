@@ -442,6 +442,20 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &Response::Ok);
                 return true;
             }
+            Request::Shutdown => {
+                // Automation-gated, no confirmation: the scripted teardown path.
+                // Reply Ok first so the caller sees success, then signal the
+                // process group and stop the loop (which unlinks the sockets on
+                // drop). Marked spent is unnecessary — we exit immediately.
+                if !state.automation_enabled {
+                    let _ = write_response(client, &automation_off_error());
+                    return true;
+                }
+                tracing::info!("shutdown requested via ipc; tearing down");
+                let _ = write_response(client, &Response::Ok);
+                state.shutdown();
+                return true;
+            }
             Request::PowerOff => {
                 // Ungated, like Quit: the confirm dialog is the authorization.
                 // Reply Ok once the dialog is up, not on acceptance.

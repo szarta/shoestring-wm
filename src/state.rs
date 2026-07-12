@@ -927,6 +927,32 @@ impl ShoestringWm {
         let _ = self.note_screenshot_reaped(pid, status) || self.note_command_reaped(pid, status);
     }
 
+    /// Clean teardown for the IPC `Shutdown` request. Signals the process group
+    /// so our children (bar, `-C` command, XWayland, autostart) exit with us,
+    /// then stops the event loop; `main` then returns and drops the IPC/Wayland
+    /// listeners, unlinking their sockets.
+    ///
+    /// The group signal only fires when we are the group leader (nested backends
+    /// call [`establish_process_group`](crate::establish_process_group) at
+    /// startup), so `kill(-pgid)` can only reach our own descendants, never the
+    /// parent session. `kill(-pgid)` would also hit us, so we set `SIGTERM` to
+    /// `SIG_IGN` first and reach the clean stop below instead of dying on it.
+    pub fn shutdown(&mut self) {
+        // SAFETY: plain libc process-control calls with no memory effects.
+        unsafe {
+            let pgid = libc::getpgrp();
+            if pgid == libc::getpid() {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::kill(-pgid, libc::SIGTERM);
+                tracing::info!(pgid, "shutdown: signalled process group");
+            } else {
+                tracing::info!(pgid, "shutdown: not group leader, skipping group signal");
+            }
+        }
+        self.loop_signal.stop();
+        self.loop_signal.wakeup();
+    }
+
     /// Register the display dispatch source, and — when `open_socket` is set —
     /// a Wayland listening socket. Returns the socket name when one was opened
     /// (`None` in the headless/WLCS path, which injects clients directly). The

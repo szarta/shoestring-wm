@@ -245,6 +245,18 @@ pub enum Request {
     /// like [`PowerOff`](Self::PowerOff); fallback chain is
     /// `systemctl suspend` → `loginctl suspend` → `zzz` (FreeBSD).
     Suspend,
+    /// Quit the **window manager** cleanly for scripted teardown (not the
+    /// machine — that's [`PowerOff`](Self::PowerOff)). Signals the WM's process
+    /// group so its children (autostart apps, the `-C` command, XWayland, and
+    /// anything else that stayed in the group) exit with it, then stops the
+    /// event loop — which drops the IPC and Wayland listeners and unlinks their
+    /// sockets, so no stale `…-wayland-N.sock` / `.lock` lingers. Unlike the
+    /// `Quit` keybind it does not prompt for confirmation. The process-group
+    /// signal only fires when the WM is its own group leader (nested backends
+    /// make themselves one at startup), so it can never reach the parent
+    /// session. Gated by `set_automation`. Reply is [`Response::Ok`], written
+    /// just before the loop stops.
+    Shutdown,
     /// Toggle the runtime automation gate (see
     /// `general.automation_enabled`). Reply is [`Response::Automation`]
     /// with the new state; an [`Event::AutomationChanged`] is broadcast
@@ -1328,6 +1340,14 @@ mod tests {
         assert_eq!(s, r#"{"type":"event_stream"}"#);
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Request::EventStream));
+
+        // Shutdown is a bare unit variant, distinct from the machine PowerOff.
+        assert_eq!(
+            serde_json::to_string(&Request::Shutdown).unwrap(),
+            r#"{"type":"shutdown"}"#
+        );
+        let back: Request = serde_json::from_str(r#"{"type":"shutdown"}"#).unwrap();
+        assert!(matches!(back, Request::Shutdown));
     }
 
     #[test]

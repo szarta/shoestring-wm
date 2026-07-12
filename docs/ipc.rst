@@ -405,6 +405,18 @@ Each request is a JSON object with a ``type`` discriminator:
        **Ungated**: the human confirmation *is* the authorization, so the
        bar's control menu can offer Log out without the automation gate
        that ``dispatch_action {"type":"quit"}`` requires.
+   * - ``{"type": "shutdown"}``
+     - Quit the WM **without** a confirmation prompt — the deterministic
+       teardown for scripted / batch sessions (not the machine; that's
+       ``power_off``). Signals the WM's process group so its children
+       (autostart apps, the ``-C`` command, XWayland, …) exit with it, then
+       stops the compositor, which unlinks the IPC and Wayland sockets so no
+       stale ``…-wayland-N.sock`` / ``wayland-N`` / ``.lock`` lingers. The
+       group signal fires only when the WM is its own group leader — nested
+       backends make themselves one at startup, the live tty session does
+       not — so it can never reach the parent session. Reply is ``ok``, sent
+       just before the loop stops. **Gated** by the automation gate (so a
+       stray socket client can't kill a desktop session).
    * - ``{"type": "power_off"}`` / ``{"type": "reboot"}`` / ``{"type": "suspend"}``
      - Shut down / reboot / suspend the machine. Each pops the same
        confirm dialog as ``quit`` and only acts on *Yes*; reply is ``ok``
@@ -615,7 +627,7 @@ The following requests refuse with an ``error`` while
 it): ``inject_key``, ``inject_text``, ``inject_click``,
 ``inject_click_to_window``, ``drag``, ``move_mouse``,
 ``inject_input``, ``get_clipboard``, ``set_clipboard``, ``paste``,
-``dispatch_action``,
+``dispatch_action``, ``shutdown``,
 ``screenshot``, ``screenshot_window``, ``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
