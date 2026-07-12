@@ -88,7 +88,7 @@ impl ShoestringWm {
 
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("spawn {:?}", &argv[0]))?;
+            .with_context(|| format!("spawn {:?}", argv[0]))?;
         let stdout = child
             .stdout
             .take()
