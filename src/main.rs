@@ -82,6 +82,15 @@ struct Cli {
     #[arg(long)]
     enable_automation: bool,
 
+    /// Virtual output mode size (pixels) for the headless backend, as
+    /// `WIDTHxHEIGHT` (e.g. `1360x856`). Gives batch automation a fixed,
+    /// reproducible output so coordinate-based clicks stay valid across runs.
+    /// The logical size clients see is this divided by the output scale, so
+    /// automation typically pairs it with scale 1. Ignored by the winit and tty
+    /// backends. Sugar for `$SHOESTRING_WM_HEADLESS_SIZE`; this flag wins.
+    #[arg(long, value_name = "WxH")]
+    output_size: Option<String>,
+
     /// Log the Wayland wire protocol (every request from and event to each
     /// client) to stderr — the built-in equivalent of `WAYLAND_DEBUG=server`.
     /// Equivalent to `[debug].protocol_trace = true` in the config; either
@@ -155,6 +164,18 @@ fn maybe_enable_protocol_trace(enabled: bool) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // `--output-size WxH` is sugar for `$SHOESTRING_WM_HEADLESS_SIZE`, which the
+    // headless backend reads when it builds the virtual output. Validate up front
+    // — before any socket or fd is opened — so a typo fails startup with a clear
+    // message instead of silently defaulting to 1920x1080 deep in backend init;
+    // the flag overrides an inherited env value.
+    if let Some(spec) = &cli.output_size {
+        shoestring_wm::parse_output_size(spec).ok_or_else(|| {
+            anyhow::anyhow!("--output-size: expected WIDTHxHEIGHT (e.g. 1360x856), got {spec:?}")
+        })?;
+        std::env::set_var("SHOESTRING_WM_HEADLESS_SIZE", spec);
+    }
 
     init_tracing();
     // Defense-in-depth before anything opens fds: a higher ceiling buys the

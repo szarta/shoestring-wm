@@ -47,8 +47,9 @@ environment knobs:
     *guarantee* llvmpipe rather than letting Mesa pick the device.
 
 ``$SHOESTRING_WM_HEADLESS_SIZE``
-    Virtual output size as ``WIDTHxHEIGHT`` (e.g. ``2560x1440``).
-    Defaults to ``1920x1080``. A future remote client resizes the
+    Virtual output mode size as ``WIDTHxHEIGHT`` (e.g. ``2560x1440``).
+    Defaults to ``1920x1080``. The ``--output-size`` flag is sugar for
+    this and takes precedence. A future remote client resizes the
     virtual output to its own pixel size.
 
 Because the headless backend needs only an unprivileged render node — no seat,
@@ -71,6 +72,15 @@ Command-line flags
     Spawn ``CMD`` once the compositor is up. Defaults to
     ``weston-terminal``. The command is split on whitespace; quoting is
     not currently supported.
+
+``--output-size WxH``
+    Headless backend only: fix the virtual output's mode size in pixels
+    (e.g. ``1360x856``) instead of the ``1920x1080`` default. Gives batch
+    automation a stable, reproducible output so coordinate-based clicks
+    stay valid across runs. The logical size clients see is this divided
+    by the output scale, so automation usually pairs it with scale 1.
+    Sugar for ``$SHOESTRING_WM_HEADLESS_SIZE``; the flag wins. An invalid
+    spec fails startup rather than silently defaulting.
 
 ``--write-default-config``
     Write the bundled default config to the user config path (or to

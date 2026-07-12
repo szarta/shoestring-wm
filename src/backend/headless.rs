@@ -206,13 +206,7 @@ fn virtual_size() -> (i32, i32) {
         return DEFAULT_SIZE;
     };
     let spec = spec.to_string_lossy();
-    let parse = || -> Option<(i32, i32)> {
-        let (w, h) = spec.split_once(['x', 'X'])?;
-        let w: i32 = w.trim().parse().ok()?;
-        let h: i32 = h.trim().parse().ok()?;
-        (w > 0 && h > 0).then_some((w, h))
-    };
-    parse().unwrap_or_else(|| {
+    crate::parse_output_size(&spec).unwrap_or_else(|| {
         tracing::warn!(%spec, "invalid SHOESTRING_WM_HEADLESS_SIZE; using default");
         DEFAULT_SIZE
     })

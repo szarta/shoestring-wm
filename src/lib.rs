@@ -53,6 +53,17 @@ mod window_rules;
 mod workspace;
 mod xwayland;
 
+/// Parse a `WIDTHxHEIGHT` size spec (e.g. `1360x856`, case-insensitive `x`),
+/// returning `Some((w, h))` only for two strictly-positive integers. Shared by
+/// the `--output-size` CLI validation in `main` and the headless backend's
+/// virtual-output sizing so the two never disagree on what a valid spec is.
+pub fn parse_output_size(spec: &str) -> Option<(i32, i32)> {
+    let (w, h) = spec.split_once(['x', 'X'])?;
+    let w: i32 = w.trim().parse().ok()?;
+    let h: i32 = h.trim().parse().ok()?;
+    (w > 0 && h > 0).then_some((w, h))
+}
+
 /// Import the named environment variables into the systemd user manager via
 /// `systemctl --user import-environment`, so D-Bus-activated services (portals,
 /// notification daemons, …) inherit them. A no-op-with-warning when systemctl
