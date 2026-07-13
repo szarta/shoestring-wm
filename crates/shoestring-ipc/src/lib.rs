@@ -721,6 +721,53 @@ pub enum Request {
         mic_muted: bool,
         camera_active: bool,
     },
+    /// Block the connection until a toplevel matching `title` / `app_id`
+    /// **maps** (or, with `unmap: true`, until every currently-matching one
+    /// **unmaps**), then reply with [`Response::WaitWindow`]. Both filters are
+    /// regexes exactly like [`Request::FindWindows`] — each independent,
+    /// AND-ed, an unset filter matches anything.
+    ///
+    /// The synchronous replacement for sleep-polling [`Request::Windows`] in a
+    /// launch script: fire the app, then `wait_window` on its title/app_id and
+    /// act the instant it appears. If the condition already holds when the
+    /// request arrives (a match is already mapped; or, for `unmap`, none
+    /// matches) the reply is immediate. A map wait resolves when the window is
+    /// actually usable — for wayland clients that is the first commit carrying
+    /// a real title/app_id, not the bare toplevel creation.
+    ///
+    /// `timeout_ms` bounds the wait; on expiry the reply carries
+    /// `timed_out: true` and no window. Omit it to wait forever (until
+    /// satisfied or the client disconnects). Read-only observation — **not**
+    /// gated by automation (like [`Request::FindWindows`]).
+    WaitWindow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+        /// Wait for matching windows to unmap (close) instead of to map.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unmap: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u32>,
+    },
+    /// Block the connection until the compositor is ready, then reply with
+    /// [`Response::WaitReady`]. With `xwayland: true` the reply waits until
+    /// XWayland has started and `$DISPLAY` is exported — closing the boot race
+    /// where an X client launched at startup dies with
+    /// `nodrv_CreateWindow: no driver could be loaded` before XWayland (`:N`)
+    /// is up (previously worked around by grepping the WM log for
+    /// `xwayland ready`). Without `xwayland` the reply is immediate: the socket
+    /// having accepted this request is itself proof the compositor loop runs.
+    ///
+    /// `timeout_ms` bounds the XWayland wait; on expiry the reply carries
+    /// `timed_out: true` and `ready: false` (e.g. if XWayland failed to spawn).
+    /// Read-only coordination — **not** gated by automation.
+    WaitReady {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        xwayland: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u32>,
+    },
 }
 
 /// One raw input transition for [`Request::InjectInput`] — the low-level events
@@ -903,6 +950,25 @@ pub enum Response {
     /// does not wait for it or capture output — the caller owns its lifetime.
     CommandStarted {
         pid: i32,
+    },
+    /// Result of [`Request::WaitWindow`]. `window` is the toplevel that
+    /// satisfied a **map** wait (`None` for an `unmap` wait — the window is
+    /// gone — or on timeout). `timed_out` is `true` only when the wait hit its
+    /// `timeout_ms` deadline.
+    WaitWindow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<WindowSummary>,
+        timed_out: bool,
+    },
+    /// Result of [`Request::WaitReady`]. `ready` is `true` once the compositor
+    /// (and XWayland, if requested) is up; `display` is the X display string
+    /// (`":1"`) when an XWayland wait was satisfied, else `None`. `timed_out`
+    /// is `true` when the wait hit its deadline (and then `ready` is `false`).
+    WaitReady {
+        ready: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        timed_out: bool,
     },
     /// Result of [`Request::PickWindow`]. `window` is `Some` when the
     /// user clicked a toplevel, `None` if they cancelled (Escape /
@@ -1348,6 +1414,48 @@ mod tests {
         );
         let back: Request = serde_json::from_str(r#"{"type":"shutdown"}"#).unwrap();
         assert!(matches!(back, Request::Shutdown));
+
+        // wait_window: optional filters/unmap/timeout all skip when absent, so
+        // the minimal form is just the tag; and it round-trips with fields set.
+        assert_eq!(
+            serde_json::to_string(&Request::WaitWindow {
+                title: None,
+                app_id: None,
+                unmap: false,
+                timeout_ms: None,
+            })
+            .unwrap(),
+            r#"{"type":"wait_window"}"#
+        );
+        let w: Request = serde_json::from_str(
+            r#"{"type":"wait_window","app_id":"^Stars$","unmap":true,"timeout_ms":5000}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            w,
+            Request::WaitWindow { app_id: Some(ref a), unmap: true, timeout_ms: Some(5000), title: None }
+                if a == "^Stars$"
+        ));
+
+        // wait_ready: bare form, and the xwayland variant.
+        assert_eq!(
+            serde_json::to_string(&Request::WaitReady {
+                xwayland: false,
+                timeout_ms: None,
+            })
+            .unwrap(),
+            r#"{"type":"wait_ready"}"#
+        );
+        let r: Request =
+            serde_json::from_str(r#"{"type":"wait_ready","xwayland":true,"timeout_ms":30000}"#)
+                .unwrap();
+        assert!(matches!(
+            r,
+            Request::WaitReady {
+                xwayland: true,
+                timeout_ms: Some(30000)
+            }
+        ));
     }
 
     #[test]

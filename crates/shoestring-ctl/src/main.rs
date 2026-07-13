@@ -190,6 +190,38 @@ enum Command {
     /// `{"type":"pointer_position","x":...,"y":...}`. Read-only and not
     /// gated by automation.
     PointerPosition,
+    /// Block until a toplevel matching --title / --app-id maps (or, with
+    /// --unmap, until every currently-matching one closes), then print it.
+    /// Filters are regexes like `find-windows` (unset matches anything). The
+    /// synchronous replacement for sleeping and re-running `windows`: launch an
+    /// app, then `wait-window --app-id '^Stars$'`. Exits 2 (not 1) on timeout so
+    /// scripts can tell "timed out" from a real error. Read-only, not gated.
+    WaitWindow {
+        /// Regex matched against the window title.
+        #[arg(short, long)]
+        title: Option<String>,
+        /// Regex matched against the window app_id.
+        #[arg(short, long)]
+        app_id: Option<String>,
+        /// Wait for matching windows to close instead of to appear.
+        #[arg(long)]
+        unmap: bool,
+        /// Give up after MS milliseconds (exit 2). 0 = wait forever.
+        #[arg(long, value_name = "MS", default_value_t = 10_000)]
+        timeout: u32,
+    },
+    /// Block until the compositor is ready. With --xwayland, wait until XWayland
+    /// is up and $DISPLAY is exported — the fix for launching X11 apps (wine,
+    /// Stars!) at startup without racing XWayland. Without it, returns as soon
+    /// as the WM answers. Exits 2 on timeout. Read-only, not gated.
+    WaitReady {
+        /// Also wait for XWayland ($DISPLAY exported).
+        #[arg(long)]
+        xwayland: bool,
+        /// Give up after MS milliseconds (exit 2). 0 = wait forever.
+        #[arg(long, value_name = "MS", default_value_t = 10_000)]
+        timeout: u32,
+    },
     /// Lock the session. Spawns the WM's configured lock binary
     /// (`general.lock_command` in the WM config, default
     /// `shoestring-lock`).
@@ -632,6 +664,22 @@ fn main() -> Result<()> {
         }
         Command::MoveMouse { x, y } => Request::MoveMouse { x, y },
         Command::PointerPosition => Request::PointerPosition,
+        Command::WaitWindow {
+            title,
+            app_id,
+            unmap,
+            timeout,
+        } => Request::WaitWindow {
+            title,
+            app_id,
+            unmap,
+            // 0 = wait forever (protocol treats a missing timeout that way).
+            timeout_ms: (timeout != 0).then_some(timeout),
+        },
+        Command::WaitReady { xwayland, timeout } => Request::WaitReady {
+            xwayland,
+            timeout_ms: (timeout != 0).then_some(timeout),
+        },
         Command::Lock => Request::Lock,
         Command::Shutdown => Request::Shutdown,
         Command::Automation { action } => match action {
@@ -814,6 +862,20 @@ fn main() -> Result<()> {
         let _ = std::fs::remove_file(tmp);
     } else {
         print_value(&response, cli.pretty)?;
+        // A satisfied wait exits 0; a timed-out one exits 2 so scripts can tell
+        // "the thing never happened" from a genuine server error (exit 1).
+        if matches!(
+            &response,
+            Response::WaitWindow {
+                timed_out: true,
+                ..
+            } | Response::WaitReady {
+                timed_out: true,
+                ..
+            }
+        ) {
+            std::process::exit(2);
+        }
     }
 
     Ok(())

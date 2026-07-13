@@ -25,7 +25,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{ErrorKind, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
@@ -39,7 +39,9 @@ use shoestring_ipc::{
     WindowGeometry, WindowNode, WindowSummary, WorkspaceNode, SOCKET_ENV,
 };
 use smithay::reexports::calloop::{
-    generic::Generic, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+    generic::Generic,
+    timer::{TimeoutAction, Timer},
+    Interest, LoopHandle, Mode, PostAction, RegistrationToken,
 };
 
 use crate::state::ShoestringWm;
@@ -100,6 +102,46 @@ impl Client {
     pub(crate) fn stream_mut(&mut self) -> &mut UnixStream {
         &mut self.stream
     }
+}
+
+/// A connection parked on [`Request::WaitWindow`] until a matching toplevel
+/// maps/unmaps or the timeout fires. The reply is deferred exactly like the
+/// screenshot / run_command finalizers: the connection is held open (`spent`)
+/// and resolved later from an event hook or the timer.
+pub(crate) struct PendingWaitWindow {
+    client_id: ClientId,
+    client: Rc<RefCell<Client>>,
+    /// Compiled title filter (`None` matches any title). Reused on every
+    /// map re-evaluation so a wayland window that maps title-less and gains
+    /// its title on a later commit is matched when the title finally arrives.
+    title_re: Option<regex::Regex>,
+    /// Compiled app_id filter (`None` matches any app_id).
+    app_id_re: Option<regex::Regex>,
+    /// `unmap` mode only: the window ids that matched at request time and
+    /// haven't closed yet. The wait resolves when this drains to empty. Empty
+    /// (and unused) for a map wait.
+    watch_ids: HashSet<String>,
+    /// `true` = wait for the matching windows to unmap; `false` = to map.
+    unmap: bool,
+    /// The timeout timer, cancelled if the wait is satisfied first. `None`
+    /// when the request set no `timeout_ms` (wait forever).
+    timer_token: Option<RegistrationToken>,
+}
+
+/// A connection parked on [`Request::WaitReady`] until XWayland is ready or
+/// the timeout fires. Only the `xwayland: true` case parks — a plain readiness
+/// check replies immediately.
+pub(crate) struct PendingWaitReady {
+    client_id: ClientId,
+    client: Rc<RefCell<Client>>,
+    timer_token: Option<RegistrationToken>,
+}
+
+/// Which parked-wait list a timeout timer should finalize.
+#[derive(Debug, Clone, Copy)]
+enum WaitKind {
+    Window,
+    Ready,
 }
 
 /// Per-connection state for a `metrics` stream subscriber.
@@ -1307,6 +1349,20 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 let _ = write_response(client, &resp);
                 return true;
             }
+            Request::WaitWindow {
+                title,
+                app_id,
+                unmap,
+                timeout_ms,
+            } => {
+                return state.handle_wait_window(id, client, title, app_id, unmap, timeout_ms);
+            }
+            Request::WaitReady {
+                xwayland,
+                timeout_ms,
+            } => {
+                return state.handle_wait_ready(id, client, xwayland, timeout_ms);
+            }
         }
     }
 }
@@ -1814,6 +1870,353 @@ impl ShoestringWm {
             self.drop_ipc_client(id);
         }
         self.metrics.record_subscribers_dropped(dropped);
+
+        // Resolve any `wait_window` connections keyed to this event. A window
+        // maps (WindowOpened) or gains its title on a later commit
+        // (WindowTitleChanged) — the latter is where a wayland toplevel, which
+        // opens title-less, becomes matchable; X11 windows already carry their
+        // title at WindowOpened. Either way we re-scan the full window set, so
+        // it doesn't matter which event fired.
+        match &event {
+            Event::WindowOpened { .. } | Event::WindowTitleChanged { .. } => {
+                self.resolve_map_waiters();
+            }
+            Event::WindowClosed { id } => {
+                let closed = id.clone();
+                self.resolve_unmap_waiters(&closed);
+            }
+            _ => {}
+        }
+    }
+
+    /// Park a connection on [`Request::WaitWindow`]. Replies immediately when
+    /// the condition already holds (a match is mapped; or, for `unmap`, none
+    /// is); otherwise registers a [`PendingWaitWindow`] resolved later from
+    /// [`Self::emit_ipc`] or the timeout. Returns the drop-me bool the dispatch
+    /// loop expects (`true` = replied + close now, `false` = held open).
+    pub(crate) fn handle_wait_window(
+        &mut self,
+        id: ClientId,
+        client: &Rc<RefCell<Client>>,
+        title: Option<String>,
+        app_id: Option<String>,
+        unmap: bool,
+        timeout_ms: Option<u32>,
+    ) -> bool {
+        // Compile filters up front so a bad regex is a clean immediate error
+        // rather than a wait that can never match.
+        let title_re = match title.as_deref().map(regex::Regex::new).transpose() {
+            Ok(re) => re,
+            Err(e) => {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: format!("wait_window: title regex invalid: {e}"),
+                    },
+                );
+                return true;
+            }
+        };
+        let app_id_re = match app_id.as_deref().map(regex::Regex::new).transpose() {
+            Ok(re) => re,
+            Err(e) => {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: format!("wait_window: app_id regex invalid: {e}"),
+                    },
+                );
+                return true;
+            }
+        };
+
+        // Snapshot the windows matching right now. Borrows of the regexes end
+        // at `.collect()`, so they can move into the pending entry below.
+        let current: Vec<WindowSummary> = collect_windows(self)
+            .into_iter()
+            .filter(|w| {
+                title_re.as_ref().is_none_or(|re| re.is_match(&w.title))
+                    && app_id_re.as_ref().is_none_or(|re| re.is_match(&w.app_id))
+            })
+            .collect();
+
+        let mut watch_ids = HashSet::new();
+        if unmap {
+            // Nothing matches ⇒ already unmapped; resolve immediately.
+            if current.is_empty() {
+                let _ = write_response(
+                    client,
+                    &Response::WaitWindow {
+                        window: None,
+                        timed_out: false,
+                    },
+                );
+                return true;
+            }
+            watch_ids = current.into_iter().map(|w| w.id).collect();
+        } else if let Some(w) = current.into_iter().next() {
+            // A match is already mapped ⇒ resolve immediately with it.
+            let _ = write_response(
+                client,
+                &Response::WaitWindow {
+                    window: Some(w),
+                    timed_out: false,
+                },
+            );
+            return true;
+        }
+
+        // Not yet satisfied: hold the connection open and register the waiter.
+        client.borrow_mut().spent = true;
+        let timer_token = self.arm_wait_timer(id, timeout_ms, WaitKind::Window);
+        self.pending_wait_windows.push(PendingWaitWindow {
+            client_id: id,
+            client: Rc::clone(client),
+            title_re,
+            app_id_re,
+            watch_ids,
+            unmap,
+            timer_token,
+        });
+        false
+    }
+
+    /// Park a connection on [`Request::WaitReady`]. A plain readiness check
+    /// (`xwayland: false`) replies immediately — the socket having accepted the
+    /// request proves the loop runs. An `xwayland` check replies immediately if
+    /// `$DISPLAY` is already exported, else parks a [`PendingWaitReady`]
+    /// resolved from the `XWaylandEvent::Ready` handler or the timeout.
+    pub(crate) fn handle_wait_ready(
+        &mut self,
+        id: ClientId,
+        client: &Rc<RefCell<Client>>,
+        xwayland: bool,
+        timeout_ms: Option<u32>,
+    ) -> bool {
+        if !xwayland {
+            let _ = write_response(
+                client,
+                &Response::WaitReady {
+                    ready: true,
+                    display: None,
+                    timed_out: false,
+                },
+            );
+            return true;
+        }
+        if let Some(n) = self.xdisplay {
+            let _ = write_response(
+                client,
+                &Response::WaitReady {
+                    ready: true,
+                    display: Some(format!(":{n}")),
+                    timed_out: false,
+                },
+            );
+            return true;
+        }
+        client.borrow_mut().spent = true;
+        let timer_token = self.arm_wait_timer(id, timeout_ms, WaitKind::Ready);
+        self.pending_wait_ready.push(PendingWaitReady {
+            client_id: id,
+            client: Rc::clone(client),
+            timer_token,
+        });
+        false
+    }
+
+    /// Insert the timeout timer for a parked wait. `None` when `timeout_ms` is
+    /// absent (wait forever) or the source can't be inserted. On fire it routes
+    /// to the matching timeout handler by `client_id`, then drops the source.
+    fn arm_wait_timer(
+        &mut self,
+        id: ClientId,
+        timeout_ms: Option<u32>,
+        kind: WaitKind,
+    ) -> Option<RegistrationToken> {
+        let ms = timeout_ms?;
+        let timer = Timer::from_duration(Duration::from_millis(ms as u64));
+        self.loop_handle
+            .insert_source(timer, move |_, _, state| {
+                match kind {
+                    WaitKind::Window => state.on_wait_window_timeout(id),
+                    WaitKind::Ready => state.on_wait_ready_timeout(id),
+                }
+                TimeoutAction::Drop
+            })
+            .map_err(|e| tracing::warn!(error = %e, "insert wait timer"))
+            .ok()
+    }
+
+    /// Re-evaluate every `map` waiter against the current window set; resolve
+    /// (reply + close) any whose filter now matches a mapped window. Called on
+    /// every WindowOpened / WindowTitleChanged.
+    fn resolve_map_waiters(&mut self) {
+        if !self.pending_wait_windows.iter().any(|p| !p.unmap) {
+            return;
+        }
+        let current = collect_windows(self);
+        let mut finished: Vec<(PendingWaitWindow, WindowSummary)> = Vec::new();
+        let mut i = 0;
+        while i < self.pending_wait_windows.len() {
+            let matched = {
+                let p = &self.pending_wait_windows[i];
+                if p.unmap {
+                    None
+                } else {
+                    current
+                        .iter()
+                        .find(|w| {
+                            p.title_re.as_ref().is_none_or(|re| re.is_match(&w.title))
+                                && p.app_id_re.as_ref().is_none_or(|re| re.is_match(&w.app_id))
+                        })
+                        .cloned()
+                }
+            };
+            if let Some(w) = matched {
+                finished.push((self.pending_wait_windows.swap_remove(i), w));
+            } else {
+                i += 1;
+            }
+        }
+        for (p, w) in finished {
+            if let Some(t) = p.timer_token {
+                self.loop_handle.remove(t);
+            }
+            let _ = write_response(
+                &p.client,
+                &Response::WaitWindow {
+                    window: Some(w),
+                    timed_out: false,
+                },
+            );
+            self.drop_ipc_client(p.client_id);
+        }
+    }
+
+    /// Tick `unmap` waiters when a window closes: drop the closed id from each
+    /// watch set and resolve any that just drained to empty. Called on every
+    /// WindowClosed.
+    fn resolve_unmap_waiters(&mut self, closed_id: &str) {
+        let mut finished: Vec<PendingWaitWindow> = Vec::new();
+        let mut i = 0;
+        while i < self.pending_wait_windows.len() {
+            let done = {
+                let p = &mut self.pending_wait_windows[i];
+                p.unmap && {
+                    p.watch_ids.remove(closed_id);
+                    p.watch_ids.is_empty()
+                }
+            };
+            if done {
+                finished.push(self.pending_wait_windows.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        for p in finished {
+            if let Some(t) = p.timer_token {
+                self.loop_handle.remove(t);
+            }
+            let _ = write_response(
+                &p.client,
+                &Response::WaitWindow {
+                    window: None,
+                    timed_out: false,
+                },
+            );
+            self.drop_ipc_client(p.client_id);
+        }
+    }
+
+    /// Resolve every parked [`Request::WaitReady`] once XWayland is up. Called
+    /// from the `XWaylandEvent::Ready` handler after `$DISPLAY` is exported.
+    pub(crate) fn resolve_ready_waiters(&mut self) {
+        let Some(n) = self.xdisplay else {
+            return;
+        };
+        let display = format!(":{n}");
+        for p in std::mem::take(&mut self.pending_wait_ready) {
+            if let Some(t) = p.timer_token {
+                self.loop_handle.remove(t);
+            }
+            let _ = write_response(
+                &p.client,
+                &Response::WaitReady {
+                    ready: true,
+                    display: Some(display.clone()),
+                    timed_out: false,
+                },
+            );
+            self.drop_ipc_client(p.client_id);
+        }
+    }
+
+    /// Timeout finalizer for a `wait_window`: reply `timed_out` and close. The
+    /// timer source has already been dropped by `TimeoutAction::Drop`, so the
+    /// stored token is stale — we just discard the entry.
+    pub(crate) fn on_wait_window_timeout(&mut self, id: ClientId) {
+        if let Some(pos) = self
+            .pending_wait_windows
+            .iter()
+            .position(|p| p.client_id == id)
+        {
+            let p = self.pending_wait_windows.swap_remove(pos);
+            let _ = write_response(
+                &p.client,
+                &Response::WaitWindow {
+                    window: None,
+                    timed_out: true,
+                },
+            );
+            self.drop_ipc_client(p.client_id);
+        }
+    }
+
+    /// Timeout finalizer for a `wait_ready`: reply `ready: false, timed_out`.
+    pub(crate) fn on_wait_ready_timeout(&mut self, id: ClientId) {
+        if let Some(pos) = self
+            .pending_wait_ready
+            .iter()
+            .position(|p| p.client_id == id)
+        {
+            let p = self.pending_wait_ready.swap_remove(pos);
+            let _ = write_response(
+                &p.client,
+                &Response::WaitReady {
+                    ready: false,
+                    display: None,
+                    timed_out: true,
+                },
+            );
+            self.drop_ipc_client(p.client_id);
+        }
+    }
+
+    /// Drop any parked waits owned by a disconnecting connection, cancelling
+    /// their timers. A no-op when called from a wait's own finalizer (the entry
+    /// is already removed) — it only bites when the client hangs up mid-wait.
+    fn cancel_waits_owned_by(&mut self, id: ClientId) {
+        let mut tokens: Vec<RegistrationToken> = Vec::new();
+        self.pending_wait_windows.retain(|p| {
+            if p.client_id == id {
+                tokens.extend(p.timer_token);
+                false
+            } else {
+                true
+            }
+        });
+        self.pending_wait_ready.retain(|p| {
+            if p.client_id == id {
+                tokens.extend(p.timer_token);
+                false
+            } else {
+                true
+            }
+        });
+        for t in tokens {
+            self.loop_handle.remove(t);
+        }
     }
 
     /// Push the current metrics snapshot to every `metrics` subscriber
@@ -1880,6 +2283,11 @@ impl ShoestringWm {
         // client disconnects before the user resolves the pick, the
         // session must end (no one to deliver the reply to).
         self.cancel_picker_if_owned_by(id);
+
+        // Likewise release any parked wait_window / wait_ready owned by this
+        // connection (and cancel their timers). A no-op when we're being called
+        // from a wait's own finalizer — that already removed the entry.
+        self.cancel_waits_owned_by(id);
 
         // If the registered remote server's connection dropped, the server is
         // gone: clear registration and force the remote gate off (no server ⇒

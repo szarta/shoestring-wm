@@ -110,6 +110,9 @@ impl ShoestringWm {
                     }
                     tracing::info!(display = %display_str, "xwayland ready");
                     state.refresh_xwayland_cursor();
+                    // Release any `wait_ready { xwayland: true }` connections now
+                    // that $DISPLAY is valid — the startup-race fix (task 192).
+                    state.resolve_ready_waiters();
                 }
                 XWaylandEvent::Error => {
                     tracing::warn!("xwayland crashed on startup");

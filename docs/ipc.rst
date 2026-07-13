@@ -284,6 +284,27 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "pointer_position"}``
      - Read the current pointer location. Reply is ``pointer_position``.
        Read-only and not gated by automation.
+   * - ``{"type": "wait_window", "title": "...", "app_id": "...", "unmap": false, "timeout_ms": null}``
+     - Block the connection until a toplevel matching ``title`` / ``app_id``
+       **maps** (or, with ``"unmap": true``, until every currently-matching one
+       **unmaps**), then reply with ``wait_window``. Both filters are regexes
+       exactly like ``find_windows`` — independent, AND-ed, an unset filter
+       matches anything. The synchronous replacement for sleep-polling
+       ``windows`` in a launch script. If the condition already holds the reply
+       is immediate; a map wait resolves only once the window is actually usable
+       (for wayland clients that is the commit carrying a real title/app_id, not
+       the bare toplevel creation). ``timeout_ms`` (optional) bounds the wait; on
+       expiry the reply carries ``"timed_out": true`` and no window. Omit it to
+       wait forever. Read-only and **not** gated by automation.
+   * - ``{"type": "wait_ready", "xwayland": false, "timeout_ms": null}``
+     - Block until the compositor is ready, then reply with ``wait_ready``. With
+       ``"xwayland": true`` the reply waits until XWayland has started and
+       ``$DISPLAY`` is exported — closing the boot race where an X client
+       launched at startup dies before XWayland (``:N``) is up. Without it the
+       reply is immediate (the socket having accepted the request proves the
+       loop runs). ``timeout_ms`` (optional) bounds the XWayland wait; on expiry
+       the reply carries ``"timed_out": true`` and ``"ready": false``. Read-only
+       and **not** gated by automation.
    * - ``{"type": "pick_window"}``
      - Enter interactive picker mode: the WM waits for the user's next
        click and replies with ``picked_window``. Pointer/keyboard input
@@ -736,6 +757,23 @@ The server replies with a single JSON object tagged by ``type``:
     ``{"type": "command_started", "pid": <int>}``. The reply to a
     ``run_command`` with ``"detach": true`` — the child's PID. The WM does not
     wait for it or capture output; the caller owns its lifetime.
+
+``wait_window``
+    ``{"type": "wait_window", "window": WindowSummary | null, "timed_out": <bool>}``.
+    Reply to ``wait_window``. ``window`` is the toplevel that satisfied a
+    **map** wait (``null`` for an ``unmap`` wait — the window is gone — or on
+    timeout). ``timed_out`` is ``true`` only when the wait hit its
+    ``timeout_ms`` deadline. The ``shoestring-ctl wait-window`` client exits
+    ``2`` (not ``1``) on ``"timed_out": true`` so scripts distinguish "never
+    happened" from a real error.
+
+``wait_ready``
+    ``{"type": "wait_ready", "ready": <bool>, "display": ":N" | null, "timed_out": <bool>}``.
+    Reply to ``wait_ready``. ``ready`` is ``true`` once the compositor (and
+    XWayland, if requested) is up; ``display`` is the X display string when an
+    XWayland wait was satisfied, else absent. ``timed_out`` is ``true`` when the
+    wait hit its deadline (and then ``ready`` is ``false``). ``wait-ready`` also
+    exits ``2`` on timeout.
 
 .. _ipc-metrics:
 
