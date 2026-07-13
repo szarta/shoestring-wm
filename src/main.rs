@@ -270,7 +270,10 @@ fn main() -> Result<()> {
                 backend::headless::init_headless(&mut event_loop, &mut state)?;
             }
             #[cfg(not(feature = "headless"))]
-            anyhow::bail!("headless backend not compiled in");
+            anyhow::bail!(
+                "headless backend not compiled in — it ships in the default build; \
+                 this binary was built with --no-default-features without the `headless` feature"
+            );
         }
     }
 

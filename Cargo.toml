@@ -56,7 +56,12 @@ name = "shoestring-wm"
 path = "src/main.rs"
 
 [features]
-default = ["winit", "tty"]
+# headless is in the default set: it adds no new dependencies (the egl/gbm/gl
+# smithay features it needs are already pulled by `tty`), so `cargo install`,
+# the deb, and the rpm all ship the surfaceless backend that oracle / CI / batch
+# automation drives over SSH. The backend is selected at runtime (`--backend
+# headless`), so it costs nothing unless used. See docs/running.rst.
+default = ["winit", "tty", "headless"]
 # Marker that a real GLES renderer is compiled in. Both real backends pull
 # `smithay/renderer_gl` already (winit transitively via backend_winit, tty
 # explicitly); this exposed feature lets a backend-less consumer — the WLCS

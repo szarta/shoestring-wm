@@ -16,8 +16,10 @@ from the environment; all can be forced with ``--backend``.
               renders. Never auto-detected — request it explicitly with
               ``--backend headless``. The foundation for remote-desktop
               *serve mode*, and useful on its own for CI, the WLCS
-              harness, and automation. Compiled only when the
-              ``headless`` Cargo feature is enabled.
+              harness, and automation. Included in the default build (it
+              adds no dependencies the ``tty`` backend doesn't already
+              pull), so a stock ``cargo install`` / package has it; only a
+              ``--no-default-features`` build without ``headless`` omits it.
 ============  ===========================================================
 
 The headless backend prefers an unprivileged GPU render node — so it needs
@@ -65,8 +67,10 @@ Command-line flags
     ``$HOME/.config/...``).
 
 ``-b, --backend winit|tty|headless``
-    Override the auto-detected backend. ``headless`` is only available
-    when compiled with the ``headless`` Cargo feature.
+    Override the auto-detected backend. All three are in the default
+    build; only a ``--no-default-features`` build can drop one (a build
+    without the ``headless`` feature errors at startup if you pass
+    ``--backend headless``).
 
 ``-C, --command CMD``
     Spawn ``CMD`` once the compositor is up. Defaults to
