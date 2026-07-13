@@ -222,6 +222,32 @@ enum Command {
         #[arg(long, value_name = "MS", default_value_t = 10_000)]
         timeout: u32,
     },
+    /// Read a single pixel's colour at output-logical X,Y — a cheap UI-state
+    /// probe (is this indicator lit?) with no screenshot/OCR round-trip. Prints
+    /// `{"type":"pixel","r":..,"g":..,"b":..,"a":..}`. Requires the automation
+    /// gate; winit/headless backends only.
+    GetPixel {
+        /// Logical X coordinate on the output.
+        x: i32,
+        /// Logical Y coordinate on the output.
+        y: i32,
+        /// Output name (default: the first output).
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Hash the pixels of an output region — a cheap "did this change?" probe.
+    /// Prints `{"type":"region_hash","hash":..,"width":..,"height":..}`; compare
+    /// two runs to detect a repaint without diffing a screenshot. --region is
+    /// X,Y,W,H in output-logical coords (default: the whole output). Requires the
+    /// automation gate; winit/headless backends only.
+    HashRegion {
+        /// Region `X,Y,W,H` in output-logical coords (default: whole output).
+        #[arg(long, value_name = "X,Y,W,H")]
+        region: Option<String>,
+        /// Output name (default: the first output).
+        #[arg(short, long)]
+        output: Option<String>,
+    },
     /// Lock the session. Spawns the WM's configured lock binary
     /// (`general.lock_command` in the WM config, default
     /// `shoestring-lock`).
@@ -680,6 +706,11 @@ fn main() -> Result<()> {
             xwayland,
             timeout_ms: (timeout != 0).then_some(timeout),
         },
+        Command::GetPixel { x, y, output } => Request::GetPixel { output, x, y },
+        Command::HashRegion { region, output } => {
+            let region = region.as_deref().map(parse_region).transpose()?;
+            Request::HashRegion { output, region }
+        }
         Command::Lock => Request::Lock,
         Command::Shutdown => Request::Shutdown,
         Command::Automation { action } => match action {

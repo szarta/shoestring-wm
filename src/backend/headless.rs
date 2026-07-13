@@ -428,6 +428,8 @@ fn render_once(
     // One-shot per-window screenshots parked by the IPC handler, serviced here
     // where the renderer is in scope (same reason as graft above).
     crate::window_capture::process_pending_window_screenshots(state, renderer);
+    // One-shot get_pixel / hash_region probes, serviced the same way.
+    crate::screencopy::process_pending_probes(state, output, renderer, &elements, clear);
 
     // Diagnostics overlay on top of everything (index 0 = drawn first), added
     // after the capture pass so it stays out of captures.

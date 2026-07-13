@@ -174,6 +174,10 @@ pub fn init_winit(
                     // One-shot per-window screenshots parked by the IPC handler,
                     // serviced here where the renderer is in scope.
                     crate::window_capture::process_pending_window_screenshots(state, renderer);
+                    // One-shot get_pixel / hash_region probes, same deal.
+                    crate::screencopy::process_pending_probes(
+                        state, &output, renderer, &elements, clear,
+                    );
 
                     // Diagnostics overlay on top of everything (index 0 = drawn
                     // first), added after screencopy so it stays out of captures.

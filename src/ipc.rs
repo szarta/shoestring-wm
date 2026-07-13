@@ -1363,6 +1363,22 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             } => {
                 return state.handle_wait_ready(id, client, xwayland, timeout_ms);
             }
+            Request::GetPixel { output, x, y } => {
+                return state.handle_probe(
+                    id,
+                    client,
+                    output,
+                    crate::screencopy::ProbeTarget::Pixel { x, y },
+                );
+            }
+            Request::HashRegion { output, region } => {
+                return state.handle_probe(
+                    id,
+                    client,
+                    output,
+                    crate::screencopy::ProbeTarget::Region(region),
+                );
+            }
         }
     }
 }
@@ -2025,6 +2041,72 @@ impl ShoestringWm {
         false
     }
 
+    /// Park a `get_pixel` / `hash_region` probe (gated by automation) for the
+    /// next render tick. Resolves the target output now — `None` means the first
+    /// output — so a bad name errors immediately rather than parking forever.
+    /// Returns the drop-me bool (`true` = replied + close, `false` = held open).
+    pub(crate) fn handle_probe(
+        &mut self,
+        id: ClientId,
+        client: &Rc<RefCell<Client>>,
+        output: Option<String>,
+        target: crate::screencopy::ProbeTarget,
+    ) -> bool {
+        if !self.automation_enabled {
+            let _ = write_response(client, &automation_off_error());
+            return true;
+        }
+        // Offscreen output render is needed to read pixels back; the same
+        // backends that can do per-window offscreen render support it (winit,
+        // headless), and for the same reason udev can't — its renderer is
+        // borrowed from `self`, so a whole-`state` render helper would alias.
+        if !self.window_capture_supported {
+            let _ = write_response(
+                client,
+                &Response::Error {
+                    message: "probe: not supported on this backend (winit and headless only)"
+                        .into(),
+                },
+            );
+            return true;
+        }
+        let output_name = match output {
+            Some(name) => {
+                if self.space.outputs().any(|o| o.name() == name) {
+                    name
+                } else {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: format!("probe: no output named {name}"),
+                        },
+                    );
+                    return true;
+                }
+            }
+            None => match self.space.outputs().next().map(|o| o.name()) {
+                Some(name) => name,
+                None => {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "probe: no outputs".into(),
+                        },
+                    );
+                    return true;
+                }
+            },
+        };
+        client.borrow_mut().spent = true;
+        self.pending_probes.push(crate::screencopy::PendingProbe {
+            client_id: id,
+            client: Rc::clone(client),
+            output_name,
+            target,
+        });
+        false
+    }
+
     /// Insert the timeout timer for a parked wait. `None` when `timeout_ms` is
     /// absent (wait forever) or the source can't be inserted. On fire it routes
     /// to the matching timeout handler by `client_id`, then drops the source.
@@ -2217,6 +2299,9 @@ impl ShoestringWm {
         for t in tokens {
             self.loop_handle.remove(t);
         }
+        // Parked probes have no timer, just drop the entry so the next render
+        // tick doesn't render + write to a dead socket.
+        self.pending_probes.retain(|p| p.client_id != id);
     }
 
     /// Push the current metrics snapshot to every `metrics` subscriber

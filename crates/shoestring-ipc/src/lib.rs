@@ -768,6 +768,34 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u32>,
     },
+    /// Read a single pixel's colour from an output — a cheap UI-state probe
+    /// that skips the screenshot → PNG → decode round-trip. `output` selects the
+    /// output (default: the first); `x` / `y` are that output's **logical**
+    /// pixel coordinates (top-left origin), scaled to the physical pixel the WM
+    /// reads back. Reply is [`Response::Pixel`] with the channels 0–255, or
+    /// [`Response::Error`] if the point falls outside the output. Answers the
+    /// oracle's "is this indicator lit / this checkbox ticked?" without OCR.
+    /// Gated by `set_automation` (a capture primitive, like [`Request::Screenshot`]).
+    GetPixel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        x: i32,
+        y: i32,
+    },
+    /// Hash the pixels of an output region — a cheap "did this change?" probe.
+    /// `output` selects the output (default: the first); `region` (in that
+    /// output's **logical** coords) defaults to the whole output. Reply is
+    /// [`Response::RegionHash`] carrying a 64-bit hash of the captured pixels
+    /// plus the region's size in physical pixels. Two probes with equal hashes
+    /// are the same image; a changed hash means the region changed — so the
+    /// oracle can poll a dialog for "settled / repainted" without shipping or
+    /// diffing a full screenshot. Gated by `set_automation`.
+    HashRegion {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<ScreenshotRegion>,
+    },
 }
 
 /// One raw input transition for [`Request::InjectInput`] — the low-level events
@@ -969,6 +997,23 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         timed_out: bool,
+    },
+    /// Reply to [`Request::GetPixel`]: the probed pixel's channels, 0–255, in
+    /// R/G/B/A order regardless of the compositor's internal buffer layout.
+    /// Alpha is the compositor's premultiplied value (opaque UI reads `255`).
+    Pixel {
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    },
+    /// Reply to [`Request::HashRegion`]: a 64-bit hash of the region's pixels
+    /// (stable for identical pixels, changes when any pixel does) plus the
+    /// region's size in physical pixels. Compare two hashes to detect UI change.
+    RegionHash {
+        hash: u64,
+        width: u32,
+        height: u32,
     },
     /// Result of [`Request::PickWindow`]. `window` is `Some` when the
     /// user clicked a toplevel, `None` if they cancelled (Escape /
@@ -1454,6 +1499,44 @@ mod tests {
             Request::WaitReady {
                 xwayland: true,
                 timeout_ms: Some(30000)
+            }
+        ));
+
+        // get_pixel: output skips when absent; round-trips with coords.
+        assert_eq!(
+            serde_json::to_string(&Request::GetPixel {
+                output: None,
+                x: 10,
+                y: 20,
+            })
+            .unwrap(),
+            r#"{"type":"get_pixel","x":10,"y":20}"#
+        );
+        let p: Request =
+            serde_json::from_str(r#"{"type":"get_pixel","output":"HEADLESS-1","x":1,"y":2}"#)
+                .unwrap();
+        assert!(matches!(
+            p,
+            Request::GetPixel { output: Some(ref o), x: 1, y: 2 } if o == "HEADLESS-1"
+        ));
+
+        // hash_region: both output and region optional (whole-output default).
+        assert_eq!(
+            serde_json::to_string(&Request::HashRegion {
+                output: None,
+                region: None,
+            })
+            .unwrap(),
+            r#"{"type":"hash_region"}"#
+        );
+        let h: Request =
+            serde_json::from_str(r#"{"type":"hash_region","region":{"x":0,"y":0,"w":64,"h":64}}"#)
+                .unwrap();
+        assert!(matches!(
+            h,
+            Request::HashRegion {
+                output: None,
+                region: Some(ScreenshotRegion { w: 64, h: 64, .. })
             }
         ));
     }

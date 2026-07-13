@@ -18,6 +18,8 @@
 //! backend framebuffer internals, and shm screencopy is rare enough that the
 //! extra render pass is fine.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use smithay::{
@@ -33,12 +35,17 @@ use smithay::{
         wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         wayland_server::{backend::GlobalId, protocol::wl_buffer::WlBuffer, Resource},
     },
-    utils::{Buffer as BufferCoord, Rectangle, Transform},
+    utils::{Buffer as BufferCoord, Point, Rectangle, Size, Transform},
     wayland::{
         dmabuf::get_dmabuf,
         shm::{with_buffer_contents_mut, BufferAccessError},
     },
 };
+
+use shoestring_ipc::{Response, ScreenshotRegion};
+
+use crate::ipc::{write_response, Client, ClientId};
+use crate::state::ShoestringWm;
 
 /// Marker user-data for `ZwlrScreencopyManagerV1` resources. Empty — the
 /// manager has no per-instance state, but we need a local type so we can
@@ -57,6 +64,28 @@ pub struct ScreencopyState {
     /// are now waiting for the next render of their target output. Drained
     /// from the render path.
     pub pending: Vec<ZwlrScreencopyFrameV1>,
+}
+
+/// What a parked pixel/region probe wants read back from its output.
+pub(crate) enum ProbeTarget {
+    /// A single pixel at a **logical** point (`get_pixel`).
+    Pixel { x: i32, y: i32 },
+    /// A **logical** region, or the whole output when `None` (`hash_region`).
+    Region(Option<ScreenshotRegion>),
+}
+
+/// A connection parked on [`shoestring_ipc::Request::GetPixel`] /
+/// [`Request::HashRegion`](shoestring_ipc::Request::HashRegion), awaiting the
+/// next render tick where the renderer is in scope — the same deferred shape as
+/// [`crate::window_capture::PendingWindowShot`]. Serviced by
+/// [`process_pending_probes`].
+pub(crate) struct PendingProbe {
+    pub client_id: ClientId,
+    pub client: Rc<RefCell<Client>>,
+    /// Output to read from — the request's `output`, or the default resolved at
+    /// enqueue time. Matched against each rendered output by name.
+    pub output_name: String,
+    pub target: ProbeTarget,
 }
 
 /// Per-frame user data attached to each `ZwlrScreencopyFrameV1` resource.
@@ -461,4 +490,199 @@ where
     })
     .map_err(|e: BufferAccessError| format!("shm access: {e:?}"))?;
     res
+}
+
+/// Service every parked pixel/region probe targeting `output`: render the
+/// output once into an offscreen buffer (the same element list the scanout
+/// composites, so probes see exactly what's on screen), read back each probe's
+/// region, and reply. Call once per render tick from the offscreen-capable
+/// backends (winit, headless) next to
+/// [`crate::window_capture::process_pending_window_screenshots`], where
+/// `output` / `renderer` / `elements` / `clear` are in scope. Like that sibling
+/// it takes the whole `state` alongside `renderer`, so it can't run on udev
+/// (whose renderer is borrowed from `state`); the IPC handler gates probes on
+/// `window_capture_supported` to match. A no-op when nothing is queued for this
+/// output. The offscreen render is shared across all probes on the output, so a
+/// batch is one render plus N tiny readbacks.
+#[allow(clippy::too_many_arguments)]
+pub fn process_pending_probes<R>(
+    state: &mut ShoestringWm,
+    output: &Output,
+    renderer: &mut R,
+    elements: &[crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >],
+    clear: [f32; 4],
+) where
+    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    <R as RendererSuper>::Error: std::fmt::Display,
+    <R as RendererSuper>::TextureId: Clone + 'static,
+    crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >: RenderElement<R>,
+{
+    if state.pending_probes.is_empty() {
+        return;
+    }
+    let name = output.name();
+    let (mine, others): (Vec<_>, Vec<_>) = std::mem::take(&mut state.pending_probes)
+        .into_iter()
+        .partition(|p| p.output_name == name);
+    state.pending_probes = others;
+    if mine.is_empty() {
+        return;
+    }
+
+    let (w, h, scale) = match output.current_mode() {
+        Some(mode) => (
+            mode.size.w,
+            mode.size.h,
+            output.current_scale().fractional_scale(),
+        ),
+        None => return fail_probes(state, mine, "probe: output has no current mode"),
+    };
+
+    // Render the output offscreen once; every probe reads from this buffer.
+    let mut texture = match renderer.create_buffer(Fourcc::Argb8888, (w, h).into()) {
+        Ok(t) => t,
+        Err(e) => return fail_probes(state, mine, &format!("probe: create_buffer: {e}")),
+    };
+    {
+        let mut framebuffer = match renderer.bind(&mut texture) {
+            Ok(fb) => fb,
+            Err(e) => return fail_probes(state, mine, &format!("probe: bind offscreen: {e}")),
+        };
+        // Logical-upright (Transform::Normal), matching the screencopy capture
+        // path — so probe coordinates are the output's logical pixels, not the
+        // scanout transform's.
+        let mut tracker = OutputDamageTracker::new((w, h), scale, Transform::Normal);
+        let rr = render_into::<R>(&mut tracker, renderer, &mut framebuffer, elements, clear);
+        drop(framebuffer);
+        if let Err(e) = rr {
+            return fail_probes(state, mine, &format!("probe: render_output: {e}"));
+        }
+    }
+    let framebuffer = match renderer.bind(&mut texture) {
+        Ok(fb) => fb,
+        Err(e) => return fail_probes(state, mine, &format!("probe: rebind for readback: {e}")),
+    };
+
+    // Compute all responses while the framebuffer (which borrows `texture`, not
+    // `renderer`) is live, then reply + drop once the borrow ends.
+    let mut results: Vec<(PendingProbe, Response)> = Vec::with_capacity(mine.len());
+    for probe in mine {
+        let resp = probe_response(renderer, &framebuffer, &probe.target, w, h, scale);
+        results.push((probe, resp));
+    }
+    drop(framebuffer);
+    for (probe, resp) in results {
+        let _ = write_response(&probe.client, &resp);
+        state.drop_ipc_client(probe.client_id);
+    }
+}
+
+/// Read one probe's pixels from the already-rendered `framebuffer` and build its
+/// reply. `w`/`h` are the output's physical size; `scale` maps logical probe
+/// coordinates to physical pixels (matching the screencopy region conversion).
+fn probe_response<R>(
+    renderer: &mut R,
+    framebuffer: &R::Framebuffer<'_>,
+    target: &ProbeTarget,
+    w: i32,
+    h: i32,
+    scale: f64,
+) -> Response
+where
+    R: Renderer + ExportMem,
+    <R as RendererSuper>::Error: std::fmt::Display,
+{
+    match target {
+        ProbeTarget::Pixel { x, y } => {
+            let px = (*x as f64 * scale).round() as i32;
+            let py = (*y as f64 * scale).round() as i32;
+            if px < 0 || py < 0 || px >= w || py >= h {
+                return Response::Error {
+                    message: format!(
+                        "get_pixel: ({x},{y}) → physical ({px},{py}) is outside the {w}x{h}px output"
+                    ),
+                };
+            }
+            let region: Rectangle<i32, BufferCoord> =
+                Rectangle::new(Point::from((px, py)), Size::from((1, 1)));
+            match crate::capture_stream::readback(renderer, framebuffer, region) {
+                Ok(bytes) if bytes.len() >= 4 => Response::Pixel {
+                    // Argb8888 is little-endian in memory: [B, G, R, A].
+                    r: bytes[2],
+                    g: bytes[1],
+                    b: bytes[0],
+                    a: bytes[3],
+                },
+                Ok(_) => Response::Error {
+                    message: "get_pixel: short readback".into(),
+                },
+                Err(e) => Response::Error {
+                    message: format!("get_pixel: {e}"),
+                },
+            }
+        }
+        ProbeTarget::Region(region) => {
+            let full: Rectangle<i32, BufferCoord> =
+                Rectangle::new(Point::from((0, 0)), Size::from((w, h)));
+            let rect = match region {
+                Some(r) => {
+                    let x = (r.x as f64 * scale).round() as i32;
+                    let y = (r.y as f64 * scale).round() as i32;
+                    let rw = (r.w as f64 * scale).round() as i32;
+                    let rh = (r.h as f64 * scale).round() as i32;
+                    let req: Rectangle<i32, BufferCoord> =
+                        Rectangle::new(Point::from((x, y)), Size::from((rw, rh)));
+                    req.intersection(full).unwrap_or_default()
+                }
+                None => full,
+            };
+            if rect.size.w <= 0 || rect.size.h <= 0 {
+                return Response::Error {
+                    message: "hash_region: region is empty after clamping to the output".into(),
+                };
+            }
+            match crate::capture_stream::readback(renderer, framebuffer, rect) {
+                Ok(bytes) => Response::RegionHash {
+                    hash: fnv1a64(&bytes),
+                    width: rect.size.w as u32,
+                    height: rect.size.h as u32,
+                },
+                Err(e) => Response::Error {
+                    message: format!("hash_region: {e}"),
+                },
+            }
+        }
+    }
+}
+
+/// Reply `error` to every probe in a batch (bad output / render failure) and
+/// close their connections.
+fn fail_probes(state: &mut ShoestringWm, probes: Vec<PendingProbe>, message: &str) {
+    for p in probes {
+        let _ = write_response(
+            &p.client,
+            &Response::Error {
+                message: message.to_string(),
+            },
+        );
+        state.drop_ipc_client(p.client_id);
+    }
+}
+
+/// FNV-1a 64-bit hash of a byte slice — a fast, dependency-free digest for the
+/// `hash_region` change-detection probe. Not cryptographic; only needs "same
+/// pixels ⇒ same value, changed pixels ⇒ (almost surely) different value".
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }

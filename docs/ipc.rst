@@ -598,6 +598,24 @@ Each request is a JSON object with a ``type`` discriminator:
        ``$XDG_RUNTIME_DIR`` (tmpfs) ``path``, then streams that file to its own
        stdout and unlinks it — so a capture pipes without a large PNG crossing
        the IPC socket.
+   * - ``{"type": "get_pixel", "output": null, "x": 10, "y": 20}``
+     - Read a single pixel's colour — a cheap UI-state probe (is this indicator
+       lit? is this checkbox ticked?) that skips the screenshot → PNG → decode
+       round-trip. ``output`` selects the output (default: the first); ``x`` /
+       ``y`` are that output's **logical** pixel coords, scaled to the physical
+       pixel read back. Reply is ``pixel`` with the channels 0–255, or an
+       ``error`` if the point is outside the output. Gated by the automation
+       gate; supported on the offscreen-capable backends (``winit``,
+       ``headless``) only, same as ``screenshot_window``.
+   * - ``{"type": "hash_region", "output": null, "region": null}``
+     - Hash the pixels of an output region — a cheap "did this change?" probe.
+       ``output`` selects the output (default: the first); ``region`` (in that
+       output's **logical** coords, ``{"x","y","w","h"}``) defaults to the whole
+       output. Reply is ``region_hash`` with a 64-bit hash plus the region's
+       physical size. Equal hashes mean identical pixels; a changed hash means
+       the region repainted — so the oracle can poll a dialog for "settled"
+       without diffing a screenshot. Gated and backend-restricted exactly like
+       ``get_pixel``.
    * - ``{"type": "run_command", "argv": ["...", ...], "timeout_ms": null}``
      - Spawn a child process under the WM's environment and return its
        captured output once it exits. ``argv`` must be non-empty;
@@ -649,7 +667,8 @@ it): ``inject_key``, ``inject_text``, ``inject_click``,
 ``inject_click_to_window``, ``drag``, ``move_mouse``,
 ``inject_input``, ``get_clipboard``, ``set_clipboard``, ``paste``,
 ``dispatch_action``, ``shutdown``,
-``screenshot``, ``screenshot_window``, ``run_command``. The error message
+``screenshot``, ``screenshot_window``, ``get_pixel``, ``hash_region``,
+``run_command``. The error message
 is stable enough to scrape on:
 ``automation disabled: enable with `shoestring-ctl automation on`...``.
 
@@ -734,6 +753,18 @@ The server replies with a single JSON object tagged by ``type``:
 ``screenshot``
     ``{"type": "screenshot", "path": "/absolute/path.png"}``. Returned for
     both ``screenshot`` and ``screenshot_window``.
+
+``pixel``
+    ``{"type": "pixel", "r": <u8>, "g": <u8>, "b": <u8>, "a": <u8>}``. Reply to
+    ``get_pixel``: the probed pixel's channels 0–255, in R/G/B/A order
+    regardless of the compositor's internal buffer layout. Alpha is the
+    premultiplied value (opaque UI reads ``255``).
+
+``region_hash``
+    ``{"type": "region_hash", "hash": <u64>, "width": <u32>, "height": <u32>}``.
+    Reply to ``hash_region``: a 64-bit hash of the region's pixels (stable for
+    identical pixels, changes when any pixel does) plus the region's size in
+    physical pixels. Compare two hashes to detect UI change.
 
 ``clipboard``
     ``{"type": "clipboard", "mime": "text/plain;charset=utf-8", "data": [...]}``.

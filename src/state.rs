@@ -343,6 +343,10 @@ pub struct ShoestringWm {
     /// Connections parked on [`shoestring_ipc::Request::WaitReady`] awaiting
     /// XWayland. Resolved from the `XWaylandEvent::Ready` handler or timeout.
     pub(crate) pending_wait_ready: Vec<crate::ipc::PendingWaitReady>,
+    /// One-shot `get_pixel` / `hash_region` probes awaiting the next render tick
+    /// (renderer in scope). Drained per output by
+    /// [`crate::screencopy::process_pending_probes`].
+    pub(crate) pending_probes: Vec<crate::screencopy::PendingProbe>,
     /// Diagnostics registry: the latest sampled process/WM metrics plus
     /// the fd-leak detector's state. Fed by the sampler timer started in
     /// `main` (when `[diagnostics].enabled`) and read by the `metrics`
@@ -881,6 +885,7 @@ impl ShoestringWm {
             pending_window_screenshots: Vec::new(),
             pending_wait_windows: Vec::new(),
             pending_wait_ready: Vec::new(),
+            pending_probes: Vec::new(),
             metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
             // on for the real session backend once the backend is chosen.
