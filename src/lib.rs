@@ -65,10 +65,18 @@ pub fn parse_output_size(spec: &str) -> Option<(i32, i32)> {
 }
 
 /// Import the named environment variables into the systemd user manager via
-/// `systemctl --user import-environment`, so D-Bus-activated services (portals,
-/// notification daemons, …) inherit them. A no-op-with-warning when systemctl
-/// is absent — non-systemd sessions stay first-class. Called from `main` (for
-/// `WAYLAND_DISPLAY`) and from [`xwayland`] (for `DISPLAY`, once Xwayland is up).
+/// `systemctl --user import-environment`, so `systemctl --user` units inherit
+/// them, **and** into the D-Bus session daemon's own activation-environment
+/// cache via `dbus-update-activation-environment --systemd`. The two are
+/// independent stores: portal/notification-daemon `.service` files are
+/// plain `Exec=` activations (no `SystemdService=`), so D-Bus spawns them
+/// from its own cache, not systemd's manager environment — importing into
+/// only one leaves the other activation path (and anything it spawns, e.g.
+/// `xdg-desktop-portal-shoestring`) without `WAYLAND_DISPLAY`/`DISPLAY` for
+/// the lifetime of that D-Bus-activated process. A no-op-with-warning when
+/// either tool is absent — non-systemd sessions stay first-class. Called
+/// from `main` (for `WAYLAND_DISPLAY`) and from [`xwayland`] (for `DISPLAY`,
+/// once Xwayland is up).
 pub fn import_systemd_env(vars: &[&str]) {
     match std::process::Command::new("systemctl")
         .arg("--user")
@@ -79,5 +87,17 @@ pub fn import_systemd_env(vars: &[&str]) {
         Ok(s) if s.success() => {}
         Ok(s) => tracing::warn!(status = %s, "systemctl import-environment exited non-zero"),
         Err(e) => tracing::warn!(error = %e, "systemctl import-environment failed"),
+    }
+
+    match std::process::Command::new("dbus-update-activation-environment")
+        .arg("--systemd")
+        .args(vars)
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            tracing::warn!(status = %s, "dbus-update-activation-environment exited non-zero")
+        }
+        Err(e) => tracing::warn!(error = %e, "dbus-update-activation-environment failed"),
     }
 }

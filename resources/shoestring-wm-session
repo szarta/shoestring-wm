@@ -50,11 +50,20 @@ fi
 export SHOESTRING_WM_LOG="${_logfile}"
 export RUST_LOG="${RUST_LOG:-shoestring_wm=info,smithay=warn}"
 
-# Seed the static session variables into the systemd user manager now.
-# The compositor will import the dynamic runtime variables (WAYLAND_DISPLAY,
-# DISPLAY) via import_systemd_env() once it has set them up.
+# Seed the static session variables into the systemd user manager *and* the
+# D-Bus session daemon's own activation-environment cache — the two are
+# independent stores, and portal/notification-daemon services are spawned by
+# whichever one D-Bus itself uses for their (typically plain Exec=, no
+# SystemdService=) activation. Importing into only the systemd side leaves
+# XDG_CURRENT_DESKTOP unset for those services, so xdg-desktop-portal can
+# never resolve our ScreenCast/Screenshot backend. The compositor imports the
+# dynamic runtime variables (WAYLAND_DISPLAY, DISPLAY) the same way, via
+# import_systemd_env(), once it has set them up.
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PATH || true
+fi
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PATH || true
 fi
 
 # Hand off to the compositor. exec so the session lifetime == the WM's:

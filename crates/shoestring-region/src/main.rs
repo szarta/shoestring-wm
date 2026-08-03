@@ -8,12 +8,16 @@
 //! ```
 //!
 //! to stdout (one line, space-separated, integers, logical coords on
-//! the output the drag started on). Escape cancels with exit code 1.
+//! the output the drag started on). A plain click (press+release with no
+//! drag) reports the *whole* clicked output instead of an empty rectangle —
+//! callers that only care which output was picked (the ScreenCast chooser)
+//! depend on a bare click working. Escape cancels with exit code 1.
 //!
-//! Intended consumer: `shoestring-screenshot --region`, which pipes the
-//! coords to `zwlr_screencopy_v1::capture_output_region`. Roughly the
+//! Intended consumers: `shoestring-screenshot --region`, which pipes the
+//! coords to `zwlr_screencopy_v1::capture_output_region` (roughly the
 //! `slurp` equivalent — keyboard-only cancel, no fancy formats, just
-//! "give me a rectangle on an output."
+//! "give me a rectangle on an output"); and the ScreenCast portal's output
+//! chooser, which only reads the output name and ignores the rectangle.
 
 use std::{
     io::Write,
@@ -340,11 +344,22 @@ fn commit_selection(state: &mut State) {
     let y = y.clamp(0, sh as i32);
     let w = w.min(sw as i32 - x).max(0);
     let h = h.min(sh as i32 - y).max(0);
-    if w < 1 || h < 1 {
-        state.exit_code = 1;
-        state.finished = true;
-        return;
-    }
+    // A plain click (press+release with no meaningful drag) has no rectangle
+    // to report — treat it as "select this whole output" rather than a
+    // cancel. Callers that only care about the output (the ScreenCast
+    // chooser) rely on exactly this: it's how "click the monitor to share"
+    // is meant to work. Only an empty output (no configure received yet)
+    // still falls through to cancel.
+    let (x, y, w, h) = if w < 1 || h < 1 {
+        if sw < 1 || sh < 1 {
+            state.exit_code = 1;
+            state.finished = true;
+            return;
+        }
+        (0, 0, sw as i32, sh as i32)
+    } else {
+        (x, y, w, h)
+    };
     let name = state.outputs[idx]
         .name
         .clone()
