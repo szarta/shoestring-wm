@@ -65,10 +65,14 @@ pub fn parse_output_size(spec: &str) -> Option<(i32, i32)> {
 }
 
 /// Import the named environment variables into the systemd user manager via
-/// `systemctl --user import-environment`, so D-Bus-activated services (portals,
-/// notification daemons, …) inherit them. A no-op-with-warning when systemctl
-/// is absent — non-systemd sessions stay first-class. Called from `main` (for
-/// `WAYLAND_DISPLAY`) and from [`xwayland`] (for `DISPLAY`, once Xwayland is up).
+/// `systemctl --user import-environment` *and* into the D-Bus activation
+/// environment via `dbus-update-activation-environment`, so D-Bus-activated
+/// services (portals, notification daemons, …) inherit them. Both are needed:
+/// dbus-daemon spawns a `.service` without `SystemdService=` (e.g. our portal
+/// backend) from its own activation env, which the systemd import never
+/// touches. A no-op-with-warning when either tool is absent — non-systemd
+/// sessions stay first-class. Called from `main` (for `WAYLAND_DISPLAY`) and
+/// from [`xwayland`] (for `DISPLAY`, once Xwayland is up).
 pub fn import_systemd_env(vars: &[&str]) {
     match std::process::Command::new("systemctl")
         .arg("--user")
@@ -79,5 +83,13 @@ pub fn import_systemd_env(vars: &[&str]) {
         Ok(s) if s.success() => {}
         Ok(s) => tracing::warn!(status = %s, "systemctl import-environment exited non-zero"),
         Err(e) => tracing::warn!(error = %e, "systemctl import-environment failed"),
+    }
+    match std::process::Command::new("dbus-update-activation-environment")
+        .args(vars)
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => tracing::warn!(status = %s, "dbus-update-activation-environment exited non-zero"),
+        Err(e) => tracing::warn!(error = %e, "dbus-update-activation-environment failed"),
     }
 }

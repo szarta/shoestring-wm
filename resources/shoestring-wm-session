@@ -50,11 +50,15 @@ fi
 export SHOESTRING_WM_LOG="${_logfile}"
 export RUST_LOG="${RUST_LOG:-shoestring_wm=info,smithay=warn}"
 
-# Seed the static session variables into the systemd user manager now.
+# Seed the static session variables into the systemd user manager and the
+# D-Bus activation environment now.
 # The compositor will import the dynamic runtime variables (WAYLAND_DISPLAY,
 # DISPLAY) via import_systemd_env() once it has set them up.
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PATH || true
+fi
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PATH || true
 fi
 
 # Hand off to the compositor. exec so the session lifetime == the WM's:

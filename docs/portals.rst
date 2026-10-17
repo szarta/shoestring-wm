@@ -127,11 +127,22 @@ file::
 The backend is started by **D-Bus activation** (the ``.service`` above)
 when the frontend first needs ScreenCast, so it inherits the session's
 ``WAYLAND_DISPLAY`` from the D-Bus activation environment (which
-``shoestring-wm-session`` + the compositor's ``systemctl --user
-import-environment`` populate). Alternatively, add
-``xdg-desktop-portal-shoestring`` to ``general.autostart`` to launch it
-with the session — it inherits the live environment directly and the
-frontend finds it already owning the name.
+``shoestring-wm-session`` + the compositor populate with both ``systemctl
+--user import-environment`` and ``dbus-update-activation-environment`` —
+the systemd import alone does not reach dbus-daemon's activation env).
+Alternatively, add ``/usr/libexec/xdg-desktop-portal-shoestring`` to
+``general.autostart`` to launch it with the session — it inherits the live
+environment directly and the frontend finds it already owning the name. Use
+the **full path**: ``/usr/libexec`` is not on ``$PATH``, so a bare
+``xdg-desktop-portal-shoestring`` entry fails to spawn.
+
+If a share does nothing and the backend logs ``connect to wayland (is
+WAYLAND_DISPLAY set?)``, it was activated with a stale environment (e.g.
+before the compositor started). Recover with::
+
+    dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY
+    pkill -f /usr/libexec/xdg-desktop-portal-shoestring
+    systemctl --user restart xdg-desktop-portal
 
 Confirm the frontend resolved the backend (look for
 ``Using shoestring.portal for … ScreenCast`` and ``… Screenshot``)::
