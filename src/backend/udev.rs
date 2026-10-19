@@ -70,6 +70,7 @@ use smithay::{
         wayland_server::backend::GlobalId,
     },
     utils::DeviceFd,
+    wayland::dmabuf::DmabufFeedbackBuilder,
     wayland::drm_syncobj::{supports_syncobj_eventfd, DrmSyncobjHandler, DrmSyncobjState},
 };
 use smithay_drm_extras::{
@@ -584,11 +585,21 @@ fn device_added(
     // it for their own surface buffers) and is intentionally NOT behind the
     // screen-capture gate — only the screencopy `linux_dmabuf` event respects
     // that gate. The udev borrow ends above, so we touch `state` directly here.
+    //
+    // It must be the v4 global with default feedback: feedback's `main_device`
+    // is how Mesa's Wayland EGL learns which GPU to open (we expose no wl_drm).
+    // A bare v3 global leaves clients with "failed to get driver name for fd -1"
+    // and they silently fall back to llvmpipe — every GL client (terminals,
+    // browsers, Zoom) software-rendering across all cores.
     if state.dmabuf_global.is_none() {
         let dh = state.display_handle.clone();
+        let feedback =
+            DmabufFeedbackBuilder::new(render_node.dev_id(), dmabuf_formats.iter().copied())
+                .build()
+                .expect("dmabuf default feedback");
         let global = state
             .dmabuf_state
-            .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
+            .create_global_with_default_feedback::<ShoestringWm>(&dh, &feedback);
         state.dmabuf_global = Some(global);
         tracing::info!(
             formats = dmabuf_formats.iter().count(),
