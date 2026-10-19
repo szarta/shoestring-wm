@@ -19,7 +19,9 @@ rustbus = "0.19"
 # PipeWire client: we create the screencast stream and feed it frames. The
 # -sys crates bind libpipewire-0.3 / libspa-0.2 via bindgen (build-deps:
 # libclang + the pipewire dev headers).
-pipewire = "0.10"
+# v0_3_34: Stream::trigger_process, which clocks our driver stream (libpipewire
+# 0.3.34+; every supported distro ships 1.x).
+pipewire = { version = "0.10", features = ["v0_3_34"] }
 libspa = "0.10"
 
 # Wayland client: we pull frames from the WM over zwlr_screencopy_v1. Versions

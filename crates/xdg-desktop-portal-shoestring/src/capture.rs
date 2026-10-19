@@ -25,6 +25,7 @@ use wayland_client::{
         wl_shm::{self, WlShm},
         wl_shm_pool::WlShmPool,
     },
+    backend::WaylandError,
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -39,7 +40,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 use drm_fourcc::{DrmFourcc, DrmModifier};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
 /// Geometry + pixel layout of a captured frame.
@@ -74,6 +75,22 @@ pub struct Capture {
     dmabuf: Option<ZwpLinuxDmabufV1>,
     /// gbm device on the render node, opened lazily on first dmabuf allocation.
     gbm: Option<gbm::Device<File>>,
+    /// The frame of an async [`Capture::begin_capture`] still in flight, and
+    /// whether we've sent its `copy_with_damage` yet.
+    in_flight: Option<(ZwlrScreencopyFrameV1, bool)>,
+}
+
+/// Progress of an async capture, from [`Capture::poll_capture`].
+pub enum CapturePoll {
+    /// No capture in flight.
+    Idle,
+    /// Still waiting on the WM (for a static screen, possibly indefinitely —
+    /// it holds `copy_with_damage` frames until something changes).
+    Pending,
+    /// A new frame is in the shm buffer: read it with [`Capture::frame`].
+    Ready,
+    /// The WM failed the frame.
+    Failed(String),
 }
 
 /// A connected output, for the screencast chooser. Just the connector name for
@@ -159,6 +176,7 @@ impl Capture {
                 })
                 .collect(),
             frame: FrameState::Initial,
+            ready: false,
             dmabuf_formats: HashMap::new(),
         };
         // Resolve output names + geometry (wl_output.name/mode/scale) before
@@ -181,6 +199,7 @@ impl Capture {
             overlay_cursor: true,
             dmabuf,
             gbm: None,
+            in_flight: None,
         })
     }
 
@@ -438,6 +457,85 @@ impl Capture {
         Ok(yinvert)
     }
 
+    /// The Wayland connection's fd: poll it for readability while an async
+    /// capture is in flight and call [`Self::poll_capture`] when it is.
+    pub fn poll_fd(&self) -> RawFd {
+        self._conn.backend().poll_fd().as_raw_fd()
+    }
+
+    /// Start a non-blocking `copy_with_damage` capture into the reusable shm
+    /// buffer; drive it with [`Self::poll_capture`]. The WM completes it only
+    /// once the output has changed since our previous capture, so a static
+    /// screen produces no frames (and costs nothing) until something moves.
+    pub fn begin_capture(&mut self) -> Result<()> {
+        if let Some((old, _)) = self.in_flight.take() {
+            old.destroy();
+        }
+        self.state.frame = FrameState::Initial;
+        self.state.ready = false;
+        let overlay = self.overlay_cursor as i32;
+        let frame = self
+            .manager
+            .capture_output(overlay, &self.output, &self.qh, ());
+        self.in_flight = Some((frame, false));
+        self.queue.flush().context("flush capture request")?;
+        Ok(())
+    }
+
+    /// Advance an async capture without blocking: read whatever the WM has
+    /// sent, answer its buffer advertisement with `copy_with_damage`, and
+    /// report whether the frame is done.
+    pub fn poll_capture(&mut self) -> Result<CapturePoll> {
+        self.queue.dispatch_pending(&mut self.state)?;
+        if let Some(guard) = self.queue.prepare_read() {
+            match guard.read() {
+                Ok(_) => {}
+                Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(anyhow!("wayland read: {e}")),
+            }
+        }
+        self.queue.dispatch_pending(&mut self.state)?;
+
+        let Some((frame, copied)) = self.in_flight.take() else {
+            return Ok(CapturePoll::Idle);
+        };
+        match &self.state.frame {
+            FrameState::Failed(e) => {
+                let e = e.clone();
+                frame.destroy();
+                Ok(CapturePoll::Failed(e))
+            }
+            FrameState::Ready { flags, .. } if self.state.ready => {
+                let yinvert = flags.contains(Flags::YInvert);
+                frame.destroy();
+                if let Some(buf) = self.buf.as_mut() {
+                    buf.info.yinvert = yinvert;
+                }
+                Ok(CapturePoll::Ready)
+            }
+            &FrameState::BufferParams {
+                format,
+                width,
+                height,
+                stride,
+            } if !copied => {
+                self.ensure_buf(format, width, height, stride);
+                let Some(buf) = self.buf.as_ref() else {
+                    frame.destroy();
+                    return Ok(CapturePoll::Failed("no capture buffer".into()));
+                };
+                frame.copy_with_damage(&buf.buffer);
+                self.queue.flush().context("flush copy request")?;
+                self.in_flight = Some((frame, true));
+                Ok(CapturePoll::Pending)
+            }
+            _ => {
+                self.in_flight = Some((frame, copied));
+                Ok(CapturePoll::Pending)
+            }
+        }
+    }
+
     /// Open the render node's gbm device, once.
     fn ensure_gbm(&mut self) -> Result<()> {
         if self.gbm.is_some() {
@@ -669,6 +767,9 @@ enum FrameState {
 struct CaptureState {
     outputs: Vec<OutputEntry>,
     frame: FrameState,
+    /// The current frame's `ready` event has arrived (`frame` turns `Ready` a
+    /// step earlier, on `flags`).
+    ready: bool,
     /// DRM fourcc → modifiers the WM's `zwp_linux_dmabuf_v1` advertised. Filled
     /// from the global's `format`/`modifier` events during the setup roundtrip.
     dmabuf_formats: HashMap<u32, Vec<u64>>,
@@ -828,6 +929,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CaptureState {
                     tv_sec,
                     tv_nsec,
                 };
+                state.ready = true;
             }
             Event::Failed => {
                 state.frame = FrameState::Failed("compositor sent failed".into());

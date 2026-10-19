@@ -5,9 +5,8 @@
 //! (frontend) → an *implementation* backend → PipeWire. The usual wlroots
 //! backend (xdg-desktop-portal-wlr) offers the PipeWire consumer a single,
 //! dmabuf-only buffer type and never falls back to shm. That breaks Zoom,
-//! whose bundled Mesa can't import our dmabuf (see task 150 / 157). This
-//! backend fixes it by offering the consumer **both** dmabuf and shm and
-//! letting it pick: Zoom negotiates shm, Chrome/OBS keep zero-copy dmabuf.
+//! which renders our dmabuf black (see task 150 / 157). This backend streams
+//! shm by default and offers dmabuf only behind `[portal] screencast_dmabuf`.
 //!
 //! It is a *separate process* from the compositor (so a PipeWire/D-Bus fault
 //! can't take down the desktop) and pulls frames from the WM over the
@@ -15,9 +14,11 @@
 //! types per frame. The compositor itself needs no changes.
 //!
 //! This file owns the reactor-less dispatch loop (a single `poll(2)` over the
-//! D-Bus socket + a shutdown self-pipe), mirroring shoestring-notify. The
-//! portal protocol lives in [`portal`]; PipeWire + the screencopy client land
-//! in later phases.
+//! D-Bus socket, a shutdown self-pipe, the PipeWire loop, and each active
+//! cast's WM connection while a capture is in flight, timing out at the next
+//! frame-pacing deadline), mirroring shoestring-notify. The portal protocol
+//! lives in [`portal`]; PipeWire + frame pacing in [`cast`]; the screencopy
+//! client in [`capture`].
 
 mod capture;
 mod cast;
@@ -28,6 +29,7 @@ mod state;
 
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use rustbus::connection::ll_conn::force_finish_on_error;
@@ -95,8 +97,9 @@ fn main() -> Result<()> {
 
 fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) -> Result<()> {
     while state.running {
-        // Order: dbus, shutdown, pipewire.
-        let mut fds = [
+        // Order: dbus, shutdown, pipewire, then one per cast with a capture in
+        // flight (its WM connection).
+        let mut fds = vec![
             libc::pollfd {
                 fd: dbus_fd,
                 events: libc::POLLIN,
@@ -113,8 +116,29 @@ fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) 
                 revents: 0,
             },
         ];
+        let mut cast_fds: Vec<String> = Vec::new();
+        for (session, cast) in &state.casts {
+            if let Some(fd) = cast.poll_fd() {
+                fds.push(libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                cast_fds.push(session.clone());
+            }
+        }
+        // Wake for the earliest frame-pacing deadline (rounded up, so we
+        // don't spin on a sub-millisecond remainder); otherwise block.
+        let now = Instant::now();
+        let timeout = state
+            .casts
+            .values()
+            .filter_map(|c| c.timeout(now))
+            .min()
+            .map(|d| d.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32)
+            .unwrap_or(-1);
 
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if rc < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
@@ -136,6 +160,20 @@ fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) 
         // callback (which fills/queues buffers) run.
         if fds[2].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
             state.pw.iterate();
+        }
+        // WM connections with a capture in flight. Looked up by session, as
+        // D-Bus dispatch above may have closed one.
+        for (pfd, session) in fds[3..].iter().zip(&cast_fds) {
+            if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+                if let Some(cast) = state.casts.get(session) {
+                    cast.on_readable();
+                }
+            }
+        }
+        // Start whatever frames are now due.
+        let now = Instant::now();
+        for cast in state.casts.values() {
+            cast.tick(now);
         }
     }
     Ok(())
