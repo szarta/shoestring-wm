@@ -15,10 +15,13 @@
 //!
 //! Why offscreen for shm rather than capturing the scanout buffer: it works
 //! uniformly across winit (nested dev) and udev (TTY) without poking at
-//! backend framebuffer internals, and shm screencopy is rare enough that the
-//! extra render pass is fine.
+//! backend framebuffer internals. A screencast captures continuously, so the
+//! offscreen target is cached per output and repainted incrementally, and
+//! `copy_with_damage` frames are held until their client has something new to
+//! see (see [`ScreencopyState::damage`]) — a static screen costs nothing.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +36,11 @@ use smithay::{
     output::Output,
     reexports::{
         wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
-        wayland_server::{backend::GlobalId, protocol::wl_buffer::WlBuffer, Resource},
+        wayland_server::{
+            backend::{ClientId as WlClientId, GlobalId},
+            protocol::wl_buffer::WlBuffer,
+            Resource,
+        },
     },
     utils::{Buffer as BufferCoord, Point, Rectangle, Size, Transform},
     wayland::{
@@ -64,6 +71,35 @@ pub struct ScreencopyState {
     /// are now waiting for the next render of their target output. Drained
     /// from the render path.
     pub pending: Vec<ZwlrScreencopyFrameV1>,
+    /// Damage since each client's previous capture of an output, for
+    /// `copy_with_damage`: one tracker per (client, output name), fed the same
+    /// element list as the capture. A `copy_with_damage` frame whose tracker
+    /// reports no damage stays in `pending` until a render that has some — so
+    /// a screencast of a static screen costs nothing. Entries are dropped when
+    /// the client's screencopy manager is destroyed (incl. disconnect).
+    pub damage: HashMap<(WlClientId, String), CaptureDamage>,
+    /// Per-output offscreen render target for shm captures, kept across
+    /// captures (a screencast captures every frame): reusing the texture saves
+    /// a full-output allocation each time, and its own damage tracker means
+    /// only what changed since the previous capture is repainted.
+    pub offscreen: HashMap<String, OffscreenTarget>,
+}
+
+/// A cached shm-capture render target for one output (see
+/// [`ScreencopyState::offscreen`]); rebuilt when the mode or scale changes.
+pub struct OffscreenTarget {
+    size: Size<i32, smithay::utils::Physical>,
+    scale: f64,
+    texture: GlesTexture,
+    tracker: OutputDamageTracker,
+}
+
+/// One client's damage tracker for one output, plus the mode it was built
+/// for (a mode or scale change rebuilds it, which reads as full damage).
+pub struct CaptureDamage {
+    size: Size<i32, smithay::utils::Physical>,
+    scale: f64,
+    tracker: OutputDamageTracker,
 }
 
 /// What a parked pixel/region probe wants read back from its output.
@@ -119,6 +155,11 @@ pub struct FrameInner {
     /// their per-frame state if it's missing. We always repaint the full
     /// output, so the damage box is the whole capture region.
     pub with_damage: bool,
+    /// For a `copy_with_damage` frame: what changed since this client's
+    /// previous capture of the output, in buffer coordinates relative to the
+    /// frame (ready to send as `damage` events). Empty ⇒ report the whole
+    /// region.
+    pub damage: Vec<Rectangle<i32, BufferCoord>>,
 }
 
 /// Process every pending screencopy frame whose target matches `output`:
@@ -188,6 +229,22 @@ pub fn process_pending<R>(
     };
     let output_size = mode.size;
     let scale = output.current_scale().fractional_scale();
+
+    // copy_with_damage: hold back frames with nothing new since the client's
+    // last capture of this output (they wait in `pending` for a damaged
+    // render), and record what changed for the ones we serve.
+    let mut served = Vec::with_capacity(for_us.len());
+    for frame in for_us {
+        if has_damage_for_client(screencopy, &frame, output, output_size, scale, elements) {
+            served.push(frame);
+        } else {
+            screencopy.pending.push(frame);
+        }
+    }
+    let for_us = served;
+    if for_us.is_empty() {
+        return;
+    }
 
     // Split frames by buffer kind. dmabuf-backed frames render straight into
     // the client buffer; shm-backed frames go through the offscreen-texture
@@ -259,28 +316,54 @@ pub fn process_pending<R>(
         return;
     }
 
-    // Render the scene into an offscreen texture sized to the output's
-    // physical pixels. We only do this once even if multiple frames are
-    // pending for the same output.
-    let texture: GlesTexture =
-        match renderer.create_buffer(Fourcc::Argb8888, (output_size.w, output_size.h).into()) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, "screencopy: offscreen create_buffer failed");
-                for f in shm_frames {
-                    f.failed();
+    // Render the scene into the output's cached offscreen texture (sized to
+    // its physical pixels; created on first use or after a mode/scale change).
+    // We only do this once even if multiple frames are pending for the same
+    // output.
+    let cached = screencopy
+        .offscreen
+        .get(&output.name())
+        .is_some_and(|t| t.size == output_size && t.scale == scale);
+    if !cached {
+        let texture: GlesTexture =
+            match renderer.create_buffer(Fourcc::Argb8888, (output_size.w, output_size.h).into()) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(error = %e, "screencopy: offscreen create_buffer failed");
+                    for f in shm_frames {
+                        f.failed();
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
+        // Capture logical-upright (Transform::Normal), not the scanout
+        // transform. Baking output.current_transform() in made a flipped-180
+        // output (the winit dev backend) produce a 180°-rotated PNG, because
+        // nothing un-applies it before the pixels reach the client / encoder.
+        // Identity on a `normal` output, so tty/KMS captures are unchanged.
+        // (task 188 — orthogonal to the #158 YInvert policy in finish_frame.)
+        screencopy.offscreen.insert(
+            output.name(),
+            OffscreenTarget {
+                size: output_size,
+                scale,
+                texture,
+                tracker: OutputDamageTracker::new(output_size, scale, Transform::Normal),
+            },
+        );
+    }
+    let target = screencopy
+        .offscreen
+        .get_mut(&output.name())
+        .expect("offscreen target just ensured");
 
     // Bind the texture as the current framebuffer and render the scene
-    // (space + cursor) into it. We use a fresh damage tracker per capture
-    // so the whole output is repainted (avoids age/damage mismatches with
-    // the real scanout's tracker).
+    // (space + cursor) into it. The target's own tracker (age 1: the texture
+    // holds exactly what it last rendered) repaints only what changed since
+    // the previous capture — a fresh texture's first render is full.
     {
-        let mut texture = texture;
-        let mut framebuffer = match renderer.bind(&mut texture) {
+        let texture = &mut target.texture;
+        let mut framebuffer = match renderer.bind(&mut *texture) {
             Ok(fb) => fb,
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: bind offscreen failed");
@@ -290,16 +373,9 @@ pub fn process_pending<R>(
                 return;
             }
         };
-        // Capture logical-upright (Transform::Normal), not the scanout
-        // transform. Baking output.current_transform() in made a flipped-180
-        // output (the winit dev backend) produce a 180°-rotated PNG, because
-        // nothing un-applies it before the pixels reach the client / encoder.
-        // Identity on a `normal` output, so tty/KMS captures are unchanged.
-        // (task 188 — orthogonal to the #158 YInvert policy in finish_frame.)
-        let mut damage_tracker = OutputDamageTracker::new(output_size, scale, Transform::Normal);
-
-        let render_result = render_into::<R>(
-            &mut damage_tracker,
+        let render_result = render_into_aged::<R>(
+            &mut target.tracker,
+            1,
             renderer,
             &mut framebuffer,
             elements,
@@ -318,7 +394,7 @@ pub fn process_pending<R>(
 
         // Re-bind so copy_framebuffer has a current target. (render_output
         // already required the bind, but the framebuffer was dropped above.)
-        let framebuffer = match renderer.bind(&mut texture) {
+        let framebuffer = match renderer.bind(&mut *texture) {
             Ok(fb) => fb,
             Err(e) => {
                 tracing::warn!(error = %e, "screencopy: rebind offscreen failed");
@@ -364,12 +440,70 @@ pub fn process_pending<R>(
     }
 }
 
-/// Complete a successfully captured frame: a `damage` event if the client used
-/// `copy_with_damage`, then `ready` — in that order, matching wlroots. The
-/// damage box covers the whole capture region because each capture repaints the
-/// full output (no incremental damage tracking against prior captures). Reads
-/// `with_damage`/`region` from the frame's own user data so both the dmabuf and
-/// shm paths share one code path.
+/// Decide whether `frame` should be captured on this render. Plain `copy`
+/// frames always are. A `copy_with_damage` frame is only when its client's
+/// tracker for this output sees damage since that client's previous capture
+/// (a fresh tracker — first capture, or a mode/scale change — is full damage);
+/// the damage, clipped to the frame's region and made frame-relative, is
+/// stored on the frame for [`finish_frame`] to report.
+fn has_damage_for_client<E: smithay::backend::renderer::element::Element>(
+    screencopy: &mut ScreencopyState,
+    frame: &ZwlrScreencopyFrameV1,
+    output: &Output,
+    output_size: Size<i32, smithay::utils::Physical>,
+    scale: f64,
+    elements: &[E],
+) -> bool {
+    let Some(user) = frame.data::<ScreencopyFrameData>() else {
+        return true;
+    };
+    let mut inner = user.inner.lock().unwrap();
+    if !inner.with_damage {
+        return true;
+    }
+    let Some(client) = frame.client() else {
+        return true;
+    };
+    let entry = screencopy
+        .damage
+        .entry((client.id(), output.name()))
+        .or_insert_with(|| CaptureDamage {
+            size: output_size,
+            scale,
+            tracker: OutputDamageTracker::new(output_size, scale, Transform::Normal),
+        });
+    if entry.size != output_size || entry.scale != scale {
+        *entry = CaptureDamage {
+            size: output_size,
+            scale,
+            tracker: OutputDamageTracker::new(output_size, scale, Transform::Normal),
+        };
+    }
+    let rects = match entry.tracker.damage_output(1, elements) {
+        Ok((Some(rects), _)) => rects.clone(),
+        Ok((None, _)) => Vec::new(),
+        // No mode: can't tell, so don't hold the frame back.
+        Err(_) => return true,
+    };
+    let region = inner.region;
+    inner.damage = rects
+        .iter()
+        .filter_map(|r| {
+            let r: Rectangle<i32, BufferCoord> =
+                Rectangle::new((r.loc.x, r.loc.y).into(), (r.size.w, r.size.h).into());
+            r.intersection(region)
+                .map(|i| Rectangle::new((i.loc.x - region.loc.x, i.loc.y - region.loc.y).into(), i.size))
+        })
+        .collect();
+    !inner.damage.is_empty()
+}
+
+/// Complete a successfully captured frame: `damage` event(s) if the client
+/// used `copy_with_damage`, then `ready` — in that order, matching wlroots.
+/// The damage is what changed since the client's previous capture (see
+/// [`has_damage_for_client`]), falling back to the whole region. Reads
+/// `with_damage`/`damage`/`region` from the frame's own user data so both the
+/// dmabuf and shm paths share one code path.
 ///
 /// We never send the `YInvert` flag: both render paths land rows top-to-bottom
 /// (upright). The dmabuf path was previously assumed bottom-up because it
@@ -378,17 +512,27 @@ pub fn process_pending<R>(
 /// once flipped `shoestring-screenshot` PNGs, portal frames, and `grim`.
 fn finish_frame(frame: &ZwlrScreencopyFrameV1) {
     if let Some(user) = frame.data::<ScreencopyFrameData>() {
-        let (with_damage, region) = {
+        let (with_damage, region, damage) = {
             let inner = user.inner.lock().unwrap();
-            (inner.with_damage, inner.region)
+            (inner.with_damage, inner.region, inner.damage.clone())
         };
         if with_damage {
-            frame.damage(
-                0,
-                0,
-                region.size.w.max(0) as u32,
-                region.size.h.max(0) as u32,
-            );
+            if damage.is_empty() {
+                frame.damage(
+                    0,
+                    0,
+                    region.size.w.max(0) as u32,
+                    region.size.h.max(0) as u32,
+                );
+            }
+            for r in damage {
+                frame.damage(
+                    r.loc.x.max(0) as u32,
+                    r.loc.y.max(0) as u32,
+                    r.size.w.max(0) as u32,
+                    r.size.h.max(0) as u32,
+                );
+            }
         }
     }
     send_ready(frame);
@@ -427,13 +571,39 @@ where
         smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
     >: RenderElement<R>,
 {
+    render_into_aged(damage_tracker, 0, renderer, framebuffer, elements, clear)
+}
+
+/// [`render_into`] with an explicit buffer `age` (0 = full repaint; 1 = the
+/// framebuffer still holds `damage_tracker`'s previous render, so only what
+/// changed since is repainted).
+pub(crate) fn render_into_aged<R>(
+    damage_tracker: &mut OutputDamageTracker,
+    age: usize,
+    renderer: &mut R,
+    framebuffer: &mut R::Framebuffer<'_>,
+    elements: &[crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >],
+    clear: [f32; 4],
+) -> Result<(), String>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::Error: std::fmt::Display,
+    <R as RendererSuper>::TextureId: Clone + 'static,
+    crate::drawing::OutputRenderElements<
+        R,
+        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<R>,
+    >: RenderElement<R>,
+{
     // Render the exact same element list the scanout composites (cursor +
     // borders on top, windows/layers, wallpaper at the bottom) into the capture
     // framebuffer, with the same clear color — so screenshots/screencasts match
     // the screen. The diagnostics overlay is the lone exception: the backend
     // adds it only after this call, keeping it out of captures.
     damage_tracker
-        .render_output(renderer, framebuffer, 0, elements, clear)
+        .render_output(renderer, framebuffer, age, elements, clear)
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))
 }

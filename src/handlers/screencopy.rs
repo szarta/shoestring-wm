@@ -84,6 +84,18 @@ impl Dispatch2<ZwlrScreencopyManagerV1, ShoestringWm> for ScreencopyManagerData 
             _ => {}
         }
     }
+
+    fn destroyed(
+        &self,
+        state: &mut ShoestringWm,
+        client: ClientId,
+        _resource: &ZwlrScreencopyManagerV1,
+    ) {
+        // Forget this client's copy_with_damage trackers (also runs on
+        // disconnect). A client holding a second manager just gets one
+        // full-damage capture next time.
+        state.screencopy.damage.retain(|(id, _), _| *id != client);
+    }
 }
 
 fn create_frame(
@@ -148,6 +160,7 @@ fn create_frame(
         buffer: None,
         used: false,
         with_damage: false,
+        damage: Vec::new(),
     }));
     let frame = data_init.init(
         new_frame,

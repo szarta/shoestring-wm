@@ -638,6 +638,8 @@ impl ShoestringWm {
                 dh.create_global::<Self, _, _>(3, crate::screencopy::ScreencopyManagerData)
             }),
             pending: Vec::new(),
+            damage: std::collections::HashMap::new(),
+            offscreen: std::collections::HashMap::new(),
         };
         // ext-image-copy-capture / ext-image-capture-source: the standardized
         // successor to wlr-screencopy, gated by the same capture flag. Its two
