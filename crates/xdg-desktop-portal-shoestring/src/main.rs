@@ -76,6 +76,22 @@ fn main() -> Result<()> {
     let rpc = portal::acquire_bus()?;
     let mut state = State::new(rpc, pw);
 
+    // Live exactly as long as our compositor: hold one idle connection to it
+    // and exit when it hangs up. Otherwise the portal survives a logout (the
+    // systemd user manager and session bus persist) still owning our bus name,
+    // and the next session's portal can't acquire it. We deliberately don't
+    // take the name over instead: a nested or headless shoestring-wm started
+    // inside a session autostarts its own portal, which must keep failing to
+    // acquire rather than steal the session's. No compositor reachable ⇒ run
+    // unwatched, as before.
+    let compositor = match wayland_client::Connection::connect_to_env() {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            tracing::warn!(error = %e, "no compositor to watch; portal lifetime not tied to it");
+            None
+        }
+    };
+
     // Only look at calls aimed at our object tree (plus D-Bus peer pings).
     state.rpc.set_filter(Box::new(|msg| match msg.typ {
         MessageType::Call => peer::filter_peer(&msg.dynheader) || portal::aimed_at_us(msg),
@@ -89,16 +105,25 @@ fn main() -> Result<()> {
 
     let dbus_fd = state.rpc.conn().as_raw_fd();
     let pw_fd = state.pw.loop_fd();
-    run_loop(&mut state, dbus_fd, shutdown_r, pw_fd)?;
+    run_loop(&mut state, dbus_fd, shutdown_r, pw_fd, compositor.as_ref())?;
 
     tracing::info!("xdg-desktop-portal-shoestring exiting cleanly");
     Ok(())
 }
 
-fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) -> Result<()> {
+fn run_loop(
+    state: &mut State,
+    dbus_fd: RawFd,
+    shutdown_r: RawFd,
+    pw_fd: RawFd,
+    compositor: Option<&wayland_client::Connection>,
+) -> Result<()> {
+    // poll(2) ignores a negative fd, so an unwatched portal just never wakes
+    // on slot 3.
+    let compositor_fd = compositor.map_or(-1, |c| c.backend().poll_fd().as_raw_fd());
     while state.running {
-        // Order: dbus, shutdown, pipewire, then one per cast with a capture in
-        // flight (its WM connection).
+        // Order: dbus, shutdown, pipewire, the compositor we live with, then
+        // one per cast with a capture in flight (its WM connection).
         let mut fds = vec![
             libc::pollfd {
                 fd: dbus_fd,
@@ -112,6 +137,11 @@ fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) 
             },
             libc::pollfd {
                 fd: pw_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: compositor_fd,
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -152,6 +182,14 @@ fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) 
             tracing::debug!("shutdown signal received");
             return Ok(());
         }
+        // Our compositor went away (logout, crash, nested WM closed): exit,
+        // releasing the bus name for the next session's portal.
+        if let Some(conn) = compositor {
+            if compositor_gone(conn, fds[3].revents) {
+                tracing::info!("compositor connection closed; exiting");
+                return Ok(());
+            }
+        }
         // D-Bus.
         if fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
             drain_and_dispatch(state)?;
@@ -163,7 +201,7 @@ fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) 
         }
         // WM connections with a capture in flight. Looked up by session, as
         // D-Bus dispatch above may have closed one.
-        for (pfd, session) in fds[3..].iter().zip(&cast_fds) {
+        for (pfd, session) in fds[4..].iter().zip(&cast_fds) {
             if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
                 if let Some(cast) = state.casts.get(session) {
                     cast.on_readable();
@@ -177,6 +215,31 @@ fn run_loop(state: &mut State, dbus_fd: RawFd, shutdown_r: RawFd, pw_fd: RawFd) 
         }
     }
     Ok(())
+}
+
+/// Whether the watched compositor connection has hung up. We never send on
+/// it, so readability means the compositor sent something (rare — a display
+/// error) or closed: read to tell which, treating only a failed read as gone.
+fn compositor_gone(conn: &wayland_client::Connection, revents: libc::c_short) -> bool {
+    if revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return true;
+    }
+    if revents & libc::POLLIN == 0 {
+        return false;
+    }
+    match conn.prepare_read() {
+        Some(guard) => match guard.read() {
+            Ok(_) => false,
+            Err(wayland_client::backend::WaylandError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                false
+            }
+            Err(_) => true,
+        },
+        // Events already queued from an earlier read; nothing to learn.
+        None => false,
+    }
 }
 
 fn drain_and_dispatch(state: &mut State) -> Result<()> {

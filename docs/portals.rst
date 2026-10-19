@@ -86,6 +86,15 @@ a cast or screenshot fails cleanly until you turn it on
 ``general.screen_capture_enabled = true`` in the config; see
 :doc:`configuration`).
 
+The backend lives exactly as long as the compositor it was started for: it
+holds an idle connection to ``$WAYLAND_DISPLAY`` and exits when that
+compositor goes away, releasing its bus name for the next session's portal
+(the systemd user manager and session bus outlive a logout, so it would
+otherwise linger). It never takes the name over from a running instance, so a
+nested or headless shoestring-wm started inside a session — whose autostart
+launches a second portal — leaves the session's portal in charge. If no
+compositor is reachable at startup it logs a warning and runs unwatched.
+
 Installation
 ------------
 
