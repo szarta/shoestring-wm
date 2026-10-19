@@ -329,7 +329,8 @@ fn start(call: &MarshalledMessage, state: &mut State) -> MarshalledMessage {
         }
     };
 
-    match cast::start(&state.pw, capture, info.width, info.height) {
+    let dmabuf = cfg.screencast_dmabuf;
+    match cast::start(&state.pw, capture, info.width, info.height, dmabuf) {
         Ok((c, node_id)) => {
             state.casts.insert(session, c);
             start_response(call, node_id)

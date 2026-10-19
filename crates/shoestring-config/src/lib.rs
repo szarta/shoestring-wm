@@ -154,6 +154,12 @@ pub struct Portal {
     ///   taken as the chosen output.
     #[serde(default = "default_screencast_chooser")]
     pub screencast_chooser: String,
+    /// Also offer screencast consumers a zero-copy dmabuf format alongside shm.
+    /// Off by default: Zoom picks the dmabuf offer when it has a GPU but renders
+    /// it black, while shm works with every consumer. Turn on for zero-copy
+    /// sharing to consumers known to import it (browsers, OBS).
+    #[serde(default)]
+    pub screencast_dmabuf: bool,
 }
 
 fn default_screencast_chooser() -> String {
@@ -165,6 +171,7 @@ impl Default for Portal {
         Self {
             screencast_output: None,
             screencast_chooser: default_screencast_chooser(),
+            screencast_dmabuf: false,
         }
     }
 }

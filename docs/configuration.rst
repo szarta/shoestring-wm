@@ -689,7 +689,7 @@ Screen-sharing portal
 
 ``[portal]`` configures the ``xdg-desktop-portal-shoestring`` screen-sharing
 backend. That backend is a separate process, but it reads this same
-``config.toml`` so the screencast output choice lives in one place. Both keys
+``config.toml`` so the screencast settings live in one place. All keys
 are optional; with no ``[portal]`` section the backend uses the region chooser
 when more than one output is connected. See :doc:`portals`.
 
@@ -698,6 +698,7 @@ when more than one output is connected. See :doc:`portals`.
     [portal]
     screencast_output = "DP-2"
     screencast_chooser = "region"
+    screencast_dmabuf = false
 
 ``screencast_output``
     Pin screencast to one output by connector name (e.g. ``"DP-2"``). When set,
@@ -716,6 +717,12 @@ when more than one output is connected. See :doc:`portals`.
     - anything else — run as a dmenu-style command: the connector names are
       written to its stdin, one per line, and the line it prints on stdout is
       taken as the chosen output (e.g. ``"wofi --dmenu"``).
+
+``screencast_dmabuf``
+    Also offer consumers a zero-copy dmabuf format (ahead of shm). Defaults to
+    ``false``: Zoom, given a GPU, picks the dmabuf offer but renders it black,
+    while shm works with every consumer. Set ``true`` for zero-copy sharing if
+    you only share to consumers known to import it (browsers, OBS).
 
 Window decorations
 ------------------

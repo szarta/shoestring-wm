@@ -224,6 +224,11 @@ Settings for the ``xdg-desktop-portal-shoestring`` screen-sharing backend
     on stdin, the chosen line on stdout). Overridden by
     ``$SHOESTRING_SCREENCAST_CHOOSER``.
 
+**screencast_dmabuf** (boolean, default ``false``)
+    Also offer screencast consumers a zero-copy dmabuf format ahead of shm.
+    Off by default because Zoom renders the dmabuf offer black; enable for
+    zero-copy sharing to browsers or OBS.
+
 [decorations] keys
 ------------------
 

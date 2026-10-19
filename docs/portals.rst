@@ -35,12 +35,10 @@ The shoestring portal backend
 (``org.freedesktop.impl.portal.desktop.shoestring``) that implements
 ``org.freedesktop.impl.portal.ScreenCast`` **and**
 ``org.freedesktop.impl.portal.Screenshot``. For ScreenCast it feeds
-PipeWire itself and offers each consumer **both dmabuf and shm**, letting
-the consumer pick: fast consumers (browsers, OBS) take zero-copy dmabuf,
-while picky ones — notably Zoom, whose bundled Mesa can't import our dmabuf
-— take shm. The older ``xdg-desktop-portal-wlr`` path could only offer one
-buffer type globally (dmabuf on a GPU box), which is why Zoom's share
-dropped.
+PipeWire itself and offers consumers shm buffers, which every consumer
+handles. ``[portal] screencast_dmabuf = true`` additionally offers zero-copy
+dmabuf ahead of shm, which browsers and OBS take — but it is off by default
+because Zoom, given a GPU, picks the dmabuf offer and renders it black.
 
 For Screenshot it captures a frame and writes a PNG, returning its
 ``file://`` URI to the frontend. A non-interactive request grabs the whole
@@ -168,10 +166,10 @@ Prerequisites
    Screenshot backends are complete: with the screen-capture gate on,
    browsers and Zoom both share the whole screen, and the Screenshot portal
    captures via the same backend — so the session no longer depends on
-   xdg-desktop-portal-wlr. ScreenCast offers each consumer **both dmabuf and
-   shm** and lets it choose: dmabuf-capable consumers (browsers, OBS) get
-   zero-copy GPU buffers the compositor renders straight into, while pickier
-   ones (Zoom) take shm — per-consumer, no global toggle. Multi-monitor
+   xdg-desktop-portal-wlr. ScreenCast streams shm by default, which works
+   with every consumer; ``[portal] screencast_dmabuf`` adds a zero-copy dmabuf
+   offer for browsers and OBS (off by default, since Zoom renders it black).
+   Multi-monitor
    sessions pick the shared output by config pin or the ``shoestring-region``
    chooser; the Screenshot ``PickColor`` eyedropper is served too. The only
    ScreenCast feature not yet implemented is the METADATA cursor mode.

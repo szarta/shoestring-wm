@@ -6,11 +6,12 @@
 //! connects and negotiates, the `process` callback fills buffers and queues
 //! them.
 //!
-//! We offer the consumer **two** formats — one carrying a LINEAR dmabuf
-//! modifier and one plain — and let it pick: dmabuf-capable consumers (browsers,
-//! OBS) negotiate the modifier format and get zero-copy GPU buffers the WM
-//! renders straight into; pickier ones (Zoom, whose bundled Mesa can't import
-//! our dmabuf) fall back to shm. `param_changed` discovers which was chosen; the
+//! We always offer a plain (shm) format. With `[portal] screencast_dmabuf` on we
+//! also offer, first, one carrying a LINEAR dmabuf modifier and let the consumer
+//! pick: dmabuf-capable consumers (browsers, OBS) negotiate the modifier format
+//! and get zero-copy GPU buffers the WM renders straight into. It is off by
+//! default because Zoom, given a GPU, picks the dmabuf offer and renders it
+//! black. `param_changed` discovers which was chosen; the
 //! `add_buffer`/`process` callbacks then either wire a gbm dmabuf into each
 //! PipeWire buffer or copy shm pixels, respectively.
 //!
@@ -135,11 +136,13 @@ pub struct Cast {
 /// `capture` is the WM frame source; the `process` callback captures a fresh
 /// frame and copies it into the PipeWire buffer (BGRx, top-to-bottom). It is
 /// shared (`Rc`) so the callback — which outlives this call — can keep using it.
+/// `offer_dmabuf` adds the zero-copy dmabuf format ahead of shm.
 pub fn start(
     pw: &Pw,
     capture: Rc<RefCell<Capture>>,
     width: u32,
     height: u32,
+    offer_dmabuf: bool,
 ) -> Result<(Cast, u32)> {
     let stream = StreamRc::new(
         pw.core.clone(),
@@ -300,16 +303,16 @@ pub fn start(
         .register()
         .map_err(|e| anyhow!("pw stream register: {e}"))?;
 
-    // Offer two formats, both BGRx / requested size / 30fps: one carrying a
-    // LINEAR dmabuf modifier (zero-copy consumers — browsers, OBS) and one plain
-    // (shm consumers — Zoom, whose Mesa can't import our dmabuf). The consumer
-    // picks; we discover which in `param_changed`.
+    // Offer BGRx / requested size / 30fps as plain shm, preceded (when enabled)
+    // by a LINEAR dmabuf variant for zero-copy consumers — browsers, OBS. The
+    // consumer picks; we discover which in `param_changed`.
     let dmabuf_bytes = format_pod(width, height, true);
     let shm_bytes = format_pod(width, height, false);
-    let mut params = [
-        Pod::from_bytes(&dmabuf_bytes).context("dmabuf format pod")?,
-        Pod::from_bytes(&shm_bytes).context("shm format pod")?,
-    ];
+    let mut params = Vec::with_capacity(2);
+    if offer_dmabuf {
+        params.push(Pod::from_bytes(&dmabuf_bytes).context("dmabuf format pod")?);
+    }
+    params.push(Pod::from_bytes(&shm_bytes).context("shm format pod")?);
 
     stream
         .connect(
