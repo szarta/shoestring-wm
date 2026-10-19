@@ -68,8 +68,10 @@ struct State {
 
 fn decode_states(bytes: &[u8]) -> Vec<u32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_ne_bytes(*c))
         .collect()
 }
 

@@ -491,8 +491,12 @@ fn has_damage_for_client<E: smithay::backend::renderer::element::Element>(
         .filter_map(|r| {
             let r: Rectangle<i32, BufferCoord> =
                 Rectangle::new((r.loc.x, r.loc.y).into(), (r.size.w, r.size.h).into());
-            r.intersection(region)
-                .map(|i| Rectangle::new((i.loc.x - region.loc.x, i.loc.y - region.loc.y).into(), i.size))
+            r.intersection(region).map(|i| {
+                Rectangle::new(
+                    (i.loc.x - region.loc.x, i.loc.y - region.loc.y).into(),
+                    i.size,
+                )
+            })
         })
         .collect();
     !inner.damage.is_empty()

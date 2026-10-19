@@ -1056,7 +1056,7 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
     {
         let mut row = vec![0u8; stride as usize];
         let bg = COLOR_BG.to_ne_bytes();
-        for px in row.chunks_exact_mut(4) {
+        for px in row.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&bg);
         }
         for _ in 0..ph {

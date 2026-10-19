@@ -341,8 +341,10 @@ mod tests {
                     for &fs in &[false, true] {
                         let bytes = state_array_bytes(m, mi, a, fs);
                         let has_3 = bytes
-                            .chunks_exact(4)
-                            .any(|chunk| u32::from_ne_bytes(chunk.try_into().unwrap()) == 3);
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .any(|chunk| u32::from_ne_bytes(*chunk) == 3);
                         assert_eq!(has_3, fs, "fullscreen code must track its flag");
                     }
                 }

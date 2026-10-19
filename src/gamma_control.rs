@@ -206,8 +206,8 @@ pub fn read_ramp_from_fd(fd: OwnedFd, size: u32) -> Result<GammaRamp, GammaReadE
     // SAFETY: mmap returned `bytes` of readable memory; we never outlive it.
     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
     let mut all = vec![0u16; count];
-    for (dst, chunk) in all.iter_mut().zip(slice.chunks_exact(2)) {
-        *dst = u16::from_ne_bytes([chunk[0], chunk[1]]);
+    for (dst, chunk) in all.iter_mut().zip(slice.as_chunks::<2>().0) {
+        *dst = u16::from_ne_bytes(*chunk);
     }
     // SAFETY: unmapping exactly the region we mapped, after copying it out.
     unsafe {

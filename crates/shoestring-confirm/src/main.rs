@@ -406,7 +406,7 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, scale: f64, prompt: &str, font: &Fo
     let dim = [0u8, 0u8, 0u8, DIM_ALPHA];
     {
         let mut row = vec![0u8; stride];
-        for chunk in row.chunks_exact_mut(4) {
+        for chunk in row.as_chunks_mut::<4>().0 {
             chunk.copy_from_slice(&dim);
         }
         for y in 0..h as usize {

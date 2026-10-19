@@ -273,7 +273,7 @@ fn compose(
     // tiny-skia stores premultiplied RGBA; Fourcc::Argb8888 wants premultiplied
     // BGRA in memory — swap R/B.
     let mut bytes = canvas.take();
-    for px in bytes.chunks_exact_mut(4) {
+    for px in bytes.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     bytes

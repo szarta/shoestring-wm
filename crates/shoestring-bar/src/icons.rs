@@ -263,7 +263,7 @@ fn scale_pixmap(src: tiny_skia::Pixmap, size: u16) -> Option<tiny_skia::Pixmap> 
 fn pixmap_to_icon(pixmap: tiny_skia::Pixmap) -> Icon {
     let (width, height) = (pixmap.width(), pixmap.height());
     let mut bgra = pixmap.take();
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     Icon {

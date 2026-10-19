@@ -272,7 +272,7 @@ fn measure(font: &Font, size_px: f32, text: &str) -> u32 {
 
 /// Flood the buffer with a straight-RGBA color.
 fn fill(buf: &mut [u8], w: u32, h: u32, [r, g, b, a]: [u8; 4]) {
-    for px in buf[..(w * h * 4) as usize].chunks_exact_mut(4) {
+    for px in buf[..(w * h * 4) as usize].as_chunks_mut::<4>().0 {
         px.copy_from_slice(&[r, g, b, a]);
     }
 }
@@ -368,7 +368,7 @@ fn blit_alpha(
 /// little-endian byte order (`[B, G, R, A]`), which is what `wl_shm` /
 /// `Fourcc::Argb8888` consumers expect.
 fn premultiply_to_bgra(buf: &mut [u8]) {
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         let (r, g, b, a) = (px[0] as u16, px[1] as u16, px[2] as u16, px[3] as u16);
         px[0] = (b * a / 255) as u8;
         px[1] = (g * a / 255) as u8;

@@ -448,7 +448,7 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, scale: f64, rect: Option<(i32, i32,
     // Fill the whole surface with dim.
     {
         let mut row = vec![0u8; stride];
-        for chunk in row.chunks_exact_mut(4) {
+        for chunk in row.as_chunks_mut::<4>().0 {
             chunk.copy_from_slice(&dim);
         }
         for y in 0..h as usize {
@@ -477,7 +477,7 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, scale: f64, rect: Option<(i32, i32,
         let off = y * stride + x0 * 4;
         let end = y * stride + x1 * 4;
         let row = &mut mmap[off..end];
-        for px in row.chunks_exact_mut(4) {
+        for px in row.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&clear);
         }
     }
@@ -495,7 +495,7 @@ fn paint(mmap: &mut MmapMut, w: u32, h: u32, scale: f64, rect: Option<(i32, i32,
         let off = y * stride + lo * 4;
         let end = y * stride + hi * 4;
         let row = &mut mmap[off..end];
-        for px in row.chunks_exact_mut(4) {
+        for px in row.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&BORDER);
         }
     };

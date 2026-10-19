@@ -17,6 +17,7 @@
 use anyhow::{anyhow, Context, Result};
 use memmap2::MmapMut;
 use wayland_client::{
+    backend::WaylandError,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
@@ -25,7 +26,6 @@ use wayland_client::{
         wl_shm::{self, WlShm},
         wl_shm_pool::WlShmPool,
     },
-    backend::WaylandError,
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
