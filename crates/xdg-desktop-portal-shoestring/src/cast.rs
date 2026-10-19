@@ -65,6 +65,16 @@ impl Pw {
         let core = context
             .connect_rc(None)
             .map_err(|e| anyhow!("pw connect: {e}"))?;
+        // Enter the loop once, on this (the main) thread, and never leave. The
+        // guarded `iterate()` enters + leaves around every call, leaving the loop
+        // ownerless in between — and spa's `loop_invoke` treats an ownerless
+        // loop as "already on the loop thread", so the data thread would run
+        // our stream callbacks (`process`, ...) itself, racing the main thread
+        // on the `Rc<RefCell<Capture>>`. Staying entered makes it queue them to
+        // us instead (signalled via `loop_fd`).
+        // SAFETY: paired with nothing — the loop stays entered for the life of
+        // the process, and every iterate below is on this same thread.
+        unsafe { main_loop.loop_().enter() };
         Ok(Self {
             main_loop,
             _context: context,
@@ -80,7 +90,13 @@ impl Pw {
     /// Pump the PipeWire loop once, non-blocking. Call when [`Self::loop_fd`]
     /// is readable.
     pub fn iterate(&self) {
-        self.main_loop.loop_().iterate(Timeout::None);
+        self.iterate_for(Timeout::None);
+    }
+
+    /// One loop iteration without the enter/leave guard (see [`Self::new`]).
+    fn iterate_for(&self, timeout: Timeout) {
+        // SAFETY: the loop was entered on this thread in `new` and stays entered.
+        unsafe { self.main_loop.loop_().iterate_unguarded(timeout) };
     }
 }
 
@@ -307,9 +323,7 @@ pub fn start(
     // node_id is assigned asynchronously; pump the loop until it appears.
     let mut tries = 0;
     while stream.node_id() == pw::constants::ID_ANY && tries < 100 {
-        pw.main_loop
-            .loop_()
-            .iterate(Timeout::Finite(Duration::from_millis(10)));
+        pw.iterate_for(Timeout::Finite(Duration::from_millis(10)));
         tries += 1;
     }
     let node_id = stream.node_id();
