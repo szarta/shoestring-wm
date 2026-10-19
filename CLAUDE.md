@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+@AGENTS.md
+
 Agent notes for working on **shoestring-wm**. See `README.md` for the
 project overview and `docs/` for the full manual. This file covers the
 things that aren't obvious from the source: how to drive the **running**
@@ -76,7 +78,9 @@ returns stdout/stderr/exit as JSON). See `docs/ipc.rst` for the rest.
 
 ## Project conventions
 
-- Task list lives in `todo.sqlite`, managed via `todo-sqlite-cli` (on
-  `$PATH`) — don't query the DB directly.
+- The maintainer's task list lives outside the repository, managed via
+  `todo-sqlite-cli`; a gitignored `.todo-sqlite-cli` marker at the repo
+  root names the database. Use the CLI, never query the DB directly, and
+  keep task ids and titles out of public files (see `AGENTS.md`).
 - Docs are reStructuredText under `docs/` (Sphinx). Keep `docs/ipc.rst`
   in sync when the IPC surface changes.

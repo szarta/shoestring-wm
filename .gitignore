@@ -17,5 +17,5 @@ clients/typescript/node_modules/
 clients/typescript/dist/
 clients/typescript/package-lock.json
 
-# Python bytecode cache (e.g. from running the example).
-clients/python/__pycache__/
+# Python bytecode cache (the example client, the commit-policy guards).
+__pycache__/

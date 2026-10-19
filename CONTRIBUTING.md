@@ -146,10 +146,11 @@ cargo build --workspace --release
 ```
 
 A [pre-commit](https://pre-commit.com/) config wires fmt + clippy + test
-(and `ruff` for the Python tooling) into a git hook:
+(and `ruff` for the Python tooling) into a git hook, plus a `commit-msg`
+hook that checks the sign-off:
 
 ```sh
-pre-commit install            # run the hooks on every commit
+pre-commit install            # install the pre-commit and commit-msg hooks
 pre-commit run --all-files    # run them now, across the tree
 ```
 
@@ -271,7 +272,10 @@ discuss the approach.
 
 1. Fork and branch from `main`.
 2. Make the change, keeping commits focused and their messages explaining
-   *why*, not just *what*.
+   *why*, not just *what*. Sign off each commit (`git commit -s`, a DCO
+   sign-off; the `commit-msg` hook rejects one without it) and follow the
+   commit rules in [AGENTS.md](AGENTS.md), which apply to agents and people
+   alike.
 3. Run the full local check sequence (fmt, clippy, test, release build) —
    and the relevant integration/WLCS suites if you touched input, output,
    or protocol code.

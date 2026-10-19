@@ -2,6 +2,9 @@
 # Install: pre-commit install
 # Run manually: pre-commit run --all-files
 
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+
 repos:
   - repo: local
     hooks:
@@ -38,9 +41,13 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.11
     hooks:
+      # The commit-policy guards under scripts/ are kept byte-identical
+      # with the maintainer's other repositories, so ruff leaves them alone.
       - id: ruff-check    # lint (auto-fix what it safely can)
         args: [--fix]
+        exclude: &policy-guards ^scripts/(check_|test_check_).*\.py$
       - id: ruff-format   # format, the Python counterpart to cargo fmt
+        exclude: *policy-guards
 
   # knots complexity gate. The default `knots` hook ships args
   # [--aird-threshold=85], so no override is needed here. To tighten or add
@@ -51,3 +58,20 @@ repos:
     hooks:
       - id: knots
         types_or: [rust, python]
+
+  # Commit policy (see AGENTS.md): DCO sign-off required, AI attribution
+  # trailers rejected. The guard tests cover this check and the Codex
+  # PreToolUse guard in scripts/check_agent_command.py.
+  - repo: local
+    hooks:
+      - id: commit-message-policy
+        name: DCO sign-off and no AI attribution trailers
+        entry: python3 scripts/check_commit_message.py
+        language: system
+        stages: [commit-msg]
+      - id: agent-guard-tests
+        name: agent and commit guard regression tests
+        entry: python3 -W error::ResourceWarning -m unittest discover -s scripts -p test_check_*.py
+        language: system
+        pass_filenames: false
+        files: ^scripts/(check_|test_check_).*\.py$

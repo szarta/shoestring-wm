@@ -168,7 +168,7 @@ Working today:
 
 ## Roadmap
 
-Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
+Notable open items:
 
 - Server-side decoration rendering (border + optional titlebar).
 - FreeBSD smoke-test of the winit build.
@@ -178,7 +178,14 @@ Tracked in `todo.sqlite` (via `todo-sqlite-cli`). Notable open items:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, run, and test the
 project, and [`docs/architecture.md`](docs/architecture.md) for the design
-and the reasoning behind it.
+and the reasoning behind it. Commit rules for people and agents alike (hooks, DCO
+sign-off, attribution) are in [AGENTS.md](AGENTS.md).
+
+## AI Assistance
+
+shoestring-wm was developed with assistance from [Claude](https://claude.ai) (Anthropic), used for code generation, bug fixes, release packaging, and documentation.
+
+Many earlier commits have a `Co-Authored-By: Claude` trailer, but not every AI-assisted commit does, so the trailers are not a complete record. From October 2026 the contribution is acknowledged once, here, and not with a co-author trailer on each commit.
 
 ## License
 

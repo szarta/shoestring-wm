@@ -1,0 +1,48 @@
+name: Agent and commit policy
+
+# The AGENTS.md commit rules, checked independently of local hooks: every
+# non-Rust pre-commit hook, the guard regression tests, and the commit-msg
+# policy over each new commit. The Rust hooks (fmt, clippy, test) are
+# skipped here because the CI workflow already runs them with the full
+# system dependency set.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  agent-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run non-Rust hooks
+        env:
+          SKIP: cargo-fmt,cargo-clippy,cargo-test
+        run: pre-commit run --all-files
+      - name: Guard regression tests
+        run: python3 -W error::ResourceWarning -m unittest discover -s scripts -p 'test_check_*.py' -v
+      - name: Check new commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          message=$(mktemp)
+          trap 'rm -f "$message"' EXIT
+          if [[ "$BASE_SHA" =~ ^0+$ ]]; then
+            commits=$(git rev-list -1 "$HEAD_SHA")
+          else
+            commits=$(git rev-list "$BASE_SHA..$HEAD_SHA")
+          fi
+          for commit in $commits; do
+            git show -s --format=%B "$commit" > "$message"
+            pre-commit run --hook-stage commit-msg --commit-msg-filename "$message"
+          done
