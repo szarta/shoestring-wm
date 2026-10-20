@@ -37,7 +37,7 @@ use smithay::{
             ImportMem, Renderer, Texture,
         },
     },
-    utils::{Logical, Physical, Point, Size, Transform},
+    utils::{Logical, Physical, Point, Rectangle, Size, Transform},
 };
 // tiny-skia comes in transitively via resvg; use its re-export so versions
 // can't drift (same pattern as the bar's icon renderer).
@@ -143,18 +143,30 @@ impl Wallpaper {
         R: Renderer + ImportMem,
         R::TextureId: Texture + Clone + Send + 'static,
     {
-        let buffer = &self.canvases.get(output)?.buffer;
+        let canvas = self.canvases.get(output)?;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             Point::<i32, Physical>::from((0, 0)).to_f64(),
-            buffer,
+            &canvas.buffer,
             None,
-            None,
+            Some(whole_buffer_src(canvas.key.phys)),
             Some(logical),
             Kind::Unspecified,
         )
         .ok()
     }
+}
+
+/// The source rectangle covering the *entire* composited canvas, for
+/// [`Wallpaper::element`]. The buffer is built at physical pixels with buffer
+/// scale 1, so its logical size equals its physical size `phys`.
+///
+/// This must be passed explicitly. `MemoryRenderBufferRenderElement::from_buffer`
+/// defaults a `None` source rect to the *destination* size, which would sample
+/// only the buffer's top-left `logical`-sized corner — on a scale-2 output, the
+/// top-left quarter — and stretch that to fill the screen.
+fn whole_buffer_src((pw, ph): (i32, i32)) -> Rectangle<f64, Logical> {
+    Rectangle::from_size(Size::<i32, Logical>::from((pw, ph)).to_f64())
 }
 
 /// Straight RGBA floats → `[r, g, b, a]` bytes.
@@ -442,6 +454,16 @@ mod tests {
         assert!(wp
             .stale_sources
             .contains_key(Path::new("/nonexistent/a.png")));
+    }
+
+    #[test]
+    fn whole_buffer_src_covers_entire_canvas() {
+        // The element must sample the whole physical canvas, origin-anchored —
+        // not the top-left `logical`-sized corner that a `None` source rect
+        // would default to (the scale-2 top-left-quarter wallpaper bug).
+        let src = whole_buffer_src((2736, 1824));
+        assert_eq!((src.loc.x, src.loc.y), (0.0, 0.0));
+        assert_eq!((src.size.w, src.size.h), (2736.0, 1824.0));
     }
 
     #[test]
