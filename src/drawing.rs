@@ -281,7 +281,7 @@ impl ShoestringWm {
         let clear = if locked {
             [0.0, 0.0, 0.0, 1.0]
         } else {
-            self.config.background.color_rgba()
+            self.background_rgba(output)
         };
 
         // Rebuild the wallpaper canvas if the output size / config changed
@@ -327,8 +327,8 @@ impl ShoestringWm {
         );
         elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
         if !locked {
-            if let Some((phys, logical)) = self.wallpaper_dims(output) {
-                if let Some(el) = self.wallpaper.element(renderer, phys, logical) {
+            if let Some((name, logical)) = self.wallpaper_dims(output) {
+                if let Some(el) = self.wallpaper.element(renderer, &name, logical) {
                     elements.push(OutputRenderElements::Memory(el));
                 }
             }

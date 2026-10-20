@@ -1707,8 +1707,8 @@ impl ShoestringWm {
                 .into_iter()
                 .map(crate::drawing::OutputRenderElements::Space),
         );
-        if let Some((phys, logical)) = wallpaper_dims {
-            if let Some(el) = self.wallpaper.element(&mut renderer, phys, logical) {
+        if let Some((name, logical)) = wallpaper_dims {
+            if let Some(el) = self.wallpaper.element(&mut renderer, &name, logical) {
                 elements.push(crate::drawing::OutputRenderElements::Memory(el));
             }
         }
@@ -1719,7 +1719,7 @@ impl ShoestringWm {
         let clear = if locked {
             [0.0, 0.0, 0.0, 1.0]
         } else {
-            self.config.background.color_rgba()
+            self.config.background_for(&output.name()).color_rgba()
         };
 
         // Run any pending screencopy captures for this output BEFORE the scanout

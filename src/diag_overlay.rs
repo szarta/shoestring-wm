@@ -415,34 +415,36 @@ impl crate::state::ShoestringWm {
         self.diag_overlay.enabled && self.diag_overlay_output().as_ref() == Some(output)
     }
 
-    /// Rebuild the wallpaper canvas for `output` if its physical size or the
-    /// `[background]` config changed. A no-op when nothing changed, so it's
-    /// safe to call every frame. Must run *before* the renderer borrow (it
-    /// takes `&mut self`); the element is built later from the buffer. The
-    /// `self.wallpaper` / `self.config` borrows are disjoint fields, so this
-    /// needs no clone.
+    /// Rebuild the wallpaper canvas for `output` if its physical size or its
+    /// effective background (`[background]` plus any per-output override)
+    /// changed. A no-op when nothing changed, so it's safe to call every frame.
+    /// Must run *before* the renderer borrow (it takes `&mut self`); the element
+    /// is built later from the buffer. The `self.wallpaper` / `self.config`
+    /// borrows are disjoint fields, so this needs no clone.
     pub fn refresh_wallpaper(&mut self, output: &Output) {
         let Some(mode) = output.current_mode() else {
             return;
         };
+        let name = output.name();
+        let background = self.config.background_for(&name);
         self.wallpaper
-            .ensure(&self.config.background, (mode.size.w, mode.size.h));
+            .ensure(&name, &background, (mode.size.w, mode.size.h));
     }
 
-    /// The output's physical mode size and logical size, for the wallpaper
-    /// element (physical selects the cached canvas; logical sizes the element).
-    /// `None` when the output has no current mode. Logical falls back to
-    /// deriving from the mode and scale when the output isn't mapped into the
-    /// space yet.
+    /// Clear color for `output`: its effective background color.
+    pub fn background_rgba(&self, output: &Output) -> [f32; 4] {
+        self.config.background_for(&output.name()).color_rgba()
+    }
+
+    /// The output's connector name and logical size, for the wallpaper element
+    /// (the name selects the cached canvas; logical sizes the element). `None`
+    /// when the output has no current mode. Logical falls back to deriving from
+    /// the mode and scale when the output isn't mapped into the space yet.
     pub fn wallpaper_dims(
         &self,
         output: &Output,
-    ) -> Option<(
-        (i32, i32),
-        smithay::utils::Size<i32, smithay::utils::Logical>,
-    )> {
+    ) -> Option<(String, smithay::utils::Size<i32, smithay::utils::Logical>)> {
         let mode = output.current_mode()?;
-        let phys = (mode.size.w, mode.size.h);
         let logical = self
             .space
             .output_geometry(output)
@@ -455,7 +457,7 @@ impl crate::state::ShoestringWm {
                 )
                     .into()
             });
-        Some((phys, logical))
+        Some((output.name(), logical))
     }
 
     /// Rebuild the overlay buffer for `output` when due (throttled, or on a

@@ -270,6 +270,14 @@ are optional; unset fields fall back to the matching ``[general]`` default.
        later ``wlr-output-management`` apply (e.g. ``wlr-randr --transform``)
        overrides whatever is set here. ``shoestring-ctl outputs`` reports
        the live orientation in each output's ``transform`` field.
+   * - ``background``
+     - table
+     - ``[background]``
+     - Per-output desktop background, written as an
+       ``[outputs.<name>.background]`` table with the same ``color``,
+       ``image``, and ``mode`` keys as ``[background]``. Each key set here
+       overrides the global one on this output only; unset keys inherit.
+       Applied on config hot-reload. See *Desktop background* below.
 
 Example - a HiDPI laptop panel at 2× on the left, 1× external (a VRR gaming
 monitor) on the right::
@@ -817,8 +825,9 @@ identically in screenshots and screen-sharing.
 
 The wallpaper is rendered per output at that output's resolution, so it stays
 crisp on a HiDPI panel. On a multi-monitor setup every output shows the same
-background. Edits take effect on the next frame via config hot-reload - no
-restart needed.
+background unless that output has an ``[outputs.<name>.background]`` override
+(see *A different wallpaper per monitor* below). Edits take effect on the next
+frame via config hot-reload - no restart needed.
 
 ::
 
@@ -856,6 +865,28 @@ restart needed.
     ``tile``          Repeat the image at its native size from the
                       top-left to fill the output.
     ================  ===============================================
+
+A different wallpaper per monitor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An ``[outputs.<name>.background]`` table overrides ``[background]`` for one
+output. It takes the same ``color``, ``image``, and ``mode`` keys, and any key
+left out inherits the global value. Outputs with no override keep showing the
+global background. ``<name>`` is the connector name (see the note under
+``[outputs.<name>]``)::
+
+    [background]
+    color = "#000000"
+    mode = "fill"
+
+    [outputs.DP-2.background]       # left monitor
+    image = "~/Pictures/space1.png"
+
+    [outputs.DP-1.background]       # right monitor
+    image = "~/Pictures/space2.png"
+
+Each image is fitted to its own output, so a wallpaper never spans two
+monitors. An image used by more than one output is decoded once.
 
 The ``[clipboard]`` section
 ---------------------------

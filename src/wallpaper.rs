@@ -12,10 +12,13 @@
 //! overlay it is a real scene element, so it composites identically into
 //! screenshots and screencasts.
 //!
-//! The composited canvas is cached and only rebuilt when its inputs change —
-//! the output's physical size, the configured color/mode, or the image path
-//! (on config hot-reload). The decoded source image is cached separately so a
-//! mere output resize re-fits without re-decoding from disk.
+//! Each output resolves its own background (`[background]` with any
+//! `[outputs.<name>.background]` override laid over it), so monitors can show
+//! different wallpapers. The composited canvas is cached per output and only
+//! rebuilt when its inputs change — the output's physical size, the effective
+//! color/mode, or the image path (on config hot-reload). Decoded source images
+//! are cached separately, by path, so a mere output resize re-fits without
+//! re-decoding from disk and outputs sharing an image decode it once.
 
 use std::{
     collections::HashMap,
@@ -50,13 +53,6 @@ struct CanvasKey {
     phys: (i32, i32),
 }
 
-/// A decoded source image kept in premultiplied-RGBA `tiny_skia::Pixmap` form,
-/// cached by path so an output resize re-fits without re-reading the file.
-struct DecodedImage {
-    path: PathBuf,
-    pixmap: tiny_skia::Pixmap,
-}
-
 /// A composited output-sized canvas plus the inputs that produced it, so a
 /// no-change frame reuses it instead of re-compositing.
 struct Canvas {
@@ -64,29 +60,36 @@ struct Canvas {
     buffer: MemoryRenderBuffer,
 }
 
-/// Per-WM wallpaper state: one composited canvas per distinct output resolution
-/// (so a mixed-resolution multi-monitor setup doesn't thrash a single shared
-/// buffer), plus the shared decoded source. Outputs of the same size share a
-/// canvas.
+/// Per-WM wallpaper state: one composited canvas per output (keyed by connector
+/// name, since each output may resolve a different background), plus decoded
+/// source images keyed by path. A path that failed to decode is cached as
+/// `None` so it is not re-read every frame.
 #[derive(Default)]
 pub struct Wallpaper {
-    canvases: HashMap<(i32, i32), Canvas>,
-    source: Option<DecodedImage>,
+    canvases: HashMap<String, Canvas>,
+    sources: HashMap<PathBuf, Option<tiny_skia::Pixmap>>,
+    /// Sources from before the last [`invalidate`](Self::invalidate). Reused if
+    /// the new config still names them, dropped at the next invalidate if not,
+    /// so images no longer configured don't pin memory.
+    stale_sources: HashMap<PathBuf, Option<tiny_skia::Pixmap>>,
 }
 
 impl Wallpaper {
-    /// Drop the cached canvases (but keep the decoded source) so the next
-    /// [`ensure`](Self::ensure) per output rebuilds. Called on config
-    /// hot-reload — the color/mode may have changed even if sizes haven't.
+    /// Drop the cached canvases so the next [`ensure`](Self::ensure) per output
+    /// rebuilds. Called on config hot-reload — the color/mode/image may have
+    /// changed even if sizes haven't. Decoded sources are kept for one more
+    /// generation so an unchanged path isn't re-read from disk.
     pub fn invalidate(&mut self) {
         self.canvases.clear();
+        self.stale_sources = std::mem::take(&mut self.sources);
     }
 
-    /// (Re)build the composited canvas for an output of `phys` physical pixels
-    /// under `cfg`, if the cache for that size is stale. No-op when nothing
-    /// changed. Decodes the image on first use / path change; a missing or
-    /// undecodable image logs once and leaves the solid color showing.
-    pub fn ensure(&mut self, cfg: &Background, phys: (i32, i32)) {
+    /// (Re)build the composited canvas for `output` (`phys` physical pixels)
+    /// under its effective background `cfg`, if the cache for that output is
+    /// stale. No-op when nothing changed. Decodes the image on first use / path
+    /// change; a missing or undecodable image logs once and leaves the solid
+    /// color showing.
+    pub fn ensure(&mut self, output: &str, cfg: &Background, phys: (i32, i32)) {
         if phys.0 <= 0 || phys.1 <= 0 {
             return;
         }
@@ -97,30 +100,22 @@ impl Wallpaper {
             color: color_u8(cfg.color_rgba()),
             phys,
         };
-        if self.canvases.get(&phys).is_some_and(|c| c.key == key) {
+        if self.canvases.get(output).is_some_and(|c| c.key == key) {
             return;
         }
 
-        // Refresh the decoded source if the path changed (or was cleared).
-        match &image {
-            Some(path) => {
-                let stale = self.source.as_ref().is_none_or(|s| &s.path != path);
-                if stale {
-                    self.source = decode_image(path).map(|pixmap| DecodedImage {
-                        path: path.clone(),
-                        pixmap,
-                    });
-                }
+        let source = image.as_ref().and_then(|path| {
+            if !self.sources.contains_key(path) {
+                let decoded = self
+                    .stale_sources
+                    .remove(path)
+                    .unwrap_or_else(|| decode_image(path));
+                self.sources.insert(path.clone(), decoded);
             }
-            None => self.source = None,
-        }
+            self.sources[path].as_ref()
+        });
 
-        let canvas = compose(
-            key.color,
-            cfg.mode,
-            self.source.as_ref().map(|s| &s.pixmap),
-            phys,
-        );
+        let canvas = compose(key.color, cfg.mode, source, phys);
         let buffer = MemoryRenderBuffer::from_slice(
             &canvas,
             Fourcc::Argb8888,
@@ -129,25 +124,26 @@ impl Wallpaper {
             Transform::Normal,
             None,
         );
-        self.canvases.insert(phys, Canvas { key, buffer });
+        self.canvases
+            .insert(output.to_owned(), Canvas { key, buffer });
     }
 
-    /// Build the bottom-most render element covering the whole output. `logical`
-    /// is the output's logical size and `phys` its physical size (which selects
-    /// the cached canvas); the canvas (built at physical pixels with buffer
+    /// Build the bottom-most render element covering `output`. `logical` is the
+    /// output's logical size; the canvas (built at physical pixels with buffer
     /// scale 1) is scaled to `logical` so it fills the output at any output
-    /// scale. `None` until [`ensure`](Self::ensure) has built this size's canvas.
+    /// scale. `None` until [`ensure`](Self::ensure) has built this output's
+    /// canvas.
     pub fn element<R>(
         &self,
         renderer: &mut R,
-        phys: (i32, i32),
+        output: &str,
         logical: Size<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<R>>
     where
         R: Renderer + ImportMem,
         R::TextureId: Texture + Clone + Send + 'static,
     {
-        let buffer = &self.canvases.get(&phys)?.buffer;
+        let buffer = &self.canvases.get(output)?.buffer;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             Point::<i32, Physical>::from((0, 0)).to_f64(),
@@ -411,6 +407,41 @@ mod tests {
                 assert_eq!(px(&canvas, phys, x, y), [0, 255, 0, 255], "at {x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn same_size_outputs_keep_separate_canvases() {
+        let bg = |color: &str| Background {
+            color: color.into(),
+            ..Background::default()
+        };
+        let mut wp = Wallpaper::default();
+        wp.ensure("DP-1", &bg("#ff0000"), (4, 4));
+        wp.ensure("DP-2", &bg("#0000ff"), (4, 4));
+        assert_eq!(wp.canvases["DP-1"].key.color, [255, 0, 0, 255]);
+        assert_eq!(wp.canvases["DP-2"].key.color, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn invalidate_keeps_only_sources_still_in_use() {
+        let missing = |name: &str| Background {
+            image: Some(format!("/nonexistent/{name}.png")),
+            ..Background::default()
+        };
+        let mut wp = Wallpaper::default();
+        wp.ensure("DP-1", &missing("a"), (4, 4));
+        wp.ensure("DP-2", &missing("b"), (4, 4));
+        assert_eq!(wp.sources.len(), 2);
+
+        // After a reload that drops "b", only "a" survives the next generation.
+        wp.invalidate();
+        wp.ensure("DP-1", &missing("a"), (4, 4));
+        wp.ensure("DP-2", &missing("a"), (4, 4));
+        wp.invalidate();
+        assert_eq!(wp.stale_sources.len(), 1);
+        assert!(wp
+            .stale_sources
+            .contains_key(Path::new("/nonexistent/a.png")));
     }
 
     #[test]

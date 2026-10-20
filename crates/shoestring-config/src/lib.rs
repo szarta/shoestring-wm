@@ -43,6 +43,25 @@ pub struct OutputConfig {
     /// overrides whatever is configured here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<OutputTransform>,
+    /// Per-output desktop background (`[outputs.<name>.background]`). Each
+    /// field set here overrides the matching `[background]` field on this
+    /// output only; unset fields inherit. Resolve with
+    /// [`Config::background_for`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<BackgroundOverride>,
+}
+
+/// Field-by-field override of [`Background`] for one output. Every field is
+/// optional; an unset one inherits the global `[background]` value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<BackgroundMode>,
 }
 
 /// Output orientation, matching the `wl_output` / `wlr-randr` transform names.
@@ -1508,6 +1527,26 @@ impl WindowMatch {
 }
 
 impl Config {
+    /// The effective background for the output named `output_name`: the global
+    /// `[background]` with any `[outputs.<name>.background]` fields laid over
+    /// it. Borrows the global section when the output has no override, so it is
+    /// cheap to call every frame.
+    pub fn background_for(&self, output_name: &str) -> std::borrow::Cow<'_, Background> {
+        let Some(ov) = self
+            .outputs
+            .get(output_name)
+            .and_then(|o| o.background.as_ref())
+        else {
+            return std::borrow::Cow::Borrowed(&self.background);
+        };
+        let base = &self.background;
+        std::borrow::Cow::Owned(Background {
+            color: ov.color.clone().unwrap_or_else(|| base.color.clone()),
+            image: ov.image.clone().or_else(|| base.image.clone()),
+            mode: ov.mode.unwrap_or(base.mode),
+        })
+    }
+
     /// Human-readable errors for every `[[window_rules]]` matcher whose
     /// `app_id_regex` / `title_regex` fails to compile. Empty when all
     /// patterns are valid (or none are set). The WM calls this at config
@@ -2248,6 +2287,41 @@ actions = { sticky = true, always_on_top = true }
         let oc = cfg.outputs.get("eDP-1").unwrap();
         assert_eq!(oc.scale, Some(2.0));
         assert_eq!(oc.position, Some([0, 0]));
+    }
+
+    #[test]
+    fn per_output_background_overrides_global_fields() {
+        let toml_src = "[background]\ncolor = \"#000000\"\nimage = \"/a.png\"\nmode = \"fit\"\n\n\
+                        [outputs.DP-1.background]\nimage = \"/b.png\"\n\n\
+                        [outputs.DP-2.background]\ncolor = \"#ffffff\"\nmode = \"tile\"\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+
+        let dp1 = cfg.background_for("DP-1");
+        assert_eq!(dp1.image.as_deref(), Some("/b.png"));
+        assert_eq!(dp1.color, "#000000");
+        assert_eq!(dp1.mode, BackgroundMode::Fit);
+
+        let dp2 = cfg.background_for("DP-2");
+        assert_eq!(dp2.image.as_deref(), Some("/a.png"));
+        assert_eq!(dp2.color, "#ffffff");
+        assert_eq!(dp2.mode, BackgroundMode::Tile);
+    }
+
+    #[test]
+    fn output_without_background_override_borrows_global() {
+        let toml_src = "[background]\nimage = \"/a.png\"\n\n[outputs.DP-1]\nscale = 1.0\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        for name in ["DP-1", "HDMI-A-1"] {
+            let bg = cfg.background_for(name);
+            assert!(matches!(bg, std::borrow::Cow::Borrowed(_)), "{name}");
+            assert_eq!(*bg, cfg.background);
+        }
+    }
+
+    #[test]
+    fn per_output_background_rejects_unknown_field() {
+        let toml_src = "[outputs.DP-1.background]\nimg = \"/a.png\"\n";
+        assert!(toml::from_str::<Config>(toml_src).is_err());
     }
 
     #[test]
