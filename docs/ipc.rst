@@ -1320,7 +1320,7 @@ version (``shoestring-ctl --version``). Per the :ref:`stability policy
 been renamed, removed, or repurposed since 0.1.0 - so a client written
 against any prior version still works against a newer WM.
 
-0.8.0
+0.7.0
 ~~~~~
 
 - ``get_clipboard`` / ``set_clipboard`` requests + ``clipboard`` response: read
@@ -1336,10 +1336,6 @@ against any prior version still works against a newer WM.
   requester. The ``clipboard-push`` / ``clipboard-pull`` / ``screenshot``
   dispatchable actions back the binds; ``screenshot`` stays local while viewing
   a remote.
-
-0.7.0
-~~~~~
-
 - ``move_window_to_workspace`` request (``{id, index}``): move an arbitrary
   window to a workspace by FT id, focus-independent — does not switch the
   active workspace or steal focus. The per-id counterpart to the focused-only
