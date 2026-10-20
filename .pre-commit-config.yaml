@@ -58,6 +58,9 @@ repos:
     hooks:
       - id: knots
         types_or: [rust, python]
+        # third_party/ is vendored upstream code. Refactoring it to our
+        # metric would only make it harder to diff against upstream.
+        exclude: ^third_party/
 
   # Commit policy (see AGENTS.md): DCO sign-off required, AI attribution
   # trailers rejected. The guard tests cover this check and the Codex
