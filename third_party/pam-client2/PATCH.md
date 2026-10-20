@@ -10,7 +10,7 @@ macOS, iOS, DragonFly).
 `shoestring-lock` authenticates the unlock via PAM through `pam-client2`.
 Unpatched, the crate only compiles against Linux-PAM, which made
 `shoestring-lock` the one workspace crate that would not build on FreeBSD
-(verified on dev-106, FreeBSD 15.0).
+(verified on FreeBSD 15.0).
 
 ## The two incompatibilities
 
@@ -74,5 +74,3 @@ This should be reported/offered upstream so the fork can be dropped:
   conversation tests, which build `PamMessage { msg: text.as_ptr(), .. }`
   assuming `*const`. Those tests are not compiled when the crate is
   consumed as a dependency, so they are left untouched in this vendor.
-
-See the shoestring-wm task tracker (item 141) for context.
