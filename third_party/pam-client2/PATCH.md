@@ -7,6 +7,8 @@ A near-verbatim copy of [`pam-client2`
 of changes that make it **build on OpenPAM platforms** (FreeBSD, NetBSD,
 macOS, iOS, DragonFly).
 
+Vendored and patched by Brandon Arrendondo on 2026-06-12.
+
 `shoestring-lock` authenticates the unlock via PAM through `pam-client2`.
 Unpatched, the crate only compiles against Linux-PAM, which made
 `shoestring-lock` the one workspace crate that would not build on FreeBSD

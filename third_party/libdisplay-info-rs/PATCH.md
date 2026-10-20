@@ -17,6 +17,8 @@ the 0.3.0 release (`6a05eb0b`). The crate versions are unchanged,
 so the patch satisfies the `libdisplay-info = "0.3.0"` requirement in
 Smithay's `smithay-drm-extras`.
 
+Vendored by Brandon Arrendondo on 2026-10-19.
+
 ## Why
 
 `smithay-drm-extras` reads each monitor's make, model and serial from
