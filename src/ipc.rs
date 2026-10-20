@@ -838,6 +838,10 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     );
                     return true;
                 }
+                if state.is_locked() {
+                    let _ = write_response(client, &session_locked_error("screenshot_window"));
+                    return true;
+                }
                 // Fail fast if the window is already gone; otherwise defer the
                 // capture to the next render tick (where the renderer is in scope)
                 // and hold the connection open for the reply — same deferred shape
@@ -1317,6 +1321,12 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     let _ = write_response(client, &capture_off_error());
                     return true;
                 }
+                // A stream opened before the lock pauses instead (see
+                // `push_window_capture`); a new one is refused outright.
+                if state.is_locked() {
+                    let _ = write_response(client, &session_locked_error("capture_window"));
+                    return true;
+                }
                 // The window must exist now; it may later close (→ Bye) but we
                 // refuse to open a stream for a window that isn't there.
                 if window_by_ft_id(state, &ft_id).is_none() {
@@ -1492,6 +1502,17 @@ fn capture_off_error() -> Response {
         message: "screen capture disabled: enable with `shoestring-ctl screen-capture on` \
                   (or `automation on`, which also flips the capture gate)"
             .into(),
+    }
+}
+
+/// Refusal for the per-window capture requests while a session lock is held.
+/// Whole-output capture needs no such check — it renders the locked scene — but
+/// `capture_window` / `screenshot_window` render the app's surface tree
+/// directly, which would show it through the lock. The `session locked:` prefix
+/// is stable for scripts, like the gate errors above.
+pub(crate) fn session_locked_error(request: &str) -> Response {
+    Response::Error {
+        message: format!("session locked: {request} is refused while the session is locked"),
     }
 }
 

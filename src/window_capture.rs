@@ -183,6 +183,23 @@ where
         return;
     }
 
+    // Paused while locked: rendering the window directly would show it through
+    // the lock. Subscriptions stay open and `dirty` keeps accumulating, so the
+    // first pass after unlock (which the unlock handler schedules) catches up.
+    // Bytes rendered before the lock still drain, so udev's backlog re-arm
+    // doesn't spin for the length of the lock.
+    if state.is_locked() {
+        let dead: Vec<ClientId> = subs
+            .into_iter()
+            .filter(|(_, client)| client.borrow_mut().flush_out().is_err())
+            .map(|(id, _)| id)
+            .collect();
+        for id in dead {
+            state.drop_ipc_client(id);
+        }
+        return;
+    }
+
     let mut to_drop: Vec<ClientId> = Vec::new();
     let mut any_pushed = false;
 
@@ -576,8 +593,18 @@ where
         return;
     }
     let pending = std::mem::take(&mut state.pending_window_screenshots);
+    // A request queued just before the lock is refused like a new one.
+    let locked = state.is_locked();
     let mut captured_any = false;
     for shot in pending {
+        if locked {
+            let _ = write_response(
+                &shot.client,
+                &crate::ipc::session_locked_error("screenshot_window"),
+            );
+            state.drop_ipc_client(shot.id);
+            continue;
+        }
         let response = match capture_window_png(state, renderer, &shot.ft_id) {
             Ok(png) => {
                 captured_any = true;

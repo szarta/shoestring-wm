@@ -498,7 +498,8 @@ Each request is a JSON object with a ``type`` discriminator:
        ``capture_stream``; the reply uses the same connection upgrade to a binary
        ``ServerMessage`` stream (``Ready``, a ``Meta`` with the window's
        ``app_id``/``title``, then ``Frame``/``Resize``, and a ``Bye`` when the
-       window closes).
+       window closes). While the session is locked a new subscription is
+       refused and an open one is paused; see :ref:`ipc-session-lock`.
    * - ``{"type": "register_remote_server"}``
      - Register this connection as **the** remote-desktop server
        (``shoestring-remote-server``), the served-box handshake. Sent once at
@@ -593,7 +594,8 @@ Each request is a JSON object with a ``type`` discriminator:
        absolute path (same shape as ``screenshot``), or an ``error`` if the
        window is unknown or the active backend can't render a window offscreen
        (``winit``, ``headless``, and the ``udev``/DRM backend all can). Gated
-       by the automation gate. Both ``screenshot`` and ``screenshot_window``
+       by the automation gate, and refused while the session is locked (see
+       :ref:`ipc-session-lock`). Both ``screenshot`` and ``screenshot_window``
        back ``shoestring-ctl screenshot --stdout``: ``ctl`` passes a
        ``$XDG_RUNTIME_DIR`` (tmpfs) ``path``, then streams that file to its own
        stdout and unlinks it — so a capture pipes without a large PNG crossing
@@ -677,6 +679,26 @@ global (raised only by the screen-capture gate), enabling automation
 *also* enables screen capture - automation is a superset, so
 ``automation on`` alone is enough to capture and ``automation off``
 returns the session to no-capture.
+
+.. _ipc-session-lock:
+
+Session lock
+~~~~~~~~~~~~
+
+While an ``ext-session-lock-v1`` lock is held, whole-output capture
+(``screenshot``, ``capture_stream``, screencopy clients) keeps working
+but sees only the lock screen, because it reads the rendered scene.
+The per-window requests render a window's own surface tree instead, so
+they are held back:
+
+- ``screenshot_window`` and a new ``capture_window`` are refused with an
+  ``error`` whose message starts ``session locked:``, stable enough to
+  scrape on like the gate errors. A ``screenshot_window`` queued just
+  before the lock is refused the same way.
+- An open ``capture_window`` stream is **paused**: it stays subscribed
+  but receives no frames until unlock, then resumes with whatever
+  changed in the meantime. Unlocking is the consent; no new request is
+  needed.
 
 Responses
 ---------

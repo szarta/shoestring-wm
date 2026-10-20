@@ -86,6 +86,11 @@ impl SessionLockHandler for ShoestringWm {
             let serial = SERIAL_COUNTER.next_serial();
             kb.set_focus(self, Some(surface), serial);
         }
+        // Graft streams paused while locked; resume them now rather than on the
+        // window's next commit (only udev needs the explicit pass).
+        if self.has_window_capture_subscribers() {
+            self.schedule_window_capture();
+        }
     }
 
     fn new_surface(&mut self, surface: LockSurface, wl_output: WlOutput) {
