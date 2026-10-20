@@ -6,9 +6,9 @@
 //!
 //! ```sh
 //! # local copy → remote box
-//! shoestring-clipboard watch | ssh dev-106 shoestring-clipboard set
+//! shoestring-clipboard watch | ssh remote-host shoestring-clipboard set
 //! # remote copy → local box (the other direction)
-//! ssh dev-106 shoestring-clipboard watch | shoestring-clipboard set
+//! ssh remote-host shoestring-clipboard watch | shoestring-clipboard set
 //! ```
 //!
 //! - **watch** prints every new selection as one [`wire`] frame on stdout.

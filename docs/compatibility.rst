@@ -146,9 +146,9 @@ This is a manual alternative to the built-in ``Super+Shift+C`` / ``V`` when you 
 continuous follow rather than per-keypress transfers::
 
     # local copy → remote box
-    shoestring-clipboard watch | ssh dev-106 shoestring-clipboard set
+    shoestring-clipboard watch | ssh remote-host shoestring-clipboard set
     # remote copy → local box (run the reverse for two-way sync)
-    ssh dev-106 shoestring-clipboard watch | shoestring-clipboard set
+    ssh remote-host shoestring-clipboard watch | shoestring-clipboard set
 
 Both ends need a running shoestring-wm session (or any compositor advertising
 ``zwlr_data_control_manager_v1``). v1 syncs text selections; an identical

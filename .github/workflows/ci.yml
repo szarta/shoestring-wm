@@ -162,8 +162,9 @@ jobs:
   # media-privacy critical path. Their pipewire-sys/libspa-sys bindgen also
   # doesn't resolve cleanly in this bare VM (the pipewire crate can't see
   # pw_init). The real FreeBSD build of both is validated by the port via
-  # poudriere + manual checks on dev-106, not this gate. Everything else (WM tty
-  # backend + every other helper) compiles, so nothing else is feature-gated out.
+  # poudriere + manual checks on a FreeBSD machine, not this gate. Everything
+  # else (WM tty backend + every other helper) compiles, so nothing else is
+  # feature-gated out.
   check-freebsd:
     runs-on: ubuntu-24.04
 
