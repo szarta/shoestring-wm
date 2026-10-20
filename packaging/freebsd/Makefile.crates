@@ -324,4 +324,4 @@ CARGO_CRATES=	adler2-2.0.1 \
 		zerocopy-0.8.48 \
 		zerocopy-derive-0.8.48 \
 		zmij-1.0.21 \
-		smithay,smithay-drm-extras@git+https://github.com/Smithay/smithay.git?rev=95a8e45004f519f62f3490f2602c4082a7af9bf8\#95a8e45004f519f62f3490f2602c4082a7af9bf8
+		smithay,smithay-drm-extras@git+https://github.com/szarta/smithay.git?rev=6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a\#6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a

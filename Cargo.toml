@@ -125,9 +125,17 @@ resvg = { version = "0.45", default-features = false }
 # skew from the layer's.
 tracing-tracy = { version = "0.11", optional = true }
 
+# Smithay comes from the maintainer's fork (ADR 0002): upstream pin
+# 95a8e45 plus two multi-GPU renderer fixes that upstream doesn't have
+# yet. One pads cross-GPU shadow buffers to a 256-byte pitch, without
+# which NVIDIA shears client windows rendered on an Intel iGPU. The other
+# stages partial-damage CPU copies at their texture offset. Return to
+# upstream once it carries both. Every Smithay dependency, including
+# crates/wlcs-shoestring, names this same rev, which must stay reachable
+# from the fork's `shoestring-pin-mem-copy` branch.
 [dependencies.smithay]
-git = "https://github.com/Smithay/smithay.git"
-rev = "95a8e45004f519f62f3490f2602c4082a7af9bf8"
+git = "https://github.com/szarta/smithay.git"
+rev = "6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a"
 default-features = false
 features = [
     "wayland_frontend",
@@ -136,8 +144,8 @@ features = [
 ]
 
 [dependencies.smithay-drm-extras]
-git = "https://github.com/Smithay/smithay.git"
-rev = "95a8e45004f519f62f3490f2602c4082a7af9bf8"
+git = "https://github.com/szarta/smithay.git"
+rev = "6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a"
 optional = true
 
 # --- Debian/Ubuntu packaging (cargo-deb) ---------------------------------
