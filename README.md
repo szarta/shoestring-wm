@@ -1,17 +1,16 @@
 # shoestring-wm
 
 A lightweight, low-dependency Wayland window manager written in Rust on
-top of [Smithay](https://github.com/Smithay/smithay). Daily-driver
-replacement for an Openbox/X11 setup: floating windows, half-tile snaps,
+top of [Smithay](https://github.com/Smithay/smithay). A replacement for an
+Openbox/X11 desktop with floating windows, half-tile snaps,
 configurable global workspaces (default 16), multi-monitor, TOML config,
-JSON IPC. No animations, no decoration polish, no built-in bar.
+and JSON IPC. The bar and desktop helpers run as separate processes.
 
 ## In-repo binaries
 
 The workspace ships the WM plus every helper and desktop sibling it
-spawns. As of the monorepo migration, bar/menu/notify live in
-`crates/` alongside the original helpers — one `cargo build
---workspace` produces everything below.
+spawns. The helpers live in `crates/`; `cargo build --workspace`
+produces the desktop tools below, the portal, and the remote-desktop tools.
 
 | Binary | Purpose |
 |---|---|
@@ -20,7 +19,10 @@ spawns. As of the monorepo migration, bar/menu/notify live in
 | `shoestring-menu` | dmenu-style launcher for commands and bookmarks. |
 | `shoestring-notify` | `org.freedesktop.Notifications` daemon (layer-shell pop-ups). |
 | `shoestring-ctl` | Command-line IPC client (query state, fire actions, subscribe to events). |
-| `shoestring-tasks` | Console (TUI) window/workspace manager — focus, move, rename, minimize/maximize, kill, screenshot any window over IPC. |
+| `shoestring-tasks` | Console (TUI) window/workspace manager - focus, move, rename, minimize/maximize, kill, screenshot any window over IPC. |
+| `shoestring-mediad` | Media-session monitor for the bar. |
+| `xdg-desktop-portal-shoestring` | ScreenCast and Screenshot portal backend. |
+| `shoestring-clipboard` | Clipboard helper. |
 | `shoestring-lock` | Session locker (`ext-session-lock-v1`), PAM-authenticated, maze screensaver. |
 | `shoestring-screenshot` | PNG capture via wlr-screencopy; optional region via `shoestring-region`. |
 | `shoestring-region` | Slurp-equivalent rectangle picker. |
@@ -35,7 +37,7 @@ sudo apt install build-essential pkg-config \
     libwayland-dev libxkbcommon-dev \
     libdrm-dev libgbm-dev libegl-dev \
     libudev-dev libinput-dev libseat-dev libdisplay-info-dev \
-    libpam0g-dev
+    libpam0g-dev libpipewire-0.3-dev libclang-dev
 
 # Optional: XWayland support at runtime (only if you run X11 tools such as
 # GIMP or Inkscape). Install the Xwayland binary; the WM spawns it on demand.
@@ -57,6 +59,7 @@ cargo build --release --workspace
 # launched on demand by keybinds and IPC).
 install -Dm755 -t ~/.local/bin/ \
   target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm,mediad} \
+  target/release/shoestring-{tasks,clipboard} \
   target/release/xdg-desktop-portal-shoestring
 
 # Screen sharing (Zoom, browsers): the portal *binary* above is not enough on
@@ -77,7 +80,9 @@ shoestring-wm --write-default-config
 
 # Try it nested inside your current session (backend auto-detects winit
 # when WAYLAND_DISPLAY/DISPLAY is set)
-shoestring-wm --command alacritty
+runtime_dir=$(mktemp -d)
+XDG_RUNTIME_DIR="$runtime_dir" shoestring-wm --command alacritty
+rmdir "$runtime_dir"
 
 # Or run natively from a TTY
 shoestring-wm
@@ -116,22 +121,26 @@ cargo build --release --no-default-features --features winit
 The full user guide lives under [`docs/`](docs/) and builds with Sphinx:
 
 ```sh
-cd docs && make html      # _build/html/index.html
-cd docs && make man       # _build/man/shoestring-wm.{1,5}, etc.
+python3 -m pip install sphinx
+make -C docs html         # docs/_build/html/index.html
+make -C docs man          # docs/_build/man/
+
+# Aurora prose checks and setup: see CONTRIBUTING.md.
+make -C docs lint
 ```
 
-- [Overview](docs/overview.rst) — what it is and why.
-- [Install](docs/install.rst) — per-distro deps (Debian, Fedora, Arch,
+- [Overview](docs/overview.rst) - what it is and why.
+- [Install](docs/install.rst) - per-distro deps (Debian, Fedora, Arch,
   Alpine, FreeBSD, NixOS).
-- [Running](docs/running.rst) — winit vs. TTY backend, env vars, autostart.
-- [Configuration](docs/configuration.rst) — every `[general]` field and
+- [Running](docs/running.rst) - winit vs. TTY backend, env vars, autostart.
+- [Configuration](docs/configuration.rst) - every `[general]` field and
   every action type.
-- [Default bindings](docs/bindings.rst) — full keymap reference.
-- [IPC](docs/ipc.rst) — protocol, types, and example clients.
-- [Portals](docs/portals.rst) — screen sharing (Zoom/browsers), the native
+- [Default bindings](docs/bindings.rst) - full keymap reference.
+- [IPC](docs/ipc.rst) - protocol, types, and example clients.
+- [Portals](docs/portals.rst) - screen sharing (Zoom/browsers), the native
   ScreenCast/Screenshot backend, and backend-routing setup.
-- [Architecture](docs/architecture.md) — source-level design notes.
-- [Portability](docs/PORTABILITY.md) — Linux-ism audit + FreeBSD status.
+- [Architecture](docs/architecture.md) - source-level design notes.
+- [Portability](docs/PORTABILITY.md) - Linux-ism audit + FreeBSD status.
 
 ## Status
 
@@ -189,4 +198,4 @@ Many earlier commits have a `Co-Authored-By: Claude` trailer, but not every AI-a
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

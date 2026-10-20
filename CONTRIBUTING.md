@@ -2,8 +2,8 @@
 
 Thanks for your interest in shoestring-wm. This guide covers how to build,
 run, and test the project, and the conventions a change is expected to
-follow. For the *why* behind the codebase — the goals, the structure, and
-the decisions that shaped it — read [`docs/architecture.md`](docs/architecture.md)
+follow. For the *why* behind the codebase - the goals, the structure, and
+the decisions that shaped it - read [`docs/architecture.md`](docs/architecture.md)
 first; it is the map this guide assumes.
 
 ## Project shape in one minute
@@ -14,12 +14,12 @@ notifier, screenshot tools, an IPC client, and a desktop portal) that live
 in the same Cargo workspace. A single `cargo build --workspace` produces
 everything.
 
-A few principles are load-bearing — a change that erodes one of these is a
+A few principles are load-bearing - a change that erodes one of these is a
 regression, not a feature (see the architecture doc for the full list):
 
 - **Low-dependency.** New dependencies are resisted; the handful of
   exceptions are deliberate and documented. Justify any addition.
-- **Spec-correct over bespoke; we don't fork Smithay.** Smithay is pre-1.0
+- **Spec-correct over bespoke; we do not fork Smithay.** Smithay is pre-1.0
   and pinned to a specific git revision. When a conformance test fails
   because of spec-correct Smithay-core behavior (anvil fails it identically),
   it is tracked as a known xfail, *not* patched around. Genuine bugs go
@@ -51,7 +51,7 @@ sudo apt-get install -y xwayland
 ```
 
 That is the full set. `libpipewire-0.3-dev` + `libclang-dev` build the
-screencast portal and media monitor, which are part of the workspace — so
+screencast portal and media monitor, which are part of the workspace - so
 `cargo build --workspace`, `cargo test --workspace`, and the pre-commit
 hooks (Testing, below) all need them. They are skippable **only** if you
 restrict yourself to the compositor alone (`cargo build -p shoestring-wm`)
@@ -61,7 +61,7 @@ includes.
 
 Other distributions and FreeBSD are covered in
 [`docs/install.rst`](docs/install.rst). On FreeBSD, libraries live under
-`/usr/local/lib`, which the base linker doesn't search — export
+`/usr/local/lib`, which the base linker does not search - export
 `RUSTFLAGS="-L/usr/local/lib"` before building.
 
 ## Building
@@ -88,10 +88,10 @@ The compositor has two real backends, selected by Cargo features
 
 - `winit` — a nested window for development inside an existing
   X11/Wayland session.
-- `tty` — the udev/DRM backend for running as a real session compositor.
+- `tty` - the udev/DRM backend for running as a real session compositor.
 
 CI also compiles each backend in isolation, plus a backend-less `gl`-only
-build (the shape the WLCS harness consumes), so feature-gated code doesn't
+build (the shape the WLCS harness consumes), so feature-gated code does not
 silently rot:
 
 ```sh
@@ -102,7 +102,7 @@ cargo build -p shoestring-wm --no-default-features --features gl
 
 `wlcs-shoestring` is intentionally **excluded** from the workspace (it
 instantiates a second copy of Smithay); build it explicitly via its own
-manifest — see the WLCS section below.
+manifest - see the WLCS section below.
 
 ## Running it for development
 
@@ -196,11 +196,11 @@ The runner is **serial by default** (`WLCS_JOBS=1`) for a deterministic
 verdict; parallelism reshuffles timing enough to flip a handful of
 timing-sensitive tests run-to-run. The skip-list (`tests/wlcs/skip-list.txt`)
 records expected failures, each verified to fail identically on Smithay's
-own `anvil` reference compositor — i.e. they are Smithay-core behavior, not
+own `anvil` reference compositor - i.e. they are Smithay-core behavior, not
 our bugs. A red run means either a real regression or a skip-list entry that
 now passes and should be removed. **Do not add an entry to the skip-list to
-silence a failure your change introduced** — fix the change, or, if you
-believe it's a genuine Smithay bug, raise it upstream and link it.
+silence a failure your change introduced** - fix the change, or, if you
+believe it is a genuine Smithay bug, raise it upstream and link it.
 
 ## Driving a live WM over IPC
 
@@ -218,7 +218,7 @@ shoestring-ctl event-stream    # tail live events (one JSON object per line)
 Read-only queries are always available. Input synthesis and capture
 (`inject_key`/`type`/`click`, `move_mouse`, `screenshot`, `run_command`,
 `dispatch_action`) sit behind a runtime **automation gate** that is off by
-default, so a normal session can't be poked by anything that reaches the
+default, so a normal session cannot be poked by anything that reaches the
 socket. Flip it for the session when you need it:
 
 ```sh
@@ -228,7 +228,7 @@ shoestring-ctl automation off
 ```
 
 The full request/response/event surface and the gate semantics are
-documented in [`docs/ipc.rst`](docs/ipc.rst) — keep that file in sync when
+documented in [`docs/ipc.rst`](docs/ipc.rst) - keep that file in sync when
 you change the IPC surface.
 
 ## Documentation
@@ -243,6 +243,22 @@ make -C docs html           # HTML user guide  -> docs/_build/html/
 make -C docs man            # man pages         -> docs/_build/man/
 ```
 
+Prose follows the shared [Aurora house style](https://github.com/brandon-arrendondo/style_package).
+Use Vale 3.23.0 and put docutils' `rst2html` (installed with Sphinx) on
+`PATH` so Vale can read reStructuredText. Keep a sibling `style_package`
+checkout beside this repository, with its `dist/Aurora.zip` built using
+`invoke build`, as described in that package's README. Then run:
+
+```sh
+make -C docs lint-sync     # install Aurora and its pinned upstream styles
+make -C docs lint          # README, contributor guide, and the manual
+```
+
+The generated styles stay under `.vale/styles/` and are ignored by Git.
+Use the shared rules for spelling, contractions, punctuation, and plain
+wording. Preserve literal commands, identifiers, and quoted text. Review
+findings in context before rewriting technical prose.
+
 When you change a surface that has docs, update them in the same change:
 the IPC surface → `docs/ipc.rst`; config keys → `docs/configuration.rst`;
 keybindings → `docs/bindings.rst`; architecture/decisions →
@@ -250,15 +266,15 @@ keybindings → `docs/bindings.rst`; architecture/decisions →
 
 ## Coding conventions
 
-- **Write code that reads like the code around it** — match the
+- **Write code that reads like the code around it** - match the
   surrounding naming, comment density, and idioms. `cargo fmt` settles
   formatting; clippy (with `-D warnings`) settles the rest.
 - **Explain the non-obvious in comments.** The existing source leans on
   comments that capture *why* a thing is done a particular way (protocol
-  quirks, ordering constraints, Smithay gotchas). Match that — a reviewer
-  shouldn't have to reverse-engineer a subtlety you already understood.
+  quirks, ordering constraints, Smithay gotchas). Match that - a reviewer
+  should not have to reverse-engineer a subtlety you already understood.
 - **Keep portability intact.** Guard OS-specific code behind `cfg` and make
-  the absent-facility path a graceful no-op or warning. Don't assume
+  the absent-facility path a graceful no-op or warning. Do not assume
   systemd, logind, or `/proc`.
 - **Respect the gates.** Anything that can observe or drive the session
   without the user's active participation must stay opt-in and default-off.
@@ -267,7 +283,7 @@ keybindings → `docs/bindings.rst`; architecture/decisions →
 ## Submitting changes
 
 This is a pre-1.0 project; internal APIs and protocols still churn. Before
-investing in a large or invasive change, it's worth opening an issue to
+investing in a large or invasive change, it is worth opening an issue to
 discuss the approach.
 
 1. Fork and branch from `main`.
@@ -276,13 +292,13 @@ discuss the approach.
    sign-off; the `commit-msg` hook rejects one without it) and follow the
    commit rules in [AGENTS.md](AGENTS.md), which apply to agents and people
    alike.
-3. Run the full local check sequence (fmt, clippy, test, release build) —
+3. Run the full local check sequence (fmt, clippy, test, release build) -
    and the relevant integration/WLCS suites if you touched input, output,
    or protocol code.
 4. Open a pull request describing the change and how you verified it. CI
    runs fmt/clippy/test/release, the per-backend feature matrix, the
    headless integration suite, the WLCS gate, the FreeBSD build, and the
-   docs build — the same checks listed above.
+   docs build - the same checks listed above.
 
 By contributing, you agree that your contributions are licensed under the
 project's [MIT License](LICENSE).

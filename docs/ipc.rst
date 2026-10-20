@@ -10,9 +10,9 @@ disconnects.
 
 The connection is **one request per connection**: after it writes the one
 response, the server closes the connection (the streaming requests
-``event_stream`` and ``metrics_stream`` are the exception — they stay open and
+``event_stream`` and ``metrics_stream`` are the exception - they stay open and
 push). So a client issues each request on a fresh connection, exactly as
-``shoestring-ctl`` opens one connection per invocation. This is intentional —
+``shoestring-ctl`` opens one connection per invocation. This is intentional -
 it keeps the server's per-client state trivial and bounds it.
 
 Socket location
@@ -46,7 +46,7 @@ ergonomic wrappers for every request (``workspaces()``, ``windows()``,
 
 The libraries return responses as the language's native JSON value rather than
 a generated schema, so they ride the additive protocol changes described below
-for free. They are the non-Rust analogue of the i3/Sway ``i3ipc`` bindings.
+for free. They are the non-Rust analog of the i3/Sway ``i3ipc`` bindings.
 
 .. code-block:: python
 
@@ -66,7 +66,7 @@ The wire format is **stabilizing, not yet frozen**. shoestring-wm is
 pre-1.0: no breaking change has been made since the protocol shipped in
 0.1.0, and the intent is to keep it that way, but the format is only
 contractually frozen at 1.0. From 1.0 onward the wire format follows
-semver — breaking changes ride a major bump.
+semver - breaking changes ride a major bump.
 
 There is **no in-band protocol version** field and no ``version``
 request. The single reference point is the WM/CLI version, which tracks
@@ -87,26 +87,26 @@ and the rules new server code follows when it touches the surface:
 
 **Additive evolution.** New request types, response types, event types,
 fields, enum variants, and metric names may appear in any release. The
-catalogues are **append-only**: an existing request/response/event/field
+catalogs are **append-only**: an existing request/response/event/field
 is never renamed or repurposed without a major bump. The metric-name set
 is the original precedent (see :ref:`the metrics note <ipc-metrics>`),
 and the same discipline applies to the whole surface.
 
 **New fields are optional and omittable.** Every field added to a
 response or event is serialized with ``#[serde(default,
-skip_serializing_if = …)]`` — it is left off the wire when empty and
+skip_serializing_if = …)]`` - it is left off the wire when empty and
 defaults when absent. A client built against an older schema keeps
 deserializing newer payloads unchanged. Examples already on the wire:
 ``WindowSummary.geometry`` / ``.z`` / ``.sticky`` /
 ``.always_on_top`` and the ``workspaces`` reply's ``names`` array, all
-of which older builds simply didn't emit.
+of which older builds simply did not emit.
 
 **Unknown-tolerant outbound, strict inbound.** Responses and events are
-**not** ``deny_unknown_fields``: a client should *ignore* any field — or
-any ``type`` discriminator — it does not recognize, so a newer WM can add
+**not** ``deny_unknown_fields``: a client should *ignore* any field - or
+any ``type`` discriminator - it does not recognize, so a newer WM can add
 to the stream without breaking it. Requests, by contrast, **are**
 ``deny_unknown_fields``: the WM rejects a request carrying a field it
-does not know. Do not send a field to a WM that predates it — gate on the
+does not know. Do not send a field to a WM that predates it - gate on the
 version above. (This asymmetry is deliberate: tolerant readers make
 forward-compat cheap, while strict request parsing turns a typo or a
 too-new field into a loud ``error`` instead of a silently-ignored
@@ -122,7 +122,7 @@ scrape on"* (see :ref:`the automation gate <ipc-automation-gate>`).
 considered stable under the rules above, with two exceptions still
 expected to evolve:
 
-- ``metrics_stream`` interval handling — v1 clamps the push interval *up*
+- ``metrics_stream`` interval handling - v1 clamps the push interval *up*
   to the sample interval and cannot push faster than it samples; finer
   control may be added later.
 - The media-privacy ``report_media`` request is an internal contract
@@ -651,7 +651,7 @@ Each request is a JSON object with a ``type`` discriminator:
        ``ok`` with the count restored. KMS-only. **Not** gated by the
        automation gate.
 
-Injected key and click events bypass the WM's binding table — a scripted
+Injected key and click events bypass the WM's binding table - a scripted
 ``Super+q`` will NOT trigger the ``Quit`` binding. Use
 ``dispatch_action`` (above) for that path.
 
@@ -662,7 +662,7 @@ Automation gate
 
 The following requests refuse with an ``error`` while
 ``[general].automation_enabled`` is off (and the CLI flag
-``--enable-automation`` / the IPC ``set_automation`` haven't flipped
+``--enable-automation`` / the IPC ``set_automation`` have not flipped
 it): ``inject_key``, ``inject_text``, ``inject_click``,
 ``inject_click_to_window``, ``drag``, ``move_mouse``,
 ``inject_input``, ``get_clipboard``, ``set_clipboard``, ``paste``,
@@ -674,7 +674,7 @@ is stable enough to scrape on:
 
 Because ``screenshot`` also needs the ``zwlr_screencopy_manager_v1``
 global (raised only by the screen-capture gate), enabling automation
-*also* enables screen capture — automation is a superset, so
+*also* enables screen capture - automation is a superset, so
 ``automation on`` alone is enough to capture and ``automation off``
 returns the session to no-capture.
 
@@ -684,7 +684,7 @@ Responses
 The server replies with a single JSON object tagged by ``type``:
 
 ``ok``
-    Generic success acknowledgement. Sent in reply to ``event_stream``
+    Generic success acknowledgment. Sent in reply to ``event_stream``
     before the event stream starts.
 
 ``workspaces``
@@ -716,7 +716,7 @@ The server replies with a single JSON object tagged by ``type``:
 ``picked_window``
     ``{"type": "picked_window", "window": WindowSummary | null}``.
     Returned in reply to ``pick_window`` once the user resolves the
-    picker. ``null`` on cancel or a click that didn't land on a
+    picker. ``null`` on cancel or a click that did not land on a
     toplevel.
 
 ``automation``
@@ -769,7 +769,7 @@ The server replies with a single JSON object tagged by ``type``:
 ``clipboard``
     ``{"type": "clipboard", "mime": "text/plain;charset=utf-8", "data": [...]}``.
     Returned in reply to ``get_clipboard``. ``data`` is the selection bytes;
-    ``mime`` is the type they're in and is omitted when the selection was empty
+    ``mime`` is the type they are in and is omitted when the selection was empty
     or had no text the WM could read (``data`` is then empty).
 
 ``pointer_position``
@@ -891,7 +891,7 @@ The server replies with a single JSON object tagged by ``type``:
 
     The WM warns in its log when ``process.open_fds`` crosses
     ``[diagnostics].fd_warn_fraction`` of ``process.fd_limit`` or climbs
-    monotonically — an early signal of a file-descriptor leak before it
+    monotonically - an early signal of a file-descriptor leak before it
     can exhaust the limit and crash the session. The per-client
     ``client.<name>.surfaces`` gauges turn that process-wide signal into
     attribution: a client whose surface count climbs without bound is the
@@ -926,23 +926,23 @@ on-screen rectangle in compositor-global logical coords (same system as
 ``move_mouse`` / ``pointer_position``); it is **omitted** when the window is
 minimized or on a non-active workspace (only the active workspace is mapped,
 so an unmapped window has no rectangle). ``z`` is the window's stacking
-position within the mapped stack — ``0`` is bottom-most, higher is closer to
-the top — and the same value the ``get_tree`` ``WindowNode`` carries; it is
+position within the mapped stack - ``0`` is bottom-most, higher is closer to
+the top - and the same value the ``get_tree`` ``WindowNode`` carries; it is
 **omitted** for unmapped windows (same condition as ``geometry``). ``sticky``
 is ``true`` when the window is pinned to all workspaces; ``always_on_top`` is
 ``true`` when it is kept above ordinary windows. Both are **omitted**
 (defaulting to ``false``) for ordinary windows. Older WM builds that pre-dated
-these fields omit them too — clients should treat "absent" and "off-screen"
+these fields omit them too - clients should treat "absent" and "off-screen"
 (and "not sticky" / "not always-on-top") identically.
 
 ``pid`` is the operating-system process id of the window's owning client,
 letting a script resolve a window (matched by ``title`` / ``app_id`` via
-``find_windows``) to a process — e.g. to find a specific nested
+``find_windows``) to a process - e.g. to find a specific nested
 ``shoestring-wm``'s pid (give it a distinct title with
 ``SHOESTRING_WM_WINIT_TITLE`` first, since the default title collides across
-instances). It is **omitted** when the compositor can't resolve a pid: clients
+instances). It is **omitted** when the compositor cannot resolve a pid: clients
 whose peer credentials carry none (e.g. FreeBSD ``LOCAL_PEERCRED``) and older
-WM builds. For **X11** windows it is XWayland's pid — the wayland surface
+WM builds. For **X11** windows it is XWayland's pid - the wayland surface
 belongs to the XWayland connection, not the X application.
 
 ``OutputSummary``::
@@ -960,7 +960,7 @@ belongs to the XWayland connection, not the X application.
 ``[outputs.<name>] adaptive_sync = true`` *and* the connector advertised VRR
 support. It is always ``false`` under the nested winit backend.
 
-``transform`` is the output's orientation as a ``wlr-randr``-style name —
+``transform`` is the output's orientation as a ``wlr-randr``-style name -
 ``"normal"``, ``"90"``, ``"180"``, ``"270"``, or the mirrored ``"flipped"`` /
 ``"flipped-90"`` / ``"flipped-180"`` / ``"flipped-270"``. It reflects the live
 state, whether set via ``[outputs.<name>] transform`` or a later
@@ -983,7 +983,7 @@ Properties come straight off the live libinput device handle the WM holds for
 compositor is driving. ``vendor`` / ``product`` are the USB/Bluetooth ids (``0``
 when the bus exposes none). ``capabilities`` is the set of libinput
 capabilities the device advertises, drawn from ``"keyboard"``, ``"pointer"``,
-``"touch"``, ``"tablet_tool"``, ``"tablet_pad"``, ``"gesture"``, ``"switch"`` —
+``"touch"``, ``"tablet_tool"``, ``"tablet_pad"``, ``"gesture"``, ``"switch"`` -
 a single device may report several. ``size_mm`` is the physical ``[width,
 height]`` in millimetres for devices that measure it (touchpads, touchscreens,
 tablets) and is **omitted** otherwise. ``output`` (omitted unless set) names the
@@ -996,7 +996,7 @@ winit backend ``inputs`` is always ``[]``.
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ``OutputNode`` carries the output's *logical placement* (position + size in
-the global coordinate space), which ``OutputSummary`` lacks — that's what lets
+the global coordinate space), which ``OutputSummary`` lacks - that is what lets
 a script relate a window's ``geometry`` to the output it lands on::
 
     {
@@ -1035,8 +1035,8 @@ ordered bottom-to-top by stacking order; for others the order is unspecified.
       "layout":    "tiled_left"
     }
 
-``geometry``, ``output``, and ``z`` are **omitted** for windows that aren't
-currently mapped (minimized, or on a non-active workspace) — only the active
+``geometry``, ``output``, and ``z`` are **omitted** for windows that are not
+currently mapped (minimized, or on a non-active workspace) - only the active
 workspace's windows have an on-screen rectangle, a host output, and a stacking
 position. ``z`` is the stacking index within the mapped stack: ``0`` is
 bottom-most, higher is closer to the top. ``layout`` is one of ``floating``,
@@ -1101,7 +1101,7 @@ Each event is tagged by ``type``.
     come to the front. ``granted`` is the WM's focus-stealing-prevention
     verdict: ``true`` when the request was honored (the window was activated
     and focused, so a ``window_focused`` event follows), ``false`` when it
-    was suppressed because the request wasn't user-driven — focus stayed put
+    was suppressed because the request was not user-driven — focus stayed put
     and a bar may flag the window as demanding attention. The WM trusts an
     activation only when its token is recent and either carries a real input
     serial or was requested by the currently focused surface. Emitted only
@@ -1127,7 +1127,7 @@ Each event is tagged by ``type``.
     capture frame is actually delivered to a client — the live "your
     screen is being read right now" signal, distinct from the gate merely
     being enabled. Rate-limited by the WM (a few per second) so a high-FPS
-    cast doesn't flood subscribers; a bar can light a "recording" dot and
+    cast does not flood subscribers; a bar can light a "recording" dot and
     let it decay after the events stop.
 
 ``remote_changed``
@@ -1149,7 +1149,7 @@ Each event is tagged by ``type``.
 ``view_changed``
     ``{"type": "view_changed", "index": <int>, "label": "<machine>"}``.
     Fired when the active machine-axis view changes — the user switched which
-    machine they're driving (``Super+J/K``, the break-out hotkey, a ``set_view``,
+    machine they are driving (``Super+J/K``, the break-out hotkey, a ``set_view``,
     or a registration/disconnect that shifted the active index). ``index`` 0 =
     local, 1.. = a registered remote; ``label`` is that machine's name and is
     omitted at the local view. Broadcast to every subscriber: the bar lights a
@@ -1160,7 +1160,7 @@ Each event is tagged by ``type``.
 ``captured_input``
     ``{"type": "captured_input", "event": {"kind": "key", "keycode": 30,
     "pressed": true}}``. Pushed **only to the connection that is the active
-    machine-axis view** — the viewer-box mirror of ``inject_input``. While a
+    machine-axis view** - the viewer-box mirror of ``inject_input``. While a
     remote machine is the active view the WM swallows every local input event and
     forwards it here as the same raw ``event`` currency ``inject_input`` injects
     (``key`` / ``button`` / ``motion`` / ``axis``), so the client can relay it
@@ -1277,7 +1277,7 @@ subcommand maps to one request:
 
 A higher-level binary, ``shoestring-kill`` (xkill equivalent), chains
 the two: it sends ``pick_window``, then forwards the resulting ``id``
-to ``close_window`` on success — or to ``kill_window`` when run with
+to ``close_window`` on success - or to ``kill_window`` when run with
 ``-f`` / ``--force``, which force-kills the owning process instead of
 asking it to close (use it on a window that ignores a close). Bind it via
 the WM config or invoke it from a menu.
@@ -1316,8 +1316,8 @@ Changelog
 
 Wire-format changes by release, newest first. Versions are the WM/CLI
 version (``shoestring-ctl --version``). Per the :ref:`stability policy
-<ipc-stability>` every entry below is an *additive* change — nothing has
-been renamed, removed, or repurposed since 0.1.0 — so a client written
+<ipc-stability>` every entry below is an *additive* change - nothing has
+been renamed, removed, or repurposed since 0.1.0 - so a client written
 against any prior version still works against a newer WM.
 
 0.8.0
@@ -1350,18 +1350,18 @@ against any prior version still works against a newer WM.
   window by FT id, regardless of focus. Per-id counterparts to the focused-only
   ``minimize`` / ``maximize`` actions.
 - These back ``shoestring-tasks``, the new console (TUI) window/workspace
-  manager — see :manpage:`shoestring-tasks(1)`.
+  manager - see :manpage:`shoestring-tasks(1)`.
 
 0.5.0
 ~~~~~
 
 - ``inputs`` request + ``inputs`` response (``InputSummary`` list): the
-  input-device analogue of ``outputs``. Read-only, not gated.
+  input-device analog of ``outputs``. Read-only, not gated.
 - Media-privacy surface: ``media_status`` / ``set_audio_mute`` /
   ``set_mic_mute`` requests, the ``report_media`` ingest request (WM ⇆
   ``shoestring-mediad`` only), the ``media`` response, and the
   ``media_changed`` event.
-- ``OutputSummary.transform`` — the active output rotation/flip.
+- ``OutputSummary.transform`` - the active output rotation/flip.
 - New metric names: render, input, and IPC counters (append-only; older
   consumers ignore unknown names).
 
@@ -1401,7 +1401,7 @@ against any prior version still works against a newer WM.
 0.1.0
 ~~~~~
 
-- Initial IPC surface. Read-only queries (``workspaces`` — including the
+- Initial IPC surface. Read-only queries (``workspaces`` - including the
   ``names`` array, ``windows``, ``outputs``, ``pointer_position``),
   ``find_windows``, ``focus_window``, ``close_window``, ``event_stream``,
   ``lock``, and ``reload_config``.

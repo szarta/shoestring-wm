@@ -3,7 +3,7 @@ XDG Desktop Portals
 
 Desktop portals (``xdg-desktop-portal``, "xdp") are the D-Bus services
 that let sandboxed and toolkit apps open file dialogs, read settings,
-and — the headline feature — share your screen in a video call. The
+and - the headline feature - share your screen in a video call. The
 portal *frontend* is desktop-agnostic; it delegates each portal
 interface to an *implementation backend* chosen by ``$XDG_CURRENT_DESKTOP``.
 
@@ -37,7 +37,7 @@ The shoestring portal backend
 ``org.freedesktop.impl.portal.Screenshot``. For ScreenCast it feeds
 PipeWire itself and offers consumers shm buffers, which every consumer
 handles. ``[portal] screencast_dmabuf = true`` additionally offers zero-copy
-dmabuf ahead of shm, which browsers and OBS take — but it is off by default
+dmabuf ahead of shm, which browsers and OBS take - but it is off by default
 because Zoom, given a GPU, picks the dmabuf offer and renders it black.
 
 For Screenshot it captures a frame and writes a PNG, returning its
@@ -56,11 +56,11 @@ Choosing what to share
 When a screencast starts and more than one output is connected, the backend
 has to pick which one to share. It looks, in order, at:
 
-1. a **pin** — ``[portal] screencast_output`` in ``config.toml`` (or the
+1. a **pin** - ``[portal] screencast_output`` in ``config.toml`` (or the
    ``$SHOESTRING_SCREENCAST_OUTPUT`` override) naming a connector; deterministic,
    no prompt;
 2. the **only** connected output, if there is just one;
-3. the **chooser** — ``[portal] screencast_chooser`` (or
+3. the **chooser** - ``[portal] screencast_chooser`` (or
    ``$SHOESTRING_SCREENCAST_CHOOSER``): ``region`` (the default) pops the
    ``shoestring-region`` overlay and you click the monitor to share; ``none``
    silently shares the first output; anything else is run as a dmenu-style
@@ -78,7 +78,7 @@ cursor mode (a separate cursor-position channel) is not offered.
 Both interfaces capture frames from the compositor over the same
 ``zwlr_screencopy_v1`` protocol used by ``shoestring-screenshot``, so the
 compositor needs no portal-specific code, and a fault in the portal
-(PipeWire/D-Bus) can't take down the desktop. They honor the
+(PipeWire/D-Bus) cannot take down the desktop. They honor the
 **screen-capture gate**: the
 ``zwlr_screencopy`` manager is only advertised while capture is enabled, so
 a cast or screenshot fails cleanly until you turn it on
@@ -91,15 +91,15 @@ holds an idle connection to ``$WAYLAND_DISPLAY`` and exits when that
 compositor goes away, releasing its bus name for the next session's portal
 (the systemd user manager and session bus outlive a logout, so it would
 otherwise linger). It never takes the name over from a running instance, so a
-nested or headless shoestring-wm started inside a session — whose autostart
-launches a second portal — leaves the session's portal in charge. If no
+nested or headless shoestring-wm started inside a session - whose autostart
+launches a second portal - leaves the session's portal in charge. If no
 compositor is reachable at startup it logs a warning and runs unwatched.
 
 Installation
 ------------
 
 Packages install everything below; do it by hand only for a
-``cargo``-built tree. **The placement matters** — get the descriptor's
+``cargo``-built tree. **The placement matters** - get the descriptor's
 directory wrong and the frontend silently ignores the backend.
 
 The routing config goes where the frontend looks for
@@ -135,10 +135,10 @@ The backend is started by **D-Bus activation** (the ``.service`` above)
 when the frontend first needs ScreenCast, so it inherits the session's
 ``WAYLAND_DISPLAY`` from the D-Bus activation environment (which
 ``shoestring-wm-session`` + the compositor populate with both ``systemctl
---user import-environment`` and ``dbus-update-activation-environment`` —
+--user import-environment`` and ``dbus-update-activation-environment`` -
 the systemd import alone does not reach dbus-daemon's activation env).
 Alternatively, add ``/usr/libexec/xdg-desktop-portal-shoestring`` to
-``general.autostart`` to launch it with the session — it inherits the live
+``general.autostart`` to launch it with the session - it inherits the live
 environment directly and the frontend finds it already owning the name. Use
 the **full path**: ``/usr/libexec`` is not on ``$PATH``, so a bare
 ``xdg-desktop-portal-shoestring`` entry fails to spawn.
@@ -161,11 +161,11 @@ Prerequisites
 -------------
 
 - ``xdg-desktop-portal`` (the frontend) and a GTK backend
-  (``xdg-desktop-portal-gtk``) — almost always already installed.
+  (``xdg-desktop-portal-gtk``) - almost always already installed.
 - ``pipewire`` running in the session — screencast streams are delivered
   over PipeWire, and the backend links ``libpipewire``.
 - For interactive (region) screenshots, ``shoestring-screenshot`` and
-  ``shoestring-region`` on ``$PATH`` — both ship in this package.
+  ``shoestring-region`` on ``$PATH`` - both ship in this package.
   ``xdg-desktop-portal-wlr`` is **no longer required**; the Screenshot
   interface is served by ``xdg-desktop-portal-shoestring``.
 

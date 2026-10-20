@@ -1,4 +1,4 @@
-# shoestring-wm — Architecture
+# shoestring-wm - Architecture
 
 shoestring-wm is a lightweight, low-dependency Wayland compositor built on
 [Smithay](https://github.com/Smithay/smithay). It replaces an Openbox/X11
@@ -8,7 +8,7 @@ notifier, screenshot tools, an IPC client, and a desktop portal).
 
 This document describes the architecture **as it stands approaching
 v1.0.0**: the shape of the system, the decisions that produced it, and the
-reasoning behind those decisions — so future changes can be weighed against
+reasoning behind those decisions - so future changes can be weighed against
 the same goals instead of rediscovering them. It is deliberately *not* a
 changelog or a milestone history; what matters here is *why* the code is
 shaped the way it is.
@@ -36,14 +36,14 @@ erodes one of these should be treated as a regression, not a feature:
    be tested and automated.
 4. **Opt-in for anything invasive.** Screen capture, input automation, and
    idle tracking default *off* and are discoverable only when enabled, so a
-   normal session can't be observed or poked by anything that reaches a
+   normal session cannot be observed or poked by anything that reaches a
    socket (§11).
 5. **Portable & systemd-optional.** Linux is the primary target, but every
    OS touchpoint degrades to a no-op when its facility is absent, so
    non-systemd Linux and the BSDs stay first-class.
 6. **Spec-correct over bespoke.** Lean on smithay and standard protocols
    rather than hand-rolling. Where smithay is spec-correct but a conformance
-   test disagrees, that is upstream's to fix — we do not fork (§13).
+   test disagrees, that is upstream's to fix - we do not fork (§13).
 
 ---
 
@@ -51,9 +51,9 @@ erodes one of these should be treated as a regression, not a feature:
 
 shoestring-wm is one compositor process surrounded by small single-purpose
 companion binaries. Almost everything is wired together over just two
-sockets the WM owns — the **Wayland socket** (standard compositor
+sockets the WM owns - the **Wayland socket** (standard compositor
 protocols) and the **IPC socket** (newline-delimited JSON, see
-`docs/ipc.rst`) — plus a couple of D-Bus / PipeWire side channels.
+`docs/ipc.rst`) - plus a couple of D-Bus / PipeWire side channels.
 
 ### Process & protocol map
 
@@ -154,7 +154,7 @@ flowchart LR
 
 ## 1. Goals & Non-Goals
 
-**Hard requirements** — the floor for daily-driver use:
+**Hard requirements** - the floor for daily-driver use:
 
 - Floating windows (no tiling tree; tmux handles tiling-within-terminal).
 - Snap-to-half (Super+E/W), maximize (Super+M), minimize (Super+D),
@@ -169,11 +169,11 @@ flowchart LR
 
 **Non-goals** (and why they stay out):
 
-- **Animations / fancy transitions** — cost without serving the floating
+- **Animations / fancy transitions** - cost without serving the floating
   workflow.
-- **Window-decoration polish** — server-side decorations exist (borders are
+- **Window-decoration polish** - server-side decorations exist (borders are
   configurable, off by default) but theming is not a focus.
-- **A tiling layout engine** — fundamentally incompatible with the manual
+- **A tiling layout engine** - fundamentally incompatible with the manual
   floating model (see Appendix A).
 
 The companion bar, menu, and notifier are **not** non-goals: they live in
@@ -204,7 +204,7 @@ own Cargo features rather than always-on:
 
 `calloop`, `xkbcommon`, and the `wayland-*` crates are consumed through
 smithay's re-exports, so their versions can never skew. **There is no tokio
-or async runtime** — smithay is synchronous and the event loop is calloop;
+or async runtime** - smithay is synchronous and the event loop is calloop;
 IPC and subprocess plumbing ride calloop sources directly.
 
 **Beyond smithay**, the dependency set is kept deliberately short: `clap`
@@ -227,7 +227,7 @@ when a wallpaper image is configured.
 
 The workspace is a compositor binary plus its companions. The split exists
 so that **companions can speak the WM's wire and config formats without
-linking smithay** — see the dependency graph in §0. The two anchor crates,
+linking smithay** - see the dependency graph in §0. The two anchor crates,
 `shoestring-ipc` (Request/Response/Event wire types) and `shoestring-config`
 (config schema + parser), depend on nothing but `serde`. Everything else
 either links those (the IPC clients) or is a standalone `wayland-client`
@@ -278,29 +278,29 @@ own calloop sources at startup and keeps its handle outside the struct.
 
 The struct's fields fall into a few groups:
 
-- **Plumbing** — `display_handle`, `loop_handle`/`loop_signal`, the
+- **Plumbing** - `display_handle`, `loop_handle`/`loop_signal`, the
   monotonic `clock` backing `wp_presentation`, the socket name.
-- **Config** — the parsed `Config`, its source path, the compiled
+- **Config** - the parsed `Config`, its source path, the compiled
   `BindingTable`, and the hot-reload watcher + debounce token.
-- **Domain state** — the single `Space<Window>` (§5), `PopupManager`,
+- **Domain state** - the single `Space<Window>` (§5), `PopupManager`,
   `LayoutManager`, `WorkspaceManager`, `Wallpaper`, and the diagnostics
   overlay.
-- **Smithay protocol states** — one per protocol (§11). Many are held only
+- **Smithay protocol states** - one per protocol (§11). Many are held only
   to keep their global registered for the session and are marked
   `#[allow(dead_code)]`; the load-bearing ones (keyboard-shortcuts-inhibit,
   the foreign-toplevel/ext-workspace hand-wired states, the gated capture
   states) are mutated by their handlers.
-- **Input** — the `Seat`, cursor state, and per-device touch→output mapping.
-- **Side channels & gates** — the optional `ipc::Server`, the `metrics`
+- **Input** - the `Seat`, cursor state, and per-device touch→output mapping.
+- **Side channels & gates** - the optional `ipc::Server`, the `metrics`
   registry, and the runtime gates (`automation_enabled`,
   `screen_capture_enabled` and its shared `Arc<AtomicBool>` mirror).
-- **In-flight operations** — maps of pending screenshots, pending
+- **In-flight operations** - maps of pending screenshots, pending
   `run_command` children, the armed window picker, and the modal confirm
   dialog, each keyed so the SIGCHLD/IPC completion can find its request.
-- **Bookkeeping sets** — `sticky`, `always_on_top`, `rules_applied`,
+- **Bookkeeping sets** - `sticky`, `always_on_top`, `rules_applied`,
   `pending_initial_center`, plus the XWayland WM handle.
 
-Two constructors exist: `new` (opens a listening Wayland socket — the real
+Two constructors exist: `new` (opens a listening Wayland socket - the real
 path) and `new_headless` (no socket; WLCS injects clients directly). They
 share `new_inner`, so conformance runs against the exact same global setup
 the real session uses.
@@ -310,7 +310,7 @@ the real session uses.
 ## 5. Window Storage: a Single `Space<Window>`
 
 **Decision:** one `Space<Window>` holds every *currently visible* window
-across all outputs. Per-window state that isn't "where is it on screen
+across all outputs. Per-window state that is not "where is it on screen
 right now" lives beside the `Space`:
 
 - `LayoutManager` owns each window's `LayoutState` (floating with a saved
@@ -322,7 +322,7 @@ right now" lives beside the `Space`:
   `rules_applied`, `pending_initial_center`.
 
 **Why one Space, not one-per-workspace?** Sixteen Spaces would mean mapping
-every output into every Space and reconciling them on every monitor change —
+every output into every Space and reconciling them on every monitor change -
 16× the bookkeeping for no gain. Instead the invariant is simple: **the
 windows mapped in the `Space` are exactly the windows on the active
 workspace** (plus sticky windows, which are re-pinned to whatever workspace
@@ -363,8 +363,8 @@ re-running the map/unmap for the affected outputs.
 ## 7. Outputs & Multi-Monitor
 
 Outputs are smithay `Output`s mapped into the `Space`. Per-output data that
-the rest of the WM (and the IPC layer) needs — the damage tracker, resolved
-scale/transform, VRR state — is stashed in the `Output`'s user-data map so
+the rest of the WM (and the IPC layer) needs - the damage tracker, resolved
+scale/transform, VRR state - is stashed in the `Output`'s user-data map so
 it can be read without reaching into a feature-gated backend.
 
 - **winit backend:** exactly one output, the nested window. Scale is pinned
@@ -400,13 +400,13 @@ Two subtleties are load-bearing and easy to break:
   symbol.
 
 A focused client can ask, via `zwp_keyboard_shortcuts_inhibit_v1`, for the
-WM to *stop* intercepting binds so every key reaches it — needed by nested
+WM to *stop* intercepting binds so every key reaches it - needed by nested
 compositors, VMs, and remote-desktop viewers. We grant every request but only
 ever activate the inhibitor on the surface that currently holds keyboard
 focus.
 
 **Pointer.** Move and resize are **compositor-initiated** grabs triggered by
-Super+left/right-drag (`grabs/`), not client-initiated xdg-shell requests —
+Super+left/right-drag (`grabs/`), not client-initiated xdg-shell requests -
 this is the Openbox model. The pointer path also drives touch, tablet/stylus
 (`zwp_tablet_manager_v2`), touchpad gestures, and pointer
 lock/confinement + relative motion (for games and remote desktop).
@@ -428,7 +428,7 @@ bar), the core actions are:
 | Minimize | unchanged | unchanged | unmapped from the `Space` |
 
 Re-pressing maximize/tile while already in that state restores the saved
-floating rectangle — the Openbox feel. `arrange`/`set_layout`/`apply_geometry`
+floating rectangle - the Openbox feel. `arrange`/`set_layout`/`apply_geometry`
 compute the target rect, map the element, and send the `xdg_toplevel`
 configure. The tiling math is covered by property tests (`proptest`) over
 `arrange_rects`.
@@ -443,8 +443,8 @@ spanning outputs.
 The backend is chosen once at startup by `BackendKind` in `main.rs`: `winit`
 when `WAYLAND_DISPLAY`/`DISPLAY` is set (nested dev), otherwise `tty`
 (udev/DRM, the real session). Each backend wires its own calloop sources;
-there is **no `Backend` trait or dispatch enum on the hot path** — two
-backends don't justify the abstraction, so the divergence is confined to
+there is **no `Backend` trait or dispatch enum on the hot path** - two
+backends do not justify the abstraction, so the divergence is confined to
 startup and the per-frame submit. Only the `tty` backend integrates with the
 surrounding session (pushing `WAYLAND_DISPLAY`/`DISPLAY` into the systemd
 user manager); the nested winit backend must not clobber the session it runs
@@ -452,7 +452,7 @@ inside.
 
 Per-output render pass:
 
-1. collect render elements — active-workspace windows (z-ordered by the
+1. collect render elements - active-workspace windows (z-ordered by the
    `Space`), the output's layer-shell surfaces, the wallpaper as the
    bottom-most element, the cursor, and optionally borders / the diagnostics
    overlay;
@@ -465,7 +465,7 @@ Wayland clients are **flushed eagerly** after every dispatch, not only at
 render time, so headless/SSH dev sessions and not-yet-visible nested windows
 still get their replies. The one exception is the headless WLCS harness,
 where eager flushing would send a `wl_display.sync` reply before injected
-fake input has been applied — there, flushing is deferred to the end of the
+fake input has been applied - there, flushing is deferred to the end of the
 loop iteration (matching smithay's `wlcs_anvil`).
 
 `wp_presentation` timestamps come from hardware vblank on udev and from
@@ -475,8 +475,8 @@ submit time (best-effort) on winit.
 
 ## 11. Protocol Surface & Capability Gating
 
-The compositor advertises a broad set of Wayland protocols — far more than
-the four core actions — because "observable and integrable" is a goal. They
+The compositor advertises a broad set of Wayland protocols - far more than
+the four core actions - because "observable and integrable" is a goal. They
 fall into three tiers by how they are exposed:
 
 - **Always-on standard client protocols.** xdg-shell (+ decoration forced
@@ -489,17 +489,17 @@ fall into three tiers by how they are exposed:
   These are ordinary client capabilities, so they are unconditional.
 - **Opt-in via config.** `ext_idle_notify_v1` and its companion
   `zwp_idle_inhibit_manager_v1` are created only when
-  `idle_notifications_enabled` is set — inhibiting idle is meaningless with
+  `idle_notifications_enabled` is set - inhibiting idle is meaningless with
   nothing advertising it, so the two are gated together.
 - **Runtime-gated, default-off (the privacy stance).** Anything that can
   observe or drive the session without the user's active participation is
   off until explicitly enabled, and *absent* (not merely inert) while off:
-  - The **screen-capture gate** controls whether the `zwlr_screencopy_v1`
+- The **screen-capture gate** controls whether the `zwlr_screencopy_v1`
     and `ext-image-copy-capture`/`ext-image-capture-source` manager globals
     are advertised at all. While off, a client cannot even discover the
     capability. A shared `Arc<AtomicBool>` mirror lets the ext-image globals'
     visibility filters track the gate without a `&self` borrow.
-  - The **automation gate** guards the IPC input-synthesis and
+- The **automation gate** guards the IPC input-synthesis and
     capture/exec methods (`inject_key`/`type`/`click`, `move_mouse`,
     `dispatch_action`, `screenshot`, `run_command`). Read-only IPC queries
     are never gated.
@@ -514,7 +514,7 @@ clients runs on both the `tty` backend and the native `headless` backend
 The IPC server itself (`ipc.rs`) is newline-delimited JSON over a unix
 socket, served on a calloop `Generic` source per connection, with drop-on-
 backpressure event subscribers. It is the contract the bar, `ctl`, and
-automation all speak — see `docs/ipc.rst`.
+automation all speak - see `docs/ipc.rst`.
 
 ---
 
@@ -532,7 +532,7 @@ revisited deliberately rather than by accident:
 | **`serde`-only anchor crates** | Companions deserialize WM wire/config types without linking smithay. |
 | **Monorepo for siblings** | Bar/menu/notify build with `--workspace`; one version, one CI. They stay separate processes (the bar stays IPC-coupled on purpose). |
 | **Backend chosen at startup, no trait** | Only two backends (winit dev, udev session); a trait/enum on the hot path would be overhead for no reuse. |
-| **Capability gates default-off, runtime-only** | Capture/automation can't be enabled by anything that merely reaches a socket; the config file remains the source of truth. |
+| **Capability gates default-off, runtime-only** | Capture/automation cannot be enabled by anything that merely reaches a socket; the config file remains the source of truth. |
 | **Compositor-initiated move/resize** | Openbox-style Super+drag, not client-initiated xdg-shell requests. |
 | **Click-to-focus default** | Focus model is configurable (focus-follows-mouse / sloppy opt-in); click-to-focus is the safe default. |
 | **Pinned smithay rev, never forked** | Smithay is pre-1.0 and churns; we bump intentionally. Spec-correct-but-failing conformance cases are upstream's, tracked as known-xfail (§13). |
@@ -562,16 +562,16 @@ revisited deliberately rather than by accident:
 
 ---
 
-## Appendix A — Why not fork niri?
+## Appendix A - Why not fork niri?
 
 niri is a scrolling tiler. Its layout model is fundamentally incompatible
 with a floating + manual-snap workflow. Forking it would mean either ripping
 out most of its layout code (more work than starting fresh) or contorting the
-workflow to fit. Starting from a small smithay base was cleaner — but niri
+workflow to fit. Starting from a small smithay base was cleaner - but niri
 remains the best real-world reference for how to drive smithay at scale.
 
-## Appendix B — Why not Sway?
+## Appendix B - Why not Sway?
 
-Sway is i3-style manual tiling, C-based, and built on wlroots — more runtime
+Sway is i3-style manual tiling, C-based, and built on wlroots - more runtime
 and a different language than this project wants. The floating model and the
 Rust/Smithay foundation are deliberate choices, not incidental ones.

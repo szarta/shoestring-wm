@@ -17,7 +17,7 @@ folded in during the monorepo migration so a single
 Running
 -------
 
-The bar takes essentially no flags — launching it is enough:
+The bar takes essentially no flags - launching it is enough:
 
 .. code-block:: console
 
@@ -32,7 +32,7 @@ points at. Without a config file it anchors to the bottom edge of the
 first output and reserves a 24-pixel exclusive zone; the
 :ref:`bar-configuration` section below covers how to change that.
 
-If the bar starts before the WM (or against a compositor that doesn't
+If the bar starts before the WM (or against a compositor that does not
 support ``zwlr_layer_shell_v1``), it exits with an error explaining
 which global was missing.
 
@@ -40,12 +40,12 @@ Environment
 -----------
 
 ``WAYLAND_DISPLAY``
-    Required — the bar is a Wayland client.
+    Required - the bar is a Wayland client.
 
 ``SHOESTRING_WM_SOCKET``
     Optional. When present, the bar subscribes to WM events for
     workspaces and focus changes. If unset (or if the IPC connection
-    fails), the bar still renders the window list and the clock — just
+    fails), the bar still renders the window list and the clock - just
     without workspace state or focused-window highlighting.
 
 ``SHOESTRING_BAR_FONT``
@@ -59,7 +59,7 @@ Environment
 ``SHOESTRING_BAR_LOG``
     Optional. When set, tracing is appended to this file with ANSI
     escapes disabled (grep-friendly) instead of going to stderr. Mirrors
-    ``SHOESTRING_WM_LOG`` / ``SHOESTRING_MENU_LOG`` — the practical way to
+    ``SHOESTRING_WM_LOG`` / ``SHOESTRING_MENU_LOG`` - the practical way to
     observe the bar's IPC event flow, gate/chip state, and which WM
     socket it connected to (the live-vs-test ``SHOESTRING_WM_SOCKET``
     gotcha). Pair with ``RUST_LOG=debug``.
@@ -82,7 +82,7 @@ Configuration
 The bar reads an optional TOML file at
 ``$XDG_CONFIG_HOME/shoestring-bar/config.toml`` (defaulting to
 ``~/.config/shoestring-bar/config.toml``). When the file is missing, the
-bar starts with the same hardcoded defaults it shipped with — every
+bar starts with the same hardcoded defaults it shipped with - every
 field below is optional.
 
 To drop a fully-commented starter file at that path, run:
@@ -127,8 +127,8 @@ Battery indicator
 -----------------
 
 When present, the battery readout is drawn immediately to the left of
-the clock (and to the left of the ``AUTO`` automation chip when that's
-shown). It re-polls on the bar's existing 1-second tick — no extra
+the clock (and to the left of the ``AUTO`` automation chip when that is
+shown). It re-polls on the bar's existing 1-second tick - no extra
 file descriptors.
 
 Source detection runs once at startup and falls through per platform:
@@ -139,7 +139,7 @@ Source detection runs once at startup and falls through per platform:
   ``hw.acpi.battery.{life,state,units}``. ``units == 0`` is treated
   as "no battery present".
 - **Other OSes** (and BSDs without an ACPI battery): the indicator is
-  hidden entirely so the bar layout doesn't reserve dead space.
+  hidden entirely so the bar layout does not reserve dead space.
 
 Format placeholders:
 
@@ -152,7 +152,7 @@ Format placeholders:
 
 Color override: below ``low_threshold`` the indicator paints orange;
 below ``critical_threshold`` it paints red. Both thresholds are only
-applied while discharging — a charging or full battery stays in the
+applied while discharging - a charging or full battery stays in the
 normal foreground color even at low capacity.
 
 .. _bar-system-tray:
@@ -163,7 +163,7 @@ System tray
 When a session D-Bus is reachable, the bar becomes a
 ``org.kde.StatusNotifierWatcher`` + host and shows tray icons on the
 right, just left of the clock cluster. If another process already owns
-the watcher, the bar bows out and runs trayless — it never fights an
+the watcher, the bar bows out and runs trayless - it never fights an
 existing tray. There is no configuration; the tray appears whenever
 items register.
 
@@ -171,7 +171,7 @@ Icons resolve in two ways:
 
 - **Themed name** (``IconName``): appindicator/ayatana apps (nm-applet,
   blueman) advertise a freedesktop icon *name*, resolved against the
-  active icon theme (PNG or SVG) — crisp and theme-following.
+  active icon theme (PNG or SVG) - crisp and theme-following.
 - **Raw pixmap** (``IconPixmap``): KDE/Qt apps that ship ARGB32 pixmaps
   instead of a name are blitted directly. The name path wins when an
   item offers both.

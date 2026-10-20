@@ -9,8 +9,8 @@ clean FreeBSD build.
 
 | Feature set | Linux | FreeBSD | macOS / Windows |
 |---|---|---|---|
-| `--features winit` (dev backend, runs nested) | ✓ | should build; untested — see [task 61](#follow-ups) | n/a (no Wayland host) |
-| `--features tty` (daily driver, DRM/KMS) | ✓ | ✗ by design — see [§ TTY backend](#tty-backend) | ✗ |
+| `--features winit` (dev backend, runs nested) | ✓ | should build; untested - see [task 61](#follow-ups) | n/a (no Wayland host) |
+| `--features tty` (daily driver, DRM/KMS) | ✓ | ✗ by design - see [§ TTY backend](#tty-backend) | ✗ |
 
 The `tty` feature pulls Smithay's libinput / udev / libseat / DRM /
 GBM / EGL backends, all of which are Linux-only. This is intentional;
@@ -45,7 +45,7 @@ wrong. ✓
 
 ### Path assumptions in our code
 
-We do not read `/proc`, `/sys`, `/dev/dri`, or `/dev/input` directly —
+We do not read `/proc`, `/sys`, `/dev/dri`, or `/dev/input` directly -
 Smithay's backends do that, and only on the Linux-only TTY path.
 
 `$XDG_RUNTIME_DIR/shoestring-wm-$WAYLAND_DISPLAY.sock` is the default
@@ -67,11 +67,11 @@ shell out to `loginctl`. Session locking goes through
 
 None. No `libc::SYS_*`, no `pidfd_open`, no direct epoll/inotify. The
 confirm helper deliberately uses a pipe-EOF idiom instead of
-`pidfd_open` for exactly this reason — see `src/confirm.rs`.
+`pidfd_open` for exactly this reason - see `src/confirm.rs`.
 
 ### Shell scripts
 
-All `#!/usr/bin/env bash`. No bashisms beyond what's in `scripts/actions/`,
+All `#!/usr/bin/env bash`. No bashisms beyond what is in `scripts/actions/`,
 which are themselves trivial. bash is the documented dep.
 
 ### Action scripts (`scripts/actions/`)
@@ -86,16 +86,16 @@ These call **Linux-only userland**:
 | `shoestring-logout` | `pkill -x` | POSIX short flag; accepted by both GNU pkill and FreeBSD pkill. |
 
 `scripts/actions/README.md` already lists the tool dependency per
-script. They are user-facing helpers, not load-bearing WM code — the
+script. They are user-facing helpers, not load-bearing WM code - the
 WM does not depend on any of them.
 
 ## Follow-ups
 
 Concrete blockers worth tracking as their own todos:
 
-- **task 61** — actually build + smoke-test the winit feature on
+- **task 61** - actually build + smoke-test the winit feature on
   FreeBSD (e.g. inside Sway on a FreeBSD VM); document the
   `pkg install` line in `docs/install.rst`.
-- **task 63** — `shoestring-brightness-*`: add a FreeBSD branch using
+- **task 63** - `shoestring-brightness-*`: add a FreeBSD branch using
   `backlight(8)` (or document the script as Linux-only and ship a
   per-OS alternate in `scripts/actions/freebsd/`).

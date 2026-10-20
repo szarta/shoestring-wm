@@ -19,7 +19,7 @@ Three modes share the same UI:
 **commands**
     Reads one command per line from the source file. Blank lines and
     lines beginning with ``#`` are skipped. The selected line is
-    whitespace-split and exec'd, detached via ``setsid``.
+    whitespace-split and executed, detached via ``setsid``.
 
 **bookmarks**
     Reads a markdown bookmarks file. Each line is parsed for a
@@ -30,9 +30,9 @@ Three modes share the same UI:
 **windows**
     A live window switcher. Candidates come from the running WM over its
     IPC socket (not a file): one row per mapped window across every
-    workspace, labelled ``[workspace] app-id — title`` (focused window
+    workspace, labeled ``[workspace] app-id - title`` (focused window
     marked ``*``). Selecting a row switches to that window's workspace and
-    focuses it — unminimizing if needed — via the ``FocusWindow`` IPC
+    focuses it - unminimizing if needed - via the ``FocusWindow`` IPC
     request. ``--source`` is ignored.
 
 Options

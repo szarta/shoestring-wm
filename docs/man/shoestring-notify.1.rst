@@ -42,7 +42,7 @@ Configuration
 -------------
 
 Read from ``$XDG_CONFIG_HOME/shoestring-notify/config.toml`` (falling back
-to ``~/.config``). A missing file is normal — defaults apply. All keys
+to ``~/.config``). A missing file is normal - defaults apply. All keys
 live under a ``[notify]`` table:
 
 **position** (default ``top-right``)
@@ -50,7 +50,7 @@ live under a ``[notify]`` table:
     ``bottom-left``.
 
 **background** (default ``#222222``), **foreground** (default ``#ffffff``)
-    Toast background and text colours.
+    Toast background and text colors.
 
 **border** (default ``#557788``)
     Accent stripe, drawn only for ``critical`` urgency.
@@ -74,7 +74,7 @@ live under a ``[notify]`` table:
 **summary_size** (default ``15.0``), **body_size** (default ``13.0``)
     Font sizes for the title and body.
 
-Colours accept ``#RGB``, ``#RRGGBB``, ``#AARRGGBB`` and ``0x`` forms.
+Colors accept ``#RGB``, ``#RRGGBB``, ``#AARRGGBB`` and ``0x`` forms.
 
 D-Bus interface
 ---------------
@@ -84,7 +84,7 @@ Owns ``org.freedesktop.Notifications`` at
 (advertising ``body`` and ``persistence``), ``GetServerInformation``,
 ``Notify``, and ``CloseNotification``, and emits the
 ``NotificationClosed`` signal. The ``urgency`` and ``image-path`` hints
-are honoured; ``timeout`` of ``-1`` uses ``default_timeout_ms`` and ``0``
+are honored; ``timeout`` of ``-1`` uses ``default_timeout_ms`` and ``0``
 never expires.
 
 Environment

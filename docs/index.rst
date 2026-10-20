@@ -3,10 +3,13 @@ shoestring-wm
 
 shoestring-wm is a Rust Wayland compositor designed as a lightweight,
 low-dependency replacement for an Openbox/X11 desktop. It pairs a small
-floating-window WM with two sibling projects:
+floating-window WM with desktop tools in the same Cargo workspace:
 
-- **shoestring-bar** — a status bar that consumes the WM's IPC stream.
-- **shoestring-menu** — a dmenu-style launcher for commands and bookmarks.
+- **shoestring-bar**, a status bar that consumes the WM's IPC stream.
+- **shoestring-menu**, a dmenu-style launcher for commands and bookmarks.
+- Notification, locking, screenshot, clipboard, and media helpers.
+- An IPC client, a console window manager, and remote-desktop tools.
+- A desktop portal backend for screen sharing and screenshots.
 
 This is the user guide. For source-level architecture notes see
 ``docs/architecture.md`` in the repository.

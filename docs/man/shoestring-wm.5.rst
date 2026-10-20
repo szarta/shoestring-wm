@@ -52,7 +52,7 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
     ``follows-mouse`` moves keyboard focus to whatever window the pointer
     is over, and clears focus over empty space. ``sloppy`` is the same
     but keeps the previous focus while the pointer is over empty space.
-    Neither variant raises the window — clicks still do.
+    Neither variant raises the window - clicks still do.
 
 **repeat_delay** (integer, default ``600``)
     Milliseconds before a held key starts repeating.
@@ -134,7 +134,7 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
     ``arrange-grid`` / ``arrange-spiral`` / ``arrange-bsp``
         One-shot auto-arrange of every window on the active workspace
         (per output, in reading order) into a grid, fibonacci spiral, or
-        binary "dwindle" split. No persistent tiling — the windows stay
+        binary "dwindle" split. No persistent tiling - the windows stay
         floating, so later opens/closes do not re-flow; invoke again to
         re-tile. Skips minimized and fullscreen windows.
 
@@ -188,8 +188,8 @@ Per-app actions evaluated once on first commit after a window maps.
 **match** (table)
     Sparse predicate. AND-ed; empty matcher matches every window.
 
-    - ``app_id`` (string) — exact xdg-shell ``app_id`` match.
-    - ``title_contains`` (string) — case-sensitive substring on title.
+    - ``app_id`` (string) - exact xdg-shell ``app_id`` match.
+    - ``title_contains`` (string) - case-sensitive substring on title.
 
 **actions** (table)
     Sparse action set.
@@ -252,7 +252,7 @@ own rectangle (so it never bleeds onto an adjacent tile) and is focus-aware.
 
 Controls the ``zwlr_data_control_manager_v1`` global used by out-of-focus
 clipboard managers (cliphist, copyq, wl-clipboard). Off by default because any
-bound client then observes every copy — a privacy surface, gated like screen
+bound client then observes every copy - a privacy surface, gated like screen
 capture. Not needed for the built-in cross-machine clipboard
 (``Super+Shift+C`` / ``V``), which is brokered natively over the remote tunnel.
 
@@ -268,7 +268,7 @@ Runtime toggles for diagnosing the compositor without a recompile. The
 whether a plane is behind a visual glitch; they are honored **only on the
 DRM/KMS (TTY) backend** (the nested winit backend has no hardware planes and
 ignores them), re-read every frame so ``reload-config`` applies a change on the
-next frame. Every flag defaults to ``false`` — leave the section out unless
+next frame. Every flag defaults to ``false`` - leave the section out unless
 actively debugging.
 
 **disable_direct_scanout** (bool, default ``false``)
@@ -284,7 +284,7 @@ actively debugging.
     plane.
 
 **protocol_trace** (bool, default ``false``)
-    Log the Wayland wire protocol — every per-client request and event — to
+    Log the Wayland wire protocol - every per-client request and event - to
     stderr; the built-in equivalent of ``WAYLAND_DEBUG=server`` (set under the
     hood) and the same as the ``--protocol-trace`` flag to **shoestring-wm**\(1).
     Unlike the ``disable_*`` flags it is read **once at startup** and works on

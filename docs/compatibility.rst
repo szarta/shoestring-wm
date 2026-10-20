@@ -4,7 +4,7 @@ Application compatibility
 shoestring-wm aims to run ordinary desktop applications without
 special-casing. This page collects what is known to work, the handful of
 app-specific quirks worth knowing about, and how to work around a
-misbehaving client. It is a **living document** — if you hit an
+misbehaving client. It is a **living document** - if you hit an
 application-specific problem, please report it (see
 :ref:`reporting-compat` below) so it can be captured here.
 
@@ -26,7 +26,7 @@ XWayland:
 - **Electron / Chromium-based apps** (VS Code, Discord, Slack, Chromium,
   Chrome, …) often default to XWayland. Launch them with
   ``--ozone-platform-hint=auto`` (or ``--ozone-platform=wayland``) to run
-  natively — e.g. ``code --ozone-platform-hint=auto``. Native Wayland gives
+  natively - e.g. ``code --ozone-platform-hint=auto``. Native Wayland gives
   correct scaling and avoids the XWayland caveats below.
 - **Firefox** runs on Wayland by default on current releases; on older
   builds set ``MOZ_ENABLE_WAYLAND=1`` in the environment.
@@ -39,13 +39,13 @@ mode, and by default draws no titlebar (an optional border is configurable
 via ``[decorations].border_width``). The practical effect:
 
 - Apps that honor the protocol (most Qt apps, many GTK apps) render
-  **undecorated** — no client titlebar, no double decorations. Move and
+  **undecorated** - no client titlebar, no double decorations. Move and
   resize them by holding ``Super`` and dragging.
 - Apps that ignore it and always draw client-side decorations (GNOME/GTK
   apps using ``libdecor``) keep their own titlebar and shadow. That is
   cosmetic, not a malfunction.
 
-This matches the project's "no decoration polish" non-goal — see
+This matches the project's "no decoration polish" non-goal - see
 :doc:`overview`.
 
 XWayland (X11) applications
@@ -81,7 +81,7 @@ GIMP screenshots (use 3.x, not 2.10)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **GIMP 2.10's built-in screenshot** (*File ▸ Create ▸ Screenshot*) produces a
-**solid black image** on shoestring-wm — for the full-screen, region, and
+**solid black image** on shoestring-wm - for the full-screen, region, and
 single-window modes alike. This is a GIMP limitation, not a compositor bug,
 and **no portal or environment fix changes it**:
 
@@ -89,25 +89,25 @@ and **no portal or environment fix changes it**:
   always runs under **XWayland** with an X11 ``$DISPLAY``.
 - Its screenshot plug-in selects a backend **X11-first** and hardcodes
   ``screenshot_x11_available()`` to return ``TRUE`` (no XWayland guard). It
-  therefore always grabs the **X11 root window** — which under XWayland holds
-  none of the composited Wayland content — and never reaches the working
+  therefore always grabs the **X11 root window** - which under XWayland holds
+  none of the composited Wayland content - and never reaches the working
   ``org.freedesktop.portal.Screenshot`` portal that the session serves.
 
 Two fixes:
 
 - **Use GIMP 3.x.** It is GTK3, runs natively on Wayland (no X11 display), and
   its screenshot goes through the desktop portal, which shoestring-wm serves
-  (see :doc:`portals`) — so *File ▸ Create ▸ Screenshot* captures real pixels.
+  (see :doc:`portals`) - so *File ▸ Create ▸ Screenshot* captures real pixels.
   A from-source 3.x build works; Flathub also ships ``org.gimp.GIMP``. (Verify
   the session's portal is reachable first: ``XDG_CURRENT_DESKTOP=shoestring-wm``
   must be exported into the systemd-user / D-Bus activation environment, which
-  the ``shoestring-wm-session`` wrapper handles — see :doc:`install`.)
+  the ``shoestring-wm-session`` wrapper handles - see :doc:`install`.)
 - **Or capture outside GIMP and open the result.** ``shoestring-screenshot``
   (add ``--region`` to drag-select a rectangle) writes a PNG you can open with
   *File ▸ Open*; or ``shoestring-screenshot --clipboard`` (needs
   ``wl-clipboard``) copies the capture for *File ▸ Create ▸ From Clipboard*.
 
-The same X11-first screenshot behaviour affects other GTK2/X11 capture tools;
+The same X11-first screenshot behavior affects other GTK2/X11 capture tools;
 prefer a Wayland-native or GTK3 successor, or capture externally.
 
 Clipboard managers and the cross-machine bridge
@@ -120,11 +120,11 @@ are then two ways to reach the selection out of focus or across machines.
 axis (see :doc:`bindings`), ``Super+Shift+C`` pushes your local selection to the
 remote and ``Super+Shift+V`` pulls the remote's into your local one. This is
 brokered natively by the compositor over the same tunnel the remote desktop uses
-and is gated by that remote sharing — it needs **no** extra protocol or config,
+and is gated by that remote sharing - it needs **no** extra protocol or config,
 and nothing is streamed continuously (each transfer is one explicit keypress).
 
-**Clipboard managers (opt-in).** For out-of-focus clipboard *managers* —
-``cliphist``, ``copyq``, ``wl-clipboard`` (``wl-copy`` / ``wl-paste``) — the
+**Clipboard managers (opt-in).** For out-of-focus clipboard *managers* -
+``cliphist``, ``copyq``, ``wl-clipboard`` (``wl-copy`` / ``wl-paste``) - the
 compositor can advertise ``zwlr_data_control_manager_v1`` (the wlroots
 data-control protocol), which lets any bound client **read and set** the
 selection without focus. Because such a client then sees every copy, this is a
@@ -141,8 +141,8 @@ needs ``data_control = true``):
 
 Add ``--primary`` to target the primary (middle-click) selection instead of
 the clipboard. Because the two halves compose over an ordinary byte pipe, you
-can also **sync the clipboard between two machines** by piping them over ``ssh``
-— a manual alternative to the built-in ``Super+Shift+C`` / ``V`` when you want a
+can also **sync the clipboard between two machines** by piping them over ``ssh``.
+This is a manual alternative to the built-in ``Super+Shift+C`` / ``V`` when you want a
 continuous follow rather than per-keypress transfers::
 
     # local copy → remote box
@@ -169,7 +169,7 @@ Games, Steam and Proton
 The protocol building blocks games rely on are implemented:
 
 - **Pointer lock + relative motion** (``zwp_pointer_constraints_v1`` /
-  ``zwp_relative_pointer_v1``) for FPS mouse-look — the cursor locks while
+  ``zwp_relative_pointer_v1``) for FPS mouse-look - the cursor locks while
   over the game surface and the game receives raw relative deltas.
 - **Keyboard-shortcuts inhibit** (``zwp_keyboard_shortcuts_inhibit_v1``) so
   a focused full-screen game receives ``Super``-combos instead of the WM
@@ -183,7 +183,7 @@ The protocol building blocks games rely on are implemented:
 Known gaps to be aware of when testing:
 
 - **No tearing / immediate presentation yet.** ``tearing_control_v1`` is not
-  implemented, so presentation is always vsync'd. Games cannot opt into
+  implemented, so presentation is always synchronized to vertical refresh. Games cannot opt into
   tearing for lower latency.
 - Steam's own UI is Chromium-based and runs under XWayland; the
   fractional-scaling caveat above applies to the client and overlay.
@@ -195,7 +195,7 @@ Screen sharing and conferencing
 Screen capture for browsers, OBS and conferencing apps goes through the
 native desktop portal (``xdg-desktop-portal-shoestring``), which serves the
 **ScreenCast** and **Screenshot** interfaces. It must be installed and
-routed — see :doc:`portals` for setup, which the packaged ``.deb`` / ``.rpm``
+routed - see :doc:`portals` for setup, which the packaged ``.deb`` / ``.rpm``
 handle automatically.
 
 App-specific notes:
@@ -203,7 +203,7 @@ App-specific notes:
 - **Browsers and OBS** take zero-copy ``dmabuf`` frames and work directly.
 - **Zoom** cannot import the compositor's ``dmabuf`` buffers (its bundled
   Mesa is too old), so the portal hands it **shm** frames per-consumer
-  instead — no global switch needed. This is handled automatically; see
+  instead - no global switch needed. This is handled automatically; see
   :doc:`portals`.
 - Screen sharing is **opt-in**: the capture capability is off until enabled,
   so the first share in a session may require flipping the screen-capture
@@ -213,7 +213,7 @@ Input methods
 -------------
 
 CJK and other composed input via **fcitx5** or **ibus** (with its Wayland
-front-end) works out of the box — the three cooperating protocols are always
+front-end) works out of the box - the three cooperating protocols are always
 advertised, and ``Super`` keybinds keep working while an IME is active.
 On-screen keyboards (``squeekboard``, ``wvkbd``) are supported the same way.
 Full setup, including launching the IME daemon from ``[general].autostart``,
@@ -223,7 +223,7 @@ Working around a misbehaving application
 ----------------------------------------
 
 Most app-specific placement problems are solvable with a **window rule**
-(see :doc:`configuration`) — for example, pinning a chat client to a
+(see :doc:`configuration`) - for example, pinning a chat client to a
 workspace, forcing a tool window to a fixed size and position, or matching
 an X11 app by its ``WM_CLASS``. If an app opens on the wrong workspace, at
 the wrong size, or steals focus, a rule is usually the fix before anything
@@ -239,7 +239,7 @@ When an application misbehaves, the most useful report includes:
 - the app, its version, and whether it ran **native Wayland or XWayland**
   (X11 apps show up with a ``WM_CLASS``; check ``shoestring-ctl windows``);
 - what you expected versus what happened;
-- the compositor log for the session — set
+- the compositor log for the session - set
   ``SHOESTRING_WM_LOG=/tmp/swm.log`` before launching (see :doc:`running`);
 - the output of ``shoestring-ctl -p windows`` while the app is open.
 

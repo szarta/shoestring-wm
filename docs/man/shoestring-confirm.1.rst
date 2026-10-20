@@ -10,14 +10,14 @@ Description
 -----------
 
 A modal yes/no confirmation dialog for **shoestring-wm**\(1). Displays
-*PROMPT* centred over every output and grabs the keyboard until the user
+*PROMPT* centered over every output and grabs the keyboard until the user
 answers. It is the reusable building block behind the WM's
 ``confirm_action`` gate (used, for example, to confirm **quit**), but it
 is a standalone program that any script can call.
 
 The dialog is dismissed by:
 
-- **Enter** / keypad **Enter** — confirm (exit ``0``);
+- **Enter** / keypad **Enter** - confirm (exit ``0``);
 - **Escape**, any mouse click, or the compositor closing the surface —
   cancel (exit ``1``).
 
@@ -49,10 +49,10 @@ read it.
     Confirmed (Enter).
 
 **1**
-    Cancelled (Escape, click, or surface closed).
+    Canceled (Escape, click, or surface closed).
 
 **2**
-    Error — missing font, no Wayland connection, or a protocol/I/O
+    Error - missing font, no Wayland connection, or a protocol/I/O
     failure. A message is also printed to standard error.
 
 Examples

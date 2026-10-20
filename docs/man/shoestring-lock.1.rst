@@ -21,8 +21,8 @@ be dismissed by other means (VT switching aside, which the compositor
 governs).
 
 The password prompt is hidden while the screensaver runs and appears as
-soon as you begin typing. It hides again — discarding anything typed so
-far — when you press **Escape**, or automatically after roughly eight
+soon as you begin typing. It hides again - discarding anything typed so
+far - when you press **Escape**, or automatically after roughly eight
 seconds without a keystroke.
 
 Options
@@ -30,7 +30,7 @@ Options
 
 **--pam-service** *NAME*
     PAM service stack to authenticate against. Defaults to
-    ``shoestring-lock`` — a dedicated policy shipped with the locker (see
+    ``shoestring-lock`` - a dedicated policy shipped with the locker (see
     *Authentication*). Override only to substitute a custom stack.
 
 **--font** *PATH*
@@ -58,7 +58,7 @@ unlocks only when both ``authenticate`` and ``acct_mgmt`` succeed.
 Authentication uses the dedicated ``shoestring-lock`` PAM service rather
 than the system ``login`` stack. This is deliberate: on FreeBSD/OpenPAM
 the ``login`` service begins with ``auth sufficient pam_self.so``, which
-succeeds for the *calling* user with no password — a locker on that
+succeeds for the *calling* user with no password - a locker on that
 service would unlock on any input. The shipped policy instead performs a
 real password check while keeping the binary unprivileged: on Linux via
 ``pam_unix`` (which calls the setuid ``unix_chkpwd`` from ``libpam-modules``
@@ -96,7 +96,7 @@ Exit status
     Locked, authenticated, and unlocked cleanly.
 
 **1**
-    Initialisation or PAM failure (no Wayland connection, missing
+    Initialization or PAM failure (no Wayland connection, missing
     protocol, font load error, ...). A message is printed to standard
     error.
 

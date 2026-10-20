@@ -2,7 +2,7 @@ Install
 =======
 
 On Debian/Ubuntu and Fedora, install a prebuilt package (see `Prebuilt
-packages`_ below) — it pulls in the runtime libraries for you and wires
+packages`_ below) - it pulls in the runtime libraries for you and wires
 shoestring-wm into your login screen. Everywhere else, build from source.
 
 When building from source the runtime needs a small set of native
@@ -30,9 +30,9 @@ Prebuilt packages
 Tagged releases ship a Debian/Ubuntu ``.deb`` and a Fedora ``.rpm`` on the
 `GitHub releases page <https://github.com/szarta/shoestring-wm/releases>`_.
 Each bundles every binary (WM plus helpers), the man pages, a session
-wrapper, and the Wayland **session file** — so once installed,
+wrapper, and the Wayland **session file** - so once installed,
 shoestring-wm shows up in your login screen's session menu. Pick it there
-and log in — **but only with a Wayland-capable greeter**; see
+and log in - **but only with a Wayland-capable greeter**; see
 :ref:`greeter` below, because an X11-based greeter (notably LightDM's
 default) will offer the session and then fail to launch it.
 
@@ -95,7 +95,7 @@ you want on ``$PATH``:
 
 To get a source build into your login screen's session menu, install the
 binaries to a *system* path (the display manager launches sessions with a
-minimal ``$PATH`` that won't include ``~/.local/bin``, and the WM spawns
+minimal ``$PATH`` that will not include ``~/.local/bin``, and the WM spawns
 its helpers by bare name), then add the session file and its wrapper::
 
     sudo install -Dm755 -t /usr/local/bin/ \
@@ -137,8 +137,8 @@ Debian / Ubuntu
 If your distro's ``libdisplay-info-dev`` is older than 0.1 you may need
 to pull it from backports (Debian) or build it from upstream.
 
-The last line (``libpipewire-0.3-dev`` — which carries the ``libspa-0.2``
-headers — and ``libclang-dev``) is the build dependency of the native
+The last line (``libpipewire-0.3-dev`` - which carries the ``libspa-0.2``
+headers - and ``libclang-dev``) is the build dependency of the native
 screencast portal, whose ``pipewire``/``libspa`` ``-sys`` crates generate
 bindings with ``bindgen``. ``cargo build --workspace`` always builds the
 portal, so these are required for a workspace build.
@@ -189,7 +189,7 @@ FreeBSD
 ~~~~~~~
 
 **The FreeBSD port.** The repository carries a ``USES=cargo`` ports
-skeleton at ``packaging/freebsd`` — the FreeBSD analogue of the ``.deb`` /
+skeleton at ``packaging/freebsd`` - the FreeBSD analog of the ``.deb`` /
 ``.rpm``. It is **not yet in the official FreeBSD ports tree** (a planned
 post-1.0 step), so ``pkg install shoestring-wm`` will not find it. To build
 and install it yourself, drop the skeleton into a ports tree and use the
@@ -204,7 +204,7 @@ normal ports workflow:
 
 The port pulls in every dependency (including the screen locker's
 ``unix-selfauth-helper``) and installs the binaries, man pages, the Wayland
-session file, and the locker's PAM policy under ``/usr/local`` — so
+session file, and the locker's PAM policy under ``/usr/local`` - so
 shoestring-wm appears in your display manager's session menu with no manual
 wiring, and the locker steps further down are handled for you. See
 ``packaging/freebsd/README.md`` for how the dependency list and checksums
@@ -248,7 +248,7 @@ installed.
 FreeBSD (via a vendored, OpenPAM-portable ``pam-client2`` under
 ``third_party/``). It authenticates through a dedicated ``shoestring-lock``
 PAM policy that, on FreeBSD, delegates to the setuid
-``unix-selfauth-helper`` — so the locker binary itself stays unprivileged.
+``unix-selfauth-helper`` - so the locker binary itself stays unprivileged.
 A **from-source** install (the port does this for you) must therefore
 install both:
 
@@ -339,7 +339,7 @@ The hardware power / sleep keys
 
 shoestring-wm can route the physical **power** and **sleep** keys through
 its confirm dialog (the same one the bar's *Shut down* / *Sleep* menu rows
-use) — but only if you stop the *session manager* from acting on them
+use) - but only if you stop the *session manager* from acting on them
 first. The WM has no power policy of its own; it just reacts to the key
 once nothing else does.
 
@@ -355,7 +355,7 @@ WM ever sees the key. To hand those keys to the WM, edit
     HandleSuspendKey=ignore
 
 then ``systemctl restart systemd-logind`` (note: this ends the current
-graphical session). Now bind the keys in your shoestring-wm config — the
+graphical session). Now bind the keys in your shoestring-wm config - the
 keysym names are ``XF86PowerOff`` and ``XF86Sleep``::
 
     [[bindings]]
@@ -370,7 +370,7 @@ The ``power-off`` / ``reboot`` / ``suspend`` actions (and the matching bar
 menu rows) shell out to the first available of ``systemctl`` →
 ``loginctl`` → ``shutdown(8)`` / ``zzz``, so they work on systemd,
 elogind, and bare-init / FreeBSD alike. On FreeBSD the power key is wired
-through ``devd`` / ``acpiconf`` rather than logind — disable the relevant
+through ``devd`` / ``acpiconf`` rather than logind - disable the relevant
 ``/etc/devd.conf`` (or ``sysctl hw.acpi.power_button_state``) handler the
 same way before binding the key here.
 
@@ -389,18 +389,18 @@ The most common pitfall is **LightDM with its default GTK greeter**
 (``lightdm-gtk-greeter``), which runs an X server. It *will* list
 shoestring-wm in the session menu, but when you pick it the compositor comes
 up in the right logind session yet is never told the seat is active, so it
-can't take DRM master and you get a **black screen**. This is a LightDM
-limitation, not specific to shoestring — the reference compositor
+cannot take DRM master and you get a **black screen**. This is a LightDM
+limitation, not specific to shoestring - the reference compositor
 (``weston``) fails to launch under it too. (shoestring fails *recoverably*: a
 denied seat leaves a black screen you can escape with ``Ctrl+Alt+F2``, not a
 hung machine.)
 
 **Use a Wayland-capable greeter instead.** Any of these hand off correctly:
 
-- **greetd** — minimal and the best fit here: it sits directly on the same
+- **greetd** - minimal and the best fit here: it sits directly on the same
   seat manager shoestring already uses (``logind`` on Linux, ``seatd`` on the
-  BSDs), so it's consistent across platforms and pulls in almost nothing.
-- **GDM** or **SDDM** (with its Wayland greeter) — heavier, but work out of
+  BSDs), so it is consistent across platforms and pulls in almost nothing.
+- **GDM** or **SDDM** (with its Wayland greeter) - heavier, but work out of
   the box.
 
 greetd on Debian/Ubuntu

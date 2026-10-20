@@ -11,19 +11,19 @@ from the environment; all can be forced with ``--backend``.
 **tty**       Native DRM/KMS + libinput + libseat. The daily-driver
               path. Selected when both env vars are unset.
 **headless**  Surfaceless EGL with one virtual output and no physical
-              display — on a DRM render node when one is available, else
+              display - on a DRM render node when one is available, else
               software (llvmpipe) so a host with no ``/dev/dri`` still
-              renders. Never auto-detected — request it explicitly with
+              renders. Never auto-detected - request it explicitly with
               ``--backend headless``. The foundation for remote-desktop
               *serve mode*, and useful on its own for CI, the WLCS
               harness, and automation. Included in the default build (it
-              adds no dependencies the ``tty`` backend doesn't already
+              adds no dependencies the ``tty`` backend does not already
               pull), so a stock ``cargo install`` / package has it; only a
               ``--no-default-features`` build without ``headless`` omits it.
 ============  ===========================================================
 
-The headless backend prefers an unprivileged GPU render node — so it needs
-no seat, VT, or display manager — and drives its render at a fixed cadence
+The headless backend prefers an unprivileged GPU render node - so it needs
+no seat, VT, or display manager - and drives its render at a fixed cadence
 (there is no vblank). Nothing scans the rendered frame out; it is reached
 only through the capture path (``shoestring-ctl screenshot``,
 ``wlr-screencopy`` / ``ext-image-copy-capture``).
@@ -34,17 +34,17 @@ surfaceless EGL platform backed by Mesa's **llvmpipe** software rasterizer and
 logs a warning. The offscreen render target is a GLES texture rather than a
 GBM buffer, so compositing and the shm capture/stream path are identical; only
 GPU dmabuf import/export needs a real render node. Software rendering is slower
-but produces real frames — enough for CI, screenshots, and automation. Three
+but produces real frames - enough for CI, screenshots, and automation. Three
 environment knobs:
 
 ``$SHOESTRING_WM_RENDER_NODE``
     Render node to open. Defaults to the first existing of
-    ``/dev/dri/renderD128``–``renderD130``. If it cannot be opened, the
+    ``/dev/dri/renderD128`` - ``renderD130``. If it cannot be opened, the
     backend falls back to software rendering rather than failing.
 
 ``$SHOESTRING_WM_HEADLESS_SOFTWARE``
     Set to ``1`` to force the software (surfaceless/llvmpipe) path even on a
-    box that has a GPU — useful for reproducing the CPU-only path in CI. Add
+    box that has a GPU - useful for reproducing the CPU-only path in CI. Add
     ``LIBGL_ALWAYS_SOFTWARE=1`` if a real GPU is present and you want to
     *guarantee* llvmpipe rather than letting Mesa pick the device.
 
@@ -54,8 +54,8 @@ environment knobs:
     this and takes precedence. A future remote client resizes the
     virtual output to its own pixel size.
 
-Because the headless backend needs only an unprivileged render node — no seat,
-master, or input devices — it is a natural fit for running the whole session in
+Because the headless backend needs only an unprivileged render node - no seat,
+master, or input devices - it is a natural fit for running the whole session in
 a container and viewing it over serve mode. See :doc:`containers`.
 
 Command-line flags
@@ -154,7 +154,7 @@ Profiling with Tracy
 For diagnosing frame drops and render-loop stalls, the WM ships an optional
 `Tracy <https://github.com/wolfpld/tracy>`_ profiler integration behind the
 ``profile-with-tracy`` Cargo feature. It is **off by default and compiled out
-entirely** — a normal build carries no extra dependency and no per-frame cost;
+entirely** - a normal build carries no extra dependency and no per-frame cost;
 the instrumentation macros become no-ops.
 
 Build with the feature and run under a Tracy capture::
@@ -165,7 +165,7 @@ Build with the feature and run under a Tracy capture::
 The integration adds a ``tracing-tracy`` layer that forwards the WM's spans to
 Tracy, a zone for each render step (``render_surface`` / ``render_frame`` on
 the TTY backend, ``render_output`` under winit), and a frame mark on every
-*drawn* frame — empty no-damage polls don't mark, so Tracy's frame timeline
+*drawn* frame - empty no-damage polls do not mark, so Tracy's frame timeline
 tracks real presented frames, matching the ``render.fps`` metric. The Tracy
 layer captures ``info,shoestring_wm=trace`` by default (so it sees the profile
 zones without smithay/calloop trace spam); override it with the
@@ -204,8 +204,8 @@ Running as a systemd user service
 
 The display-manager session path (the ``.desktop`` entry, see
 :doc:`install`) is the usual way in. If you instead drive the session
-from a ``systemd`` **user unit** — e.g. a ``shoestring-wm.service`` that
-other units order themselves ``After=`` — declare it ``Type=notify``:
+from a ``systemd`` **user unit** - e.g. a ``shoestring-wm.service`` that
+other units order themselves ``After=`` - declare it ``Type=notify``:
 
 .. code-block:: ini
 
@@ -219,7 +219,7 @@ manager. systemd holds units ordered ``After=`` this service in the
 *activating* state until then, so companion services (bars, portals,
 notification daemons) no longer race ``$WAYLAND_DISPLAY``. The signal is
 keyed on ``$NOTIFY_SOCKET``, which systemd sets only for a ``Type=notify``
-service — it is a harmless no-op for the display-manager and nested-winit
+service - it is a harmless no-op for the display-manager and nested-winit
 launch paths, which leave it unset.
 
 Autostart and companion processes
@@ -231,10 +231,10 @@ before any user interaction. Configure it via ``[general].autostart``
 "shoestring-mediad"]`` so a fresh user gets the bar plus the
 media-privacy monitor on first run. Each entry is split on whitespace
 (first token = executable, rest = args). Failures log a warning and
-don't block startup.
+do not block startup.
 
 For one-off launches alongside the WM, ``--command CMD`` still spawns
-a single client once the compositor is ready — handy for ``shoestring-wm
+a single client once the compositor is ready - handy for ``shoestring-wm
 --command alacritty`` during nested winit development.
 
 Media privacy (``shoestring-mediad``)
@@ -244,26 +244,26 @@ Media privacy (``shoestring-mediad``)
 PipeWire and reports three things to the WM, which the bar surfaces as
 **MUTE / MIC / CAM** chips (and rows in the control menu):
 
-- **MUTE** — the default audio *output* is muted. Click the control-menu
+- **MUTE** - the default audio *output* is muted. Click the control-menu
   row, bind a key to ``toggle-audio-mute``, or run ``shoestring-ctl media
   audio-mute on|off`` to toggle it. Real, authoritative control.
-- **MIC** — the microphone is *live* (unmuted). ``toggle-mic-mute`` /
+- **MIC** - the microphone is *live* (unmuted). ``toggle-mic-mute`` /
   ``shoestring-ctl media mic-mute on|off`` mute it. Honest caveat: this
   stream-mutes the source so capturing apps get silence, but it does
   **not** prevent a device open — the same guarantee as a hardware
   mic-mute key.
-- **CAM** — a camera is *actively streaming*. **Status only**: there is no
+- **CAM** - a camera is *actively streaming*. **Status only**: there is no
   software camera off-switch, by design. It detects cameras opened through
   PipeWire (the camera portal, browsers/Electron); a raw ``/dev/video*``
   open that bypasses PipeWire is not visible.
 
-The monitor always *reflects live state* — it reads the same default-sink/
+The monitor always *reflects live state* - it reads the same default-sink/
 source mute that ``pavucontrol``, media keys, and ``wpctl`` change, so the
 chips stay accurate no matter who flips the mute. Mute *control* prefers
 ``wpctl`` (from WirePlumber) for an authoritative result, falling back to a
 native PipeWire set when ``wpctl`` is absent. Where PipeWire (or the
-``shoestring-mediad`` binary) is missing, the monitor simply doesn't run
-and the bar shows no media chips — a graceful no-op. The whole group can be
+``shoestring-mediad`` binary) is missing, the monitor simply does not run
+and the bar shows no media chips - a graceful no-op. The whole group can be
 hidden with ``show_media = false`` in the bar config.
 
 These controls are reachable three ways, like the other privacy gates: the
@@ -280,7 +280,7 @@ on-screen keyboard (OSK) needs, always on and with no configuration:
   text (GTK, Qt, Chromium…).
 - ``zwp_input_method_manager_v2`` — the IME side that composes and commits
   it (``fcitx5``, ``ibus`` with its Wayland front-end).
-- ``zwp_virtual_keyboard_manager_v1`` — the side that *injects* keystrokes:
+- ``zwp_virtual_keyboard_manager_v1`` - the side that *injects* keystrokes:
   an IME's latin pass-through, or an OSK turning taps into key events.
 
 **IMEs** (CJK and other composed input) work out of the box: smithay bridges
@@ -290,24 +290,24 @@ text-cursor rectangle. The WM's keybind filter runs *before* the IME keyboard
 grab, so ``Super`` binds keep working while an IME is active. Launch your IME
 daemon from ``[general].autostart`` (above) like any other companion process.
 
-**On-screen keyboards** — ``squeekboard``, ``wvkbd`` and similar — bind
+**On-screen keyboards** - ``squeekboard``, ``wvkbd`` and similar - bind
 ``zwp_virtual_keyboard_v1`` to inject and ``zwlr_layer_shell_v1`` to place
-themselves. Two behaviours make them work without any OSK-specific config:
+themselves. Two behaviors make them work without any OSK-specific config:
 
 - *Injection reaches the app, not the WM.* Virtual-keyboard input is routed
   straight to the surface that holds keyboard focus, **bypassing the WM's
   keybind filter**. An OSK types into the focused application and cannot
   accidentally trip ``Super`` binds; conversely the WM never swallows what it
   injects.
-- *The keyboard doesn't steal focus.* An OSK maps as a layer surface with
+- *The keyboard does not steal focus.* An OSK maps as a layer surface with
   ``keyboard_interactivity = none``; the WM only ever transfers keyboard focus
   to a layer surface that asks for it (``exclusive``), so the keyboard stays
   visible while the application underneath keeps focus and receives the keys.
   A layer surface with an exclusive zone (an OSK anchored to the bottom edge)
   also reserves its space in the layout, so tiled windows resize around it.
 
-There is nothing to enable: any client that binds these globals — an OSK, an
-IME, or an automation tool — works against a running session immediately.
+There is nothing to enable: any client that binds these globals - an OSK, an
+IME, or an automation tool - works against a running session immediately.
 
 Quitting
 --------

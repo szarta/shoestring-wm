@@ -49,7 +49,7 @@ Exit status
     A rectangle was selected and printed.
 
 **1**
-    Cancelled (Escape or empty selection). On a connection error a
+    Canceled (Escape or empty selection). On a connection error a
     message is printed to standard error.
 
 See also

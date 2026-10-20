@@ -2,7 +2,7 @@ Default Bindings
 ================
 
 The bindings below are what ``shoestring-wm --write-default-config``
-writes — every key is user-rebindable in the config file
+writes - every key is user-rebindable in the config file
 (see :doc:`configuration`).
 
 Window management
@@ -30,7 +30,7 @@ Binding                            Action
 
 The three **arrange** binds are *one-shot*: they tile every window on the
 active workspace once (each output independently, in reading order), then leave
-the windows floating — there's no persistent tiling mode, so opening or closing
+the windows floating - there is no persistent tiling mode, so opening or closing
 a window later does not re-flow. Press an arrange bind again to re-tile.
 Minimized and fullscreen windows are left alone.
 
@@ -52,8 +52,8 @@ Workspaces 10..16 exist (when ``[workspaces].count`` allows them) but
 have no default keybind; bind them with ``focus-workspace`` /
 ``move-window-to-workspace`` actions as needed.
 
-Scrolling the mouse wheel over the bare desktop — with no window or
-panel under the pointer — also switches workspaces: wheel up moves to the
+Scrolling the mouse wheel over the bare desktop - with no window or
+panel under the pointer - also switches workspaces: wheel up moves to the
 next workspace, wheel down to the previous, clamping at the first and
 last. This is a built-in pointer behavior, not a rebindable key.
 
@@ -64,7 +64,7 @@ The vertical counterpart to the workspace keys: you are always at
 ``(machine, workspace)``, and these switch *which machine* you drive. Index 0
 is the local machine; each ``shoestring-remote-client`` connected to a remote
 box is the next index. While a remote is the active view the WM captures **all**
-input and forwards it raw to that machine (its own keymap and keybinds apply) —
+input and forwards it raw to that machine (its own keymap and keybinds apply) -
 only these keys stay local. See :doc:`remote` for the design behind this.
 
 =====================================  ========================================
@@ -78,18 +78,18 @@ Binding                                Action
 ``Print``                              Screenshot (stays local while viewing a remote)
 =====================================  ========================================
 
-The axis saturates at 0 (local) and the connected-machine count — no wrap. With
+The axis saturates at 0 (local) and the connected-machine count - no wrap. With
 no remote connected these are no-ops (you stay local). See :doc:`ipc` for the
 ``register_remote_client`` / ``set_view`` / ``view_changed`` surface a client
 uses to join the axis.
 
 While viewing a remote, ``Super+Shift+C`` / ``Super+Shift+V`` move the clipboard
-across the tunnel — push sends your local selection to the remote, pull fetches
+across the tunnel - push sends your local selection to the remote, pull fetches
 the remote's into your local one. Both are explicit and gated by the remote
 sharing you already enabled; nothing is streamed continuously. ``Print`` takes a
 screenshot that stays **local**: your screen already shows the reconstructed
-remote frame, so there's no round trip. (Out-of-focus clipboard *managers* —
-cliphist, copyq — instead want ``[clipboard] data_control = true``; see
+remote frame, so there is no round trip. (Out-of-focus clipboard *managers* -
+cliphist, copyq - instead want ``[clipboard] data_control = true``; see
 :doc:`configuration`.)
 
 A remote joins the axis by running **shoestring-remote-client** on the local
@@ -130,7 +130,7 @@ running. The ``power-off``, ``reboot``, and ``suspend`` actions use the
 same modal and then shell out to ``systemctl`` / ``loginctl`` /
 ``shutdown(8)`` (the bar's control menu offers the same three). They are
 unbound by default; to route the hardware power / sleep keys through them
-you must first stop ``logind`` from handling those keys — see
+you must first stop ``logind`` from handling those keys - see
 :doc:`install`.
 
 Media and brightness

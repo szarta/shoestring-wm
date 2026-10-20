@@ -13,7 +13,7 @@ Bootstrap a starter file:
     $ shoestring-wm --write-default-config
     wrote default config to /home/you/.config/shoestring-wm/config.toml
 
-Validate a file before relying on it — this parses the TOML, compiles the
+Validate a file before relying on it - this parses the TOML, compiles the
 keybindings, reports any problems, and exits without starting a compositor
 (so it is safe to run against a live session):
 
@@ -25,10 +25,10 @@ keybindings, reports any problems, and exits without starting a compositor
 It exits non-zero on a parse error or a missing file, making it suitable
 for a pre-commit hook or a CI check on a dotfiles repo.
 
-The file's main sections — ``[general]``, ``[workspaces]``,
+The file's main sections - ``[general]``, ``[workspaces]``,
 ``[[bindings]]``, ``[[window_rules]]``, ``[outputs.<name>]``, ``[input]``,
 ``[touch]``, ``[decorations]``, ``[background]``, ``[clipboard]``, and
-``[debug]`` — are all optional.
+``[debug]`` - are all optional.
 Missing sections take built-in defaults.
 
 The ``[general]`` section
@@ -268,7 +268,7 @@ are optional; unset fields fall back to the matching ``[general]`` default.
        overrides whatever is set here. ``shoestring-ctl outputs`` reports
        the live orientation in each output's ``transform`` field.
 
-Example — a HiDPI laptop panel at 2× on the left, 1× external (a VRR gaming
+Example - a HiDPI laptop panel at 2× on the left, 1× external (a VRR gaming
 monitor) on the right::
 
     [general]
@@ -303,17 +303,17 @@ and the rotated panel now occupies a 1080-wide column::
 The ``[input]`` section
 -----------------------
 
-libinput device tuning — touchpad and pointer behaviour you would otherwise
+libinput device tuning - touchpad and pointer behavior you would otherwise
 set with udev/kernel rules. Settings are applied to every applicable device
 as it connects, and re-applied to all connected devices on config hot-reload.
 
 The section is declarative: every key is optional, and an omitted key
 applies the device's libinput default. So editing or deleting a key and
-reloading takes effect right away — removing ``accel_speed`` snaps the
+reloading takes effect right away - removing ``accel_speed`` snaps the
 pointer back to the default speed rather than leaving the last value. A
-setting a device doesn't support (e.g. ``tap_to_click`` on a wired mouse) is
+setting a device does not support (e.g. ``tap_to_click`` on a wired mouse) is
 silently ignored for that device, so this single global section is safe
-across mixed hardware. **TTY/udev backend only** — the nested winit backend
+across mixed hardware. **TTY/udev backend only** - the nested winit backend
 has no real input devices and ignores this section.
 
 .. list-table::
@@ -369,7 +369,7 @@ has no real input devices and ignores this section.
      - bool
      - Treat a simultaneous left+right click as a middle click.
 
-Example — a typical laptop touchpad::
+Example - a typical laptop touchpad::
 
     [input]
     tap_to_click = true
@@ -384,7 +384,7 @@ The ``[touch]`` section
 each contact in its own normalized ``[0,1]²`` space; on a multi-output desktop
 that space has to be projected onto the **one** output the panel physically
 overlays, or taps land on the wrong screen. (This is separate from ``[input]``,
-which tunes libinput device knobs — here we're choosing an output, not a device
+which tunes libinput device knobs — here we are choosing an output, not a device
 setting.)
 
 The WM picks the touch output in this order: the explicit ``map_to_output``
@@ -398,7 +398,7 @@ machine needs nothing here, and the common laptop-plus-monitor case is one line.
     map_to_output = "eDP-1"
 
 ``map_to_output``
-    Connector name of the output every touchscreen maps onto — as listed by
+    Connector name of the output every touchscreen maps onto - as listed by
     ``shoestring-ctl outputs`` (e.g. ``"eDP-1"``, ``"HDMI-A-1"``). Unset by
     default (touch stays on the libinput-reported or first output). Read fresh
     on each contact, so ``reload-config`` retargets touch immediately. A name
@@ -431,7 +431,7 @@ Each ``[[bindings]]`` entry specifies modifiers, a key, and an action::
 ``key``
     An xkb keysym name as a string. Letters, digits and named keys all
     work: ``"q"``, ``"1"``, ``"Return"``, ``"F5"``, ``"Escape"``,
-    ``"space"``. Names follow the standard ``xkbcommon`` table — running
+    ``"space"``. Names follow the standard ``xkbcommon`` table - running
     ``xev`` (or ``wev`` under Wayland) shows the keysym name for any key.
 
     **Important:** binding lookups use the *pre-modifier* keysym (the
@@ -460,7 +460,7 @@ Each action type and its fields:
 ``quit``
     Bring up a confirm dialog (``shoestring-confirm``); exit the WM
     cleanly on *Yes*, stay running on *No*. The dialog is the only path
-    out of the WM today — there is no force-quit action.
+    out of the WM today - there is no force-quit action.
 
 ``lock``
     Spawn ``[general].lock_command`` (default ``shoestring-lock``). The
@@ -476,7 +476,7 @@ Each action type and its fields:
 ``tile-left``
     Snap the focused window to the left half of its monitor's usable
     rectangle. Re-pressing while already left-tiled restores the saved
-    floating geometry — the Openbox "toggle" feel.
+    floating geometry - the Openbox "toggle" feel.
 
 ``tile-right``
     As ``tile-left`` but the right half.
@@ -487,13 +487,13 @@ Each action type and its fields:
     floating geometry.
 
 ``arrange-grid`` / ``arrange-spiral`` / ``arrange-bsp``
-    One-shot auto-arrange of *every* window on the active workspace —
+    One-shot auto-arrange of *every* window on the active workspace -
     ``arrange-grid`` into an even-ish grid (~√n rows), ``arrange-spiral``
     into a fibonacci spiral, ``arrange-bsp`` into a binary "dwindle" split.
     Each output is tiled independently within its own usable rect, with
     windows placed in reading order (top-to-bottom, then left-to-right).
     These hold no state: the windows stay floating afterwards, so opening or
-    closing a window does not re-flow — invoke the action again to re-tile.
+    closing a window does not re-flow - invoke the action again to re-tile.
     Minimized and fullscreen windows are skipped. Bound to ``Super+G`` /
     ``Super+Shift+G`` / ``Super+Ctrl+G`` by default.
 
@@ -520,7 +520,7 @@ Each action type and its fields:
     default. A no-op when no window is focused.
 
 ``lower``
-    Lower the focused window to the bottom of the stacking order — the
+    Lower the focused window to the bottom of the stacking order - the
     complement of ``raise``. Bound to Super+Shift+Up by default. Handy for
     pushing the current window behind the others without moving the
     pointer.
@@ -528,15 +528,15 @@ Each action type and its fields:
 ``toggle-sticky``
     Toggle "show on all workspaces" for the focused window. A sticky
     window stays mapped (and keeps its position) across workspace
-    switches instead of being hidden with the rest of its workspace —
+    switches instead of being hidden with the rest of its workspace -
     useful for a reference doc or a picture-in-picture video. Bound to
     Super+S by default. Moving a sticky window to a specific workspace is
-    ignored (it's already on all of them); un-stick it first. The same
+    ignored (it is already on all of them); un-stick it first. The same
     flag is settable per-app via the ``sticky`` window rule.
 
 ``toggle-always-on-top``
     Toggle "always on top" for the focused window. An always-on-top
-    window stays above all ordinary windows regardless of focus —
+    window stays above all ordinary windows regardless of focus -
     clicking another window raises it only as far as just below the
     always-on-top layer (bars and pop-up menus still sit above it). Bound
     to Super+A by default. Combine with ``toggle-sticky`` for a
@@ -546,17 +546,17 @@ Each action type and its fields:
 ``cycle-layout``
     Switch to the next keyboard layout listed in ``[general].xkb_layout``,
     wrapping at the end. Bound to Super+Space by default. A no-op when only
-    one layout is configured. Only the active layout index changes — no
-    keymap rebuild — and the new state is sent to the focused client
+    one layout is configured. Only the active layout index changes - no
+    keymap rebuild - and the new state is sent to the focused client
     immediately.
 
 ``toggle-diagnostics``
-    Toggle the on-screen diagnostics overlay — a Minecraft-F3-style panel the
+    Toggle the on-screen diagnostics overlay - a Minecraft-F3-style panel the
     WM draws in the top-left corner of the output under the pointer, listing
     the live metrics registry (frame rate, open fds, RSS, window/client counts,
-    per-client surface counts, …). Bound to **Super+F3** by default. It's a pure
+    per-client surface counts, …). Bound to **Super+F3** by default. It is a pure
     visualization of the same data ``shoestring-ctl metrics`` prints, so
-    toggling it changes nothing but what's drawn, and it is deliberately kept
+    toggling it changes nothing but what is drawn, and it is deliberately kept
     out of screenshots and screencasts. Values refresh on the ``[diagnostics]``
     sampler, so leave ``[diagnostics].enabled = true`` (the default) for them to
     update live. The panel's look is tunable under ``[diagnostics]``:
@@ -572,7 +572,7 @@ Each action type and its fields:
 
 ``focus-workspace-relative``
     Switch by a relative offset. ``delta = -1`` is previous,
-    ``delta = 1`` is next. Saturates at 1 and 16 — no wrapping.
+    ``delta = 1`` is next. Saturates at 1 and 16 - no wrapping.
 
 ``move-window-to-workspace``
     Move the focused window to ``index`` (1-based) without switching to
@@ -589,7 +589,7 @@ Each action type and its fields:
 ``inject-key``
     Synthesize a single keypress (press + release) targeting the focused
     surface. ``keysym`` is an X keysym name. Injected events bypass the
-    WM's binding table by design — they go straight to the client.
+    WM's binding table by design - they go straight to the client.
 
     ::
 
@@ -641,10 +641,10 @@ rules against already-mapped windows.
 
 ``match``
     Sparse predicate. All set fields are AND-ed. An empty matcher
-    matches every window — almost never what you want.
+    matches every window - almost never what you want.
 
     - ``app_id`` (string) — exact match on the toplevel's xdg-shell
-      ``app_id`` (the closest Wayland analogue to X11 ``WM_CLASS``).
+      ``app_id`` (the closest Wayland analog to X11 ``WM_CLASS``).
     - ``title_contains`` (string) — case-sensitive substring match on
       the toplevel title.
     - ``app_id_regex`` (string) — regex match on ``app_id``. Rust ``regex``
@@ -714,7 +714,7 @@ when more than one output is connected. See :doc:`portals`.
       monitor to share.
     - ``"none"`` — silently share the first output (a warning names it and how
       to pin one).
-    - anything else — run as a dmenu-style command: the connector names are
+    - anything else - run as a dmenu-style command: the connector names are
       written to its stdin, one per line, and the line it prints on stdout is
       taken as the chosen output (e.g. ``"wofi --dmenu"``).
 
@@ -732,12 +732,12 @@ advertises ``xdg-decoration`` ServerSide, so well-behaved clients draw no
 decorations of their own; this section adds a thin, focus-aware border ring
 the compositor paints just inside each window's edges.
 
-It is **off by default** — the no-decorations workflow stays the default, so a
+It is **off by default** - the no-decorations workflow stays the default, so a
 border only appears once you set a non-zero ``border_width``. The border draws
 *inside* each window's own rectangle, so it never bleeds onto a neighboring
 tile; in gapless tiling the shared seam shows each window's own border and the
 focused window is picked out by color. Captures (screenshots, screen-sharing)
-include the border, matching what's on screen.
+include the border, matching what is on screen.
 
 Note this cannot silence a client that ignores ``xdg-decoration`` and draws its
 own client-side titlebar anyway (some GTK apps): that titlebar is the client's,
@@ -770,17 +770,17 @@ Desktop background
 ``[background]`` sets the desktop background drawn beneath every window and
 layer-shell surface: a solid color, optionally with a wallpaper image on top.
 
-With no ``[background]`` section the screen is cleared to a dark grey
+With no ``[background]`` section the screen is cleared to a dark gray
 (``#1a1a1a``), matching the historic default. Point ``image`` at a PNG or SVG
 file to paint a wallpaper, positioned per ``mode``. The ``color`` still shows in
-any area the image doesn't cover — the letterbox bars of ``fit``, or the gaps of
-a ``center`` image smaller than the screen — so choose a color that complements
+any area the image does not cover - the letterbox bars of ``fit``, or the gaps of
+a ``center`` image smaller than the screen - so choose a color that complements
 the image. The background is part of the rendered scene, so it appears
 identically in screenshots and screen-sharing.
 
 The wallpaper is rendered per output at that output's resolution, so it stays
 crisp on a HiDPI panel. On a multi-monitor setup every output shows the same
-background. Edits take effect on the next frame via config hot-reload — no
+background. Edits take effect on the next frame via config hot-reload - no
 restart needed.
 
 ::
@@ -797,10 +797,10 @@ restart needed.
     unparseable value falls back to the default with a warning.
 
 ``image``
-    Path to a wallpaper image — **PNG** or **SVG**, chosen by file extension.
+    Path to a wallpaper image - **PNG** or **SVG**, chosen by file extension.
     A leading ``~`` (home) and ``$VAR`` / ``${VAR}`` environment references are
     expanded. Unset (the default) means solid ``color`` only. A path that
-    doesn't exist or won't decode logs a warning and leaves the solid color
+    does not exist or will not decode logs a warning and leaves the solid color
     showing.
 
 ``mode``
@@ -856,12 +856,12 @@ ghosts, or sticks. If you hit such an artifact, flipping one of these to
 The ``disable_*`` flags are honored **only on the DRM/KMS (TTY) backend**. The
 nested winit backend has no hardware planes, so it always composites everything
 and ignores them. Each is re-read on every frame, so ``reload-config`` applies a
-change on the next frame — no restart needed. ``protocol_trace`` is the
+change on the next frame - no restart needed. ``protocol_trace`` is the
 exception: it is an observability toggle, works on both backends, and is read
 **once at startup** (so a restart is needed to change it).
 
 Every flag defaults to ``false`` (the optimization stays on, or the trace stays
-off — normal operation). Leave the section out entirely unless you are actively
+off - normal operation). Leave the section out entirely unless you are actively
 debugging.
 
 ::
@@ -881,7 +881,7 @@ debugging.
 
 ``disable_overlay_planes``
     Disable only *overlay*-plane scanout, leaving primary-plane (fullscreen)
-    scanout in place — a narrower cut than ``disable_direct_scanout`` for
+    scanout in place - a narrower cut than ``disable_direct_scanout`` for
     isolating overlay-plane-specific issues.
 
 ``disable_cursor_plane``
@@ -891,14 +891,14 @@ debugging.
     cursor plane out of the picture.
 
 ``protocol_trace``
-    Log the Wayland wire protocol — every request dispatched from a client and
-    every event sent to one, per client — to **stderr** (``<- interface@id.msg``
+    Log the Wayland wire protocol - every request dispatched from a client and
+    every event sent to one, per client - to **stderr** (``<- interface@id.msg``
     for requests, ``-> …`` for events). This is the built-in equivalent of
     starting the compositor with ``WAYLAND_DEBUG=server`` (which it sets under
     the hood), and the same thing the ``--protocol-trace`` command-line flag
     turns on. An explicit ``WAYLAND_DEBUG`` in the environment always wins.
-    Read once at startup and effective on both backends. Extremely verbose — a
-    busy session emits thousands of lines a second — so leave it off except when
+    Read once at startup and effective on both backends. Extremely verbose - a
+    busy session emits thousands of lines a second - so leave it off except when
     actively tracing a client's protocol exchange. The trace goes to stderr, not
     to ``$SHOESTRING_WM_LOG`` (which only redirects the WM's own ``tracing``
     output); capture it with a shell redirect or from the journal.

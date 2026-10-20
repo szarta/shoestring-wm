@@ -15,7 +15,7 @@ then closes it (sending ``xdg_toplevel.close``, so the client may still
 surface a save-prompt rather than exit immediately).
 
 It is a thin wrapper over the WM's IPC ``pick-window`` / ``close-window``
-requests — see **shoestring-ctl**\(1) for the underlying surface.
+requests - see **shoestring-ctl**\(1) for the underlying surface.
 
 Options
 -------
@@ -23,7 +23,7 @@ Options
 **-f**, **--force**
     Force-kill instead of politely closing: the WM **SIGKILL**\s the
     window's owning process (the peer-credential pid for a Wayland client,
-    or the real X client pid for an X11 window — not XWayland's). Use it
+    or the real X client pid for an X11 window - not XWayland's). Use it
     for a window that ignores a close request, such as a mid-session game
     or a hung app. Sends ``kill_window`` rather than ``close_window``.
 
@@ -32,8 +32,8 @@ Options
 
 Usage:
 
-- **Left-click** a window — close it, or force-kill it under ``-f`` (exit ``0``);
-- **Escape** or **right-click** — cancel (exit ``1``).
+- **Left-click** a window - close it, or force-kill it under ``-f`` (exit ``0``);
+- **Escape** or **right-click** - cancel (exit ``1``).
 
 Environment
 -----------
@@ -49,10 +49,10 @@ Exit status
     A window was selected and closed.
 
 **1**
-    Cancelled (Escape or right-click).
+    Canceled (Escape or right-click).
 
 **2**
-    Error — could not resolve or connect to the socket, or the WM
+    Error - could not resolve or connect to the socket, or the WM
     returned an unexpected response. A message is printed to standard
     error.
 

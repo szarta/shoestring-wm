@@ -77,7 +77,7 @@ Exit status
     The capture was saved and/or copied successfully.
 
 Non-zero
-    A failure — no such output, capture error, Wayland error, or
+    A failure - no such output, capture error, Wayland error, or
     **wl-copy** failed. A message is printed to standard error.
 
 See also

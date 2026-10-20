@@ -10,8 +10,8 @@ Description
 -----------
 
 A console (TUI) "mission control" for **shoestring-wm**\(1). It lists every
-window grouped by workspace — including windows on inactive workspaces and
-minimized windows — and drives the WM's per-window IPC so you can manage any
+window grouped by workspace - including windows on inactive workspaces and
+minimized windows - and drives the WM's per-window IPC so you can manage any
 window without keybind gymnastics: focus, close, force-kill, rename, move to
 another workspace, minimize/maximize, pin sticky or always-on-top, raise or
 lower, and screenshot a single window.
@@ -19,7 +19,7 @@ lower, and screenshot a single window.
 It is a thin client over the WM's IPC surface (the same wire protocol used by
 **shoestring-ctl**\(1)); it links neither the compositor nor Smithay. The view
 stays live by subscribing to the WM event stream and re-fetching its snapshot
-whenever the WM's state changes — no polling.
+whenever the WM's state changes - no polling.
 
 Run it in any terminal, or bind a key to spawn one in your terminal emulator.
 
@@ -59,7 +59,7 @@ inside the UI for this list.
     Force-kill the window (SIGKILL the owning process); asks to confirm.
 
 **r**
-    Rename the window — sets a display-name override. An empty name clears it.
+    Rename the window - sets a display-name override. An empty name clears it.
 
 **m** / **M**
     Toggle minimize / maximize.
