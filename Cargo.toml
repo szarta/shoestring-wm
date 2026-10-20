@@ -314,3 +314,6 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable", "stagi
 # `make stage` (packaging/freebsd). Below them, it's harmless.
 [patch.crates-io]
 pam-client2 = { path = "third_party/pam-client2" }
+libdisplay-info = { path = "third_party/libdisplay-info-rs/libdisplay-info" }
+libdisplay-info-sys = { path = "third_party/libdisplay-info-rs/libdisplay-info-sys" }
+libdisplay-info-derive = { path = "third_party/libdisplay-info-rs/libdisplay-info-derive" }

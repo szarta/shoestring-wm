@@ -109,9 +109,6 @@ CARGO_CRATES=	adler2-2.0.1 \
 		lazy_static-1.5.0 \
 		leb128fmt-0.1.0 \
 		libc-0.2.186 \
-		libdisplay-info-0.3.0 \
-		libdisplay-info-derive-0.1.1 \
-		libdisplay-info-sys-0.3.0 \
 		libloading-0.8.9 \
 		libredox-0.1.16 \
 		libseat-0.2.4 \
