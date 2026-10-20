@@ -2486,7 +2486,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shoestring-bar"
-version = "0.2.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-mediad"
-version = "0.1.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-menu"
-version = "0.2.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-notify"
-version = "0.1.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -4187,7 +4187,7 @@ checksum = "bec9e4a500ca8864c5b47b8b482a73d62e4237670e5b5f1d6b9e3cae50f28f2b"
 
 [[package]]
 name = "xdg-desktop-portal-shoestring"
-version = "0.1.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "drm-fourcc",

@@ -1,6 +1,6 @@
 [package]
 name = "shoestring-notify"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "A lightweight desktop notification daemon for shoestring-wm."

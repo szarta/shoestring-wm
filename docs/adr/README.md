@@ -34,3 +34,5 @@ Each file has:
   records the provenance of what it borrows](0001-the-public-tree-is-a-published-artifact.md)
 - [0002: Depend on upstream Smithay at a pinned commit; patch a single
   crate under `third_party/` instead of forking](0002-patch-a-crate-instead-of-forking-smithay.md)
+- [0003: Every workspace crate shares the workspace
+  version](0003-every-workspace-crate-shares-the-workspace-version.md)

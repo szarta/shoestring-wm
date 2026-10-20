@@ -1,6 +1,6 @@
 [package]
 name = "xdg-desktop-portal-shoestring"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Native xdg-desktop-portal ScreenCast backend for shoestring-wm: per-consumer dmabuf+shm PipeWire screencast over zwlr_screencopy_v1."

@@ -1,6 +1,6 @@
 [package]
 name = "shoestring-menu"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "A lightweight dmenu-style launcher for shoestring-wm (commands and bookmarks)."

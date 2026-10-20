@@ -58,8 +58,8 @@ def _read_cargo_version():
 #
 # NOT touched (intentionally):
 #   - .pre-commit-config.yaml `rev: v1.10.0`  -> that pins knots, not us
-#   - crates/{shoestring-bar,shoestring-mediad,xdg-desktop-portal-shoestring}
-#     Cargo.toml versions  -> independently-versioned crates, bumped on their own
+#   - crates/*/Cargo.toml  -> workspace members inherit `version.workspace`
+#     (docs/adr/0003); wlcs-shoestring is outside the workspace and keeps its own
 VERSION_FILES = [
     # (path, pattern, replacement-template)
     ("Cargo.toml", r'^(version = ")' + SEMVER + r'(")', r"\g<1>{new}\g<2>"),

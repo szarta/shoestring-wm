@@ -1,6 +1,6 @@
 [package]
 name = "shoestring-mediad"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "PipeWire-linked media-privacy monitor + mute control for shoestring-wm: reports default sink/source mute + camera-in-use to the WM over IPC, and applies mute on request."
