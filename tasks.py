@@ -68,6 +68,9 @@ VERSION_FILES = [
     # already-drifted value (e.g. a two-component "0.2") to the full semver.
     ("docs/conf.py", r'^(release = ")\d+(?:\.\d+)+(")', r"\g<1>{new}\g<2>"),
     ("docs/conf.py", r'^(version = ")\d+(?:\.\d+)+(")', r"\g<1>{short}\g<2>"),
+    # FreeBSD port. Its distinfo still pins the old tag's source tarball;
+    # regenerate that after tagging (packaging/freebsd/README.md).
+    ("packaging/freebsd/Makefile", r"^(DISTVERSION=\s+)" + SEMVER + "$", r"\g<1>{new}"),
 ]
 
 
@@ -77,8 +80,8 @@ def bump_version(c, new_version=None):
 
     Reads the current version from Cargo.toml. With no --new-version, prints
     the current version and the files that would change (dry run). Otherwise
-    rewrites the workspace version in Cargo.toml and the Sphinx version/release
-    in docs/conf.py.
+    rewrites the workspace version in Cargo.toml, the Sphinx version/release
+    in docs/conf.py, and DISTVERSION in the FreeBSD port's Makefile.
 
     Args:
         new_version: Target version string, e.g. 0.7.0 (no leading 'v').
