@@ -319,9 +319,13 @@ NixOS          ``xwayland``
 Optional: wl-clipboard
 ~~~~~~~~~~~~~~~~~~~~~~
 
-``wl-clipboard`` provides the ``wl-copy`` binary used by
-``shoestring-screenshot --clipboard`` to copy a capture directly to the
-Wayland clipboard. Only needed if you use that flag.
+``wl-clipboard`` provides ``wl-copy`` and ``wl-paste``.
+``shoestring-screenshot --clipboard`` uses ``wl-copy`` to copy a capture
+directly to the Wayland clipboard. They also serve as command-line
+clipboard tools in scripts and terminals. Reading or setting the clipboard
+reliably while another window has focus relies on ``[clipboard]
+data_control = true`` (see :doc:`compatibility`). Only needed if you use
+one of these.
 
 ============== ================
 Distro         Package
@@ -333,6 +337,26 @@ Alpine         ``wl-clipboard``
 FreeBSD        ``wl-clipboard`` (port: ``x11/wl-clipboard``)
 NixOS          ``wl-clipboard``
 ============== ================
+
+Optional: wlr-randr
+~~~~~~~~~~~~~~~~~~~
+
+``wlr-randr`` changes output position, mode, scale, and transform on the
+running session through the WM's ``wlr-output-management`` support, with
+no relogin. It is the live counterpart of the ``[outputs.<name>]`` config
+section (see *Arranging monitors* in :doc:`configuration`). Changes it
+makes last only for the session.
+
+============== ==============
+Distro         Package
+============== ==============
+Debian/Ubuntu  ``wlr-randr``
+Fedora/RHEL    ``wlr-randr``
+Arch/Manjaro   ``wlr-randr``
+Alpine         ``wlr-randr``
+FreeBSD        ``wlr-randr`` (port: ``x11/wlr-randr``)
+NixOS          ``wlr-randr``
+============== ==============
 
 The hardware power / sleep keys
 -------------------------------

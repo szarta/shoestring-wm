@@ -241,7 +241,10 @@ are optional; unset fields fall back to the matching ``[general]`` default.
        automatic left-to-right stacking that occurs when no position is
        set. Use this to declare a stable multi-monitor arrangement that
        is independent of plug-in order. Coordinates are in logical pixels
-       (before scaling).
+       (before scaling). Read when the output connects (at WM startup or
+       hotplug); ``reload-config`` does not move an output that is already
+       connected. See *Arranging monitors* below for changing the layout
+       live.
    * - ``adaptive_sync``
      - bool
      - ``false``
@@ -299,6 +302,40 @@ and the rotated panel now occupies a 1080-wide column::
    Connector names are printed at WM startup in the log (``tracing``
    at ``INFO`` level) and in the ``output-added`` IPC event. Running
    ``shoestring-ctl outputs`` shows the current list.
+
+Arranging monitors
+~~~~~~~~~~~~~~~~~~
+
+With no ``position`` set, outputs are stacked left to right in the order
+they connect, so two identical monitors can come up in the opposite order
+from how they sit on the desk. To fix the arrangement, find each output's
+current placement, then pin the order you want.
+
+``shoestring-ctl tree`` reports each output's logical ``x`` / ``y`` (the
+``outputs`` subcommand omits position)::
+
+    shoestring-ctl -p tree
+
+Swap two side-by-side 1920×1080 monitors so ``DP-2`` is on the left::
+
+    [outputs.DP-2]
+    position = [0, 0]
+
+    [outputs.DP-1]
+    position = [1920, 0]
+
+``position`` takes effect the next time each output connects, which means
+the next login. To apply a new layout to the running session, use
+``wlr-randr`` (see :doc:`install`), which talks to the WM's
+``wlr-output-management`` support::
+
+    wlr-randr                                   # list heads and positions
+    wlr-randr --output DP-2 --pos 0,0 --output DP-1 --pos 1920,0
+
+A ``wlr-randr`` change lasts only for the current session and is never
+written to the config. To keep a layout, set ``position`` in the config as
+well as applying it live. Put adjacent outputs edge to edge, with no gap
+and no overlap, so the pointer crosses cleanly between them.
 
 The ``[input]`` section
 -----------------------
