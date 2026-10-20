@@ -1454,6 +1454,11 @@ impl ShoestringWm {
             }
         }
         self.udev = Some(udev);
+        // A frame too big for the socket in one go is still draining; come
+        // back to push the rest (and render whatever changed meanwhile).
+        if self.has_window_capture_backlog() {
+            self.schedule_window_capture();
+        }
     }
 
     /// VBlank handler: the GPU just finished presenting a frame on `crtc`.

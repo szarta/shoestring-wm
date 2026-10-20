@@ -32,7 +32,7 @@ use smithay::{
 };
 
 use shoestring_remote::{
-    encode_tile, write_framed, PixelFormat, Rect as RemoteRect, ServerMessage, Tile, TileEncoding,
+    encode_tile, PixelFormat, Rect as RemoteRect, ServerMessage, Tile, TileEncoding,
 };
 
 use crate::ipc::{Client, ClientId};
@@ -52,6 +52,9 @@ pub struct CaptureSub {
     /// Output pixel size at the last push; a change triggers a `Resize` + full
     /// frame (the subscriber must reallocate its surface).
     pub last_size: (u32, u32),
+    /// A render's damage was skipped while an earlier frame was still
+    /// draining, so the next push must be a full frame to cover it.
+    pub resync: bool,
 }
 
 impl CaptureSub {
@@ -61,6 +64,7 @@ impl CaptureSub {
             seq: 0,
             sent_ready: false,
             last_size: (0, 0),
+            resync: false,
         }
     }
 }
@@ -152,9 +156,9 @@ where
 /// - A fresh subscriber (or one after a resize) gets `Ready`/`Resize` plus a
 ///   full-output frame; established ones get only the damaged tiles, and
 ///   nothing at all when `damage` is empty.
-/// - A subscriber we can't write to is dropped (drop-on-pressure, matching the
-///   event/metrics streams), since a half-written binary frame can't be
-///   recovered.
+/// - A subscriber whose socket is still draining an earlier frame gets nothing
+///   new this render and a full frame once it catches up (its skipped damage
+///   isn't tracked). One that fails with a real I/O error is dropped.
 pub fn push_capture<R>(
     state: &mut ShoestringWm,
     output: &Output,
@@ -185,15 +189,32 @@ pub fn push_capture<R>(
     let mut any_pushed = false;
 
     for (id, client) in subs {
-        let (sent_ready, last_size, seq) = {
+        {
+            let mut c = client.borrow_mut();
+            match c.flush_out() {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Some(s) = c.capture_sub.as_mut() {
+                        s.resync = true;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    drop(c);
+                    to_drop.push(id);
+                    continue;
+                }
+            }
+        }
+        let (sent_ready, last_size, seq, resync) = {
             let c = client.borrow();
             match c.capture_sub.as_ref() {
-                Some(s) => (s.sent_ready, s.last_size, s.seq),
+                Some(s) => (s.sent_ready, s.last_size, s.seq, s.resync),
                 None => continue,
             }
         };
         let size_changed = sent_ready && last_size != (w as u32, h as u32);
-        let need_full = !sent_ready || size_changed;
+        let need_full = !sent_ready || size_changed || resync;
 
         // Decide which regions to read back.
         let regions: Vec<Rectangle<i32, BufferCoord>> = if need_full {
@@ -238,13 +259,8 @@ pub fn push_capture<R>(
             tiles,
         });
 
-        // Write the frames; a single failure drops the subscriber.
-        let wrote = {
-            let mut c = client.borrow_mut();
-            messages
-                .iter()
-                .try_for_each(|m| write_framed(c.stream_mut(), m))
-        };
+        // Queue the frames; only a real I/O failure drops the subscriber.
+        let wrote = client.borrow_mut().queue_frames(&messages);
         if wrote.is_err() {
             to_drop.push(id);
             continue;
@@ -253,6 +269,7 @@ pub fn push_capture<R>(
             s.sent_ready = true;
             s.last_size = (w as u32, h as u32);
             s.seq = next_seq;
+            s.resync = false;
         }
         any_pushed = true;
     }
@@ -278,7 +295,7 @@ impl ShoestringWm {
         };
         let subs: Vec<(ClientId, Rc<RefCell<Client>>)> = server.all_capture_subscribers();
         for (id, client) in subs {
-            let _ = write_framed(client.borrow_mut().stream_mut(), &ServerMessage::Bye);
+            let _ = client.borrow_mut().queue_frames(&[ServerMessage::Bye]);
             self.drop_ipc_client(id);
         }
     }

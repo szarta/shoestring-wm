@@ -44,7 +44,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use shoestring_remote::{write_framed, PixelFormat, ServerMessage, Tile};
+use shoestring_remote::{PixelFormat, ServerMessage, Tile};
 
 use crate::capture_stream::{clamp_to_buffer, readback, tile_for_region};
 use crate::drawing::OutputRenderElements;
@@ -200,10 +200,23 @@ where
         // Resolve the window (foreign_toplevels holds every window regardless of
         // mapping). Gone ⇒ tell the client and drop the sub.
         let Some(window) = crate::ipc::window_by_ft_id(state, &ft_id) else {
-            let _ = write_framed(client.borrow_mut().stream_mut(), &ServerMessage::Bye);
+            let _ = client.borrow_mut().queue_frames(&[ServerMessage::Bye]);
             to_drop.push(id);
             continue;
         };
+
+        // Backpressure: while an earlier frame is still draining into the
+        // socket, render nothing new. The damage tracker keeps comparing
+        // against the last frame actually rendered, so nothing is lost; the
+        // next render after the drain carries everything since.
+        match client.borrow_mut().flush_out() {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => {
+                to_drop.push(id);
+                continue;
+            }
+        }
 
         let scale = window_scale(state, &window);
         let logical = window.geometry().size;
@@ -373,10 +386,7 @@ where
         tiles,
     });
 
-    let wrote = messages
-        .iter()
-        .try_for_each(|m| write_framed(c.stream_mut(), m));
-    if wrote.is_err() {
+    if c.queue_frames(&messages).is_err() {
         return false;
     }
 
@@ -399,7 +409,7 @@ impl ShoestringWm {
             return;
         };
         for (id, client) in server.window_capture_subscribers() {
-            let _ = write_framed(client.borrow_mut().stream_mut(), &ServerMessage::Bye);
+            let _ = client.borrow_mut().queue_frames(&[ServerMessage::Bye]);
             self.drop_ipc_client(id);
         }
     }
@@ -454,6 +464,16 @@ impl ShoestringWm {
         self.ipc
             .as_ref()
             .is_some_and(|s| !s.window_capture_subscribers().is_empty())
+    }
+
+    /// A window-capture subscriber still has frame bytes waiting for its
+    /// socket, so another pass is needed to drain them.
+    pub fn has_window_capture_backlog(&self) -> bool {
+        self.ipc.as_ref().is_some_and(|s| {
+            s.window_capture_subscribers()
+                .iter()
+                .any(|(_, c)| c.borrow().has_backlog())
+        })
     }
 }
 

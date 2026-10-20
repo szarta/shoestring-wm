@@ -20,6 +20,10 @@
 //!   is small (workspace changes, focus changes), so backpressure means
 //!   "client is broken," not "we need a real queue."
 //!
+//! The binary capture streams are the exception: a frame can be megabytes,
+//! so they queue what the socket won't take yet and hold back new frames
+//! until it drains (see [`Client::queue_frames`]).
+//!
 //! Stream-mode clients are also re-armed for `READ` to detect hangup
 //! (`read()` → 0); we don't expect more requests on a streaming connection.
 
@@ -94,13 +98,49 @@ pub(crate) struct Client {
     /// the binary stream carries a single **window** rendered offscreen (the
     /// remote-desktop *graft* path, see [`crate::window_capture`]).
     pub(crate) window_capture_sub: Option<crate::window_capture::WindowCaptureSub>,
+    /// Binary capture frames queued but not yet written, and how much of the
+    /// front has gone out. See [`Client::queue_frames`].
+    out_buf: Vec<u8>,
+    out_pos: usize,
 }
 
 impl Client {
-    /// Mutable access to the raw stream, for the capture-stream pusher to write
-    /// length-prefixed binary frames (see [`crate::capture_stream`]).
-    pub(crate) fn stream_mut(&mut self) -> &mut UnixStream {
-        &mut self.stream
+    /// Queue length-prefixed binary frames for a capture subscriber and write
+    /// as much as the socket takes now. A full frame can run to megabytes, far
+    /// over the socket buffer, so unlike the newline-JSON paths a `WouldBlock`
+    /// here is backpressure, not a broken client: the rest waits in `out_buf`
+    /// for [`Self::flush_out`], and the pushers render nothing new for this
+    /// client until it drains. Errors only on a real I/O failure.
+    pub(crate) fn queue_frames(
+        &mut self,
+        msgs: &[shoestring_remote::ServerMessage],
+    ) -> std::io::Result<()> {
+        for m in msgs {
+            shoestring_remote::write_framed(&mut self.out_buf, m).map_err(std::io::Error::other)?;
+        }
+        self.flush_out().map(|_| ())
+    }
+
+    /// Write queued capture bytes until the socket would block. `Ok(true)` once
+    /// nothing is left queued.
+    pub(crate) fn flush_out(&mut self) -> std::io::Result<bool> {
+        while self.out_pos < self.out_buf.len() {
+            match self.stream.write(&self.out_buf[self.out_pos..]) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(n) => self.out_pos += n,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.out_buf.clear();
+        self.out_pos = 0;
+        Ok(true)
+    }
+
+    /// Capture bytes are still waiting for the socket.
+    pub(crate) fn has_backlog(&self) -> bool {
+        self.out_pos < self.out_buf.len()
     }
 }
 
@@ -306,6 +346,8 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
         metrics_sub: None,
         capture_sub: None,
         window_capture_sub: None,
+        out_buf: Vec::new(),
+        out_pos: 0,
     }));
 
     let source_client = Rc::clone(&client);
@@ -2420,5 +2462,60 @@ impl ShoestringWm {
             }
             self.emit_remote_changed();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shoestring_remote::{read_framed, Rect, ServerMessage, Tile, TileEncoding};
+
+    fn client_on(stream: UnixStream) -> Client {
+        stream.set_nonblocking(true).unwrap();
+        Client {
+            stream,
+            read_buf: Vec::new(),
+            subscriber: false,
+            spent: false,
+            metrics_sub: None,
+            capture_sub: None,
+            window_capture_sub: None,
+            out_buf: Vec::new(),
+            out_pos: 0,
+        }
+    }
+
+    /// A frame far bigger than the socket buffer is queued, not fatal: it
+    /// drains across several flushes and arrives intact behind earlier frames.
+    #[test]
+    fn oversized_capture_frame_drains_in_order() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let mut client = client_on(ours);
+        let big = ServerMessage::Frame {
+            seq: 1,
+            tiles: vec![Tile {
+                rect: Rect::new(0, 0, 1280, 1024),
+                encoding: TileEncoding::Raw,
+                data: (0..1280 * 1024 * 4).map(|i| i as u8).collect(),
+            }],
+        };
+        client
+            .queue_frames(&[ServerMessage::Bye, big.clone()])
+            .unwrap();
+        assert!(client.has_backlog(), "a 5 MiB frame should not fit at once");
+
+        // Read on another thread while the queue drains from this one.
+        let reader = std::thread::spawn(move || {
+            let first: ServerMessage = read_framed(&mut theirs).unwrap();
+            let second: ServerMessage = read_framed(&mut theirs).unwrap();
+            (first, second)
+        });
+        while !client.flush_out().unwrap() {
+            std::thread::yield_now();
+        }
+        assert!(!client.has_backlog());
+        let (first, second) = reader.join().unwrap();
+        assert_eq!(first, ServerMessage::Bye);
+        assert_eq!(second, big);
     }
 }
