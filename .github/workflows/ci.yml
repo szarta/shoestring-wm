@@ -173,7 +173,7 @@ jobs:
       - name: Build + test on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "15.0"
+          release: "15.1"
           usesh: true
           # git: cargo fetches smithay from a git revision, so the VM needs it.
           # rust pkg bundles cargo + rustfmt + clippy. No drm-kmod: building
