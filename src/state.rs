@@ -326,12 +326,20 @@ pub struct ShoestringWm {
 
     pub ipc: Option<crate::ipc::Server>,
     /// Whether the active backend can render a single window to an offscreen
-    /// buffer — true for winit and headless, false for udev (whose
-    /// `MultiRenderer` doesn't satisfy the `Offscreen<GlesTexture>` bounds the
-    /// graft/window-capture path needs). Gates the `screenshot_window` IPC so it
-    /// refuses with a clear error instead of enqueuing a request no render tick
-    /// will ever service. Set by the backend at init.
+    /// buffer — true for winit, headless, and udev (which runs it as its own
+    /// pass, see [`Self::schedule_window_capture`]). Gates the
+    /// `screenshot_window` IPC so it refuses with a clear error instead of
+    /// enqueuing a request nothing will ever service. Set by the backend at
+    /// init.
     pub window_capture_supported: bool,
+    /// Whether the active backend services the `get_pixel` / `hash_region`
+    /// output probes — winit and headless only. udev can't: its probes would
+    /// need the output's render elements, which are built from a renderer
+    /// borrowed out of `self.udev`. Set by the backend at init.
+    pub output_probe_supported: bool,
+    /// A udev window-capture pass is already queued on the event loop, so
+    /// further commits from the grafted window don't stack timers.
+    pub(crate) window_capture_pass_scheduled: bool,
     /// One-shot `screenshot_window` requests awaiting the next render tick, where
     /// the renderer is in scope. Drained by
     /// [`crate::window_capture::process_pending_window_screenshots`].
@@ -884,6 +892,8 @@ impl ShoestringWm {
             last_pointer_focus: None,
             ipc: None,
             window_capture_supported: false,
+            output_probe_supported: false,
+            window_capture_pass_scheduled: false,
             pending_window_screenshots: Vec::new(),
             pending_wait_windows: Vec::new(),
             pending_wait_ready: Vec::new(),

@@ -428,7 +428,7 @@ enum Command {
         /// Capture just this toplevel (id from `windows`), cropped to the
         /// window. Renders the window's own surface tree, so it works even
         /// when occluded or off-screen. Mutually exclusive with
-        /// --output/--region; winit and headless backends only.
+        /// --output/--region.
         #[arg(long, conflicts_with_all = ["output", "region"])]
         window: Option<String>,
         /// Write the PNG here instead of the default

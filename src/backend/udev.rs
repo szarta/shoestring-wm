@@ -260,6 +260,10 @@ pub fn init_udev(event_loop: &mut EventLoop<ShoestringWm>, state: &mut Shoestrin
     let vt_active = session.is_active();
     tracing::info!(vt_active, "session active at startup");
 
+    // Per-window capture (graft, screenshot_window) runs as its own pass off
+    // the output render; see `service_window_capture`.
+    state.window_capture_supported = true;
+
     state.udev = Some(UdevData {
         devices: Vec::new(),
         session,
@@ -1427,6 +1431,31 @@ impl ShoestringWm {
 }
 
 impl ShoestringWm {
+    /// Graft-mode window capture (and one-shot `screenshot_window`) for the
+    /// udev backend. Unlike winit/headless this can't ride the output render:
+    /// there the renderer is borrowed out of `self.udev`, and the capture
+    /// helpers need all of `&mut self`. So it runs as its own pass, scheduled
+    /// by [`Self::schedule_window_capture`], with `self.udev` taken out for the
+    /// duration so the renderer and `self` don't alias. Nothing reached from
+    /// the capture helpers touches `self.udev`.
+    pub(crate) fn service_window_capture(&mut self) {
+        let Some(mut udev) = self.udev.take() else {
+            return;
+        };
+        // Skip while switched away to another VT: the GPU isn't ours to use.
+        if udev.vt_active {
+            let primary = udev.primary_gpu;
+            match udev.gpus.single_renderer(&primary) {
+                Ok(mut renderer) => {
+                    crate::window_capture::push_window_capture(self, &mut renderer);
+                    crate::window_capture::process_pending_window_screenshots(self, &mut renderer);
+                }
+                Err(e) => tracing::warn!(error = ?e, "no renderer for window capture"),
+            }
+        }
+        self.udev = Some(udev);
+    }
+
     /// VBlank handler: the GPU just finished presenting a frame on `crtc`.
     /// Acknowledge it, mark the frame's `wp_presentation` feedback presented
     /// (with the hardware timestamp when the driver supplied one), and

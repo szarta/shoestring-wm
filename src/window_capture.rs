@@ -17,7 +17,9 @@
 //! `Meta` (app_id/title), then `Frame`/`Resize`/`Bye` — exactly like serve mode
 //! but scoped to one window.
 //!
-//! Each render tick, the backend calls [`push_window_capture`]. A per-subscriber
+//! Each render tick, the winit and headless backends call
+//! [`push_window_capture`]; udev runs it as a separate pass instead (see
+//! [`ShoestringWm::schedule_window_capture`]). A per-subscriber
 //! [`OutputDamageTracker`] over a reused offscreen texture turns the full-window
 //! render into **incremental** damage tiles, so a window that isn't committing
 //! produces no frames (the per-sub `dirty` flag, set from the commit hook in
@@ -222,6 +224,19 @@ where
 
         if render_and_push(&window, renderer, &client, pw, ph, scale, &app_id, &title) {
             any_pushed = true;
+            // A window off the active workspace (or minimized) isn't in the
+            // space, so no output render sends it frame callbacks, and a client
+            // that waits for one before drawing would freeze in the stream.
+            if !state.space.elements().any(|w| w == &window) {
+                if let Some(output) = state.space.outputs().next() {
+                    window.send_frame(
+                        output,
+                        state.start_time.elapsed(),
+                        Some(std::time::Duration::ZERO),
+                        |_, _| Some(output.clone()),
+                    );
+                }
+            }
         } else {
             to_drop.push(id);
         }
@@ -399,12 +414,37 @@ impl ShoestringWm {
         let Some(server) = self.ipc.as_ref() else {
             return;
         };
+        let mut marked = false;
         for (_, client) in server.window_capture_subscribers() {
             if let Some(sub) = client.borrow_mut().window_capture_sub.as_mut() {
                 if sub.ft_id == id {
                     sub.dirty = true;
+                    marked = true;
                 }
             }
+        }
+        if marked {
+            self.schedule_window_capture();
+        }
+    }
+
+    /// Queue a window-capture pass on backends whose output render can't run
+    /// it inline (udev). winit and headless push window captures from every
+    /// render tick, so this is a no-op there. The pass runs one frame later
+    /// rather than immediately: it coalesces a burst of commits, and since the
+    /// pass sends the grafted window its frame callback, it paces an
+    /// off-screen window to roughly the display rate instead of a busy loop.
+    pub fn schedule_window_capture(&mut self) {
+        #[cfg(feature = "tty")]
+        if self.udev.is_some() && !self.window_capture_pass_scheduled {
+            use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+            self.window_capture_pass_scheduled = true;
+            let timer = Timer::from_duration(std::time::Duration::from_millis(16));
+            let _ = self.loop_handle.insert_source(timer, |_, _, state| {
+                state.window_capture_pass_scheduled = false;
+                state.service_window_capture();
+                TimeoutAction::Drop
+            });
         }
     }
 
@@ -502,8 +542,8 @@ fn argb8888_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
 
 /// Service every parked one-shot `screenshot_window` request: render the window,
 /// encode a PNG, write it to disk, and reply with its path (or an `error`). Call
-/// once per render tick from a backend that supports offscreen window rendering
-/// (winit, headless), next to [`push_window_capture`]. A no-op when the queue is
+/// from each window-capture pass (every render tick on winit and headless, a
+/// scheduled pass on udev), next to [`push_window_capture`]. A no-op when the queue is
 /// empty, so it costs nothing when unused.
 pub fn process_pending_window_screenshots<R>(state: &mut ShoestringWm, renderer: &mut R)
 where

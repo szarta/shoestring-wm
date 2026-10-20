@@ -219,6 +219,7 @@ pub fn init_headless(
     // The headless GlesRenderer can render a single window offscreen, so
     // per-window capture (graft, screenshot_window) is available.
     state.window_capture_supported = true;
+    state.output_probe_supported = true;
     // Build an EGL display and a surfaceless GLES renderer. Preference order: a
     // real GPU render node via GBM (unprivileged renderD* — no DRM master, no
     // seat — and gives dmabuf import/export), else a surfaceless software EGL

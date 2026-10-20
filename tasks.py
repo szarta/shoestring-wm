@@ -138,6 +138,8 @@ BINARIES = [
     "shoestring-region",
     "shoestring-kill",
     "shoestring-confirm",
+    "shoestring-remote-server",
+    "shoestring-remote-client",
 ]
 
 # Where the live session looks for the binaries. The display manager would use

@@ -592,7 +592,7 @@ Each request is a JSON object with a ``type`` discriminator:
        ``path`` behaves as on ``screenshot``. Reply is ``screenshot`` with the
        absolute path (same shape as ``screenshot``), or an ``error`` if the
        window is unknown or the active backend can't render a window offscreen
-       (the ``udev``/DRM backend can't; ``winit`` and ``headless`` can). Gated
+       (``winit``, ``headless``, and the ``udev``/DRM backend all can). Gated
        by the automation gate. Both ``screenshot`` and ``screenshot_window``
        back ``shoestring-ctl screenshot --stdout``: ``ctl`` passes a
        ``$XDG_RUNTIME_DIR`` (tmpfs) ``path``, then streams that file to its own

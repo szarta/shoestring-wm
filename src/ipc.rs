@@ -791,9 +791,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     let _ = write_response(
                         client,
                         &Response::Error {
-                            message: "screenshot_window: not supported on this backend \
-                                      (winit and headless only)"
-                                .into(),
+                            message: "screenshot_window: not supported on this backend".into(),
                         },
                     );
                     return true;
@@ -820,6 +818,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                         client: Rc::clone(client),
                         path: path.map(std::path::PathBuf::from),
                     });
+                state.schedule_window_capture();
                 return false;
             }
             Request::RunCommand {
@@ -1298,6 +1297,9 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                         Some(crate::window_capture::WindowCaptureSub::new(ft_id.clone()));
                     c.spent = true;
                 }
+                // The first frame (Ready + Meta + full damage) goes out on the
+                // next capture pass, not on the window's next commit.
+                state.schedule_window_capture();
                 tracing::debug!(?id, %ft_id, "ipc client subscribed to window-capture stream");
                 return false;
             }
@@ -2056,11 +2058,11 @@ impl ShoestringWm {
             let _ = write_response(client, &automation_off_error());
             return true;
         }
-        // Offscreen output render is needed to read pixels back; the same
-        // backends that can do per-window offscreen render support it (winit,
-        // headless), and for the same reason udev can't — its renderer is
-        // borrowed from `self`, so a whole-`state` render helper would alias.
-        if !self.window_capture_supported {
+        // Offscreen output render is needed to read pixels back. Only winit
+        // and headless service it: udev's output elements are built from a
+        // renderer borrowed out of `self.udev`, so the probe pass can't reach
+        // them with the whole-`state` helper.
+        if !self.output_probe_supported {
             let _ = write_response(
                 client,
                 &Response::Error {

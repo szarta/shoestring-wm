@@ -21,6 +21,7 @@ pub fn init_winit(
     // winit's GlesRenderer can render a single window offscreen, so per-window
     // capture (graft, screenshot_window) is available.
     state.window_capture_supported = true;
+    state.output_probe_supported = true;
     // Force a physical-pixel initial size. winit's default is LogicalSize(1280, 800)
     // which gets multiplied by its guessed scale factor (often 2x-2.75x on HiDPI
     // panels in X11 sessions where nothing else actually does per-app scaling),
