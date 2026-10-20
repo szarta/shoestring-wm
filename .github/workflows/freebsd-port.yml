@@ -60,4 +60,7 @@ jobs:
             # passes without a release tag. makesum also fetches + checksums
             # every crate, verifying the whole dependency set still resolves.
             make GH_TAGNAME="${GITHUB_SHA}" makesum
+            # makesum's license check leaves work/ behind, which portlint -A
+            # rejects as an uncleaned port. clean removes only work/.
+            make clean
             env GH_TAGNAME="${GITHUB_SHA}" portlint -A
