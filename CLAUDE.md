@@ -84,3 +84,6 @@ returns stdout/stderr/exit as JSON). See `docs/ipc.rst` for the rest.
   keep task ids and titles out of public files (see `AGENTS.md`).
 - Docs are reStructuredText under `docs/` (Sphinx). Keep `docs/ipc.rst`
   in sync when the IPC surface changes.
+- Settled policy lives in `docs/adr/` (Markdown, outside the Sphinx
+  toctree). Read the relevant ADR before changing what it covers, such
+  as repo sanitization (0001) or vendoring vs. forking Smithay (0002).
