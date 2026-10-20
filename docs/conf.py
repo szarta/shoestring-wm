@@ -8,8 +8,8 @@ so there is one place that owns prose documentation.
 project = "shoestring-wm"
 author = "Brandon Arrendondo"
 copyright = "2026, Brandon Arrendondo"
-release = "0.7.1"
-version = "0.7"
+release = "0.8.0"
+version = "0.8"
 
 extensions = []
 templates_path = []
