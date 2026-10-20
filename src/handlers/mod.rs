@@ -39,6 +39,7 @@ use smithay::wayland::selection::primary_selection::{
 };
 use smithay::wayland::selection::SelectionHandler;
 
+use crate::clipboard::SelectionOrigin;
 use crate::focus::KeyboardFocusTarget;
 use crate::state::ShoestringWm;
 
@@ -271,7 +272,7 @@ impl PointerConstraintsHandler for ShoestringWm {
 }
 
 impl SelectionHandler for ShoestringWm {
-    type SelectionUserData = ();
+    type SelectionUserData = SelectionOrigin;
 
     fn new_selection(
         &mut self,
@@ -279,9 +280,16 @@ impl SelectionHandler for ShoestringWm {
         source: Option<smithay::wayland::selection::SelectionSource>,
         _seat: smithay::input::Seat<Self>,
     ) {
-        // A client took the selection — refresh the broker's view of the live
-        // mimes and drop any compositor cache we held for this target.
-        self.note_new_selection(ty, source.map(|s| s.mime_types()).unwrap_or_default());
+        // A Wayland client took the selection — refresh the broker's view of
+        // the live mimes, drop any compositor cache for this target, and
+        // advertise the selection to X11 clients.
+        let mimes = source.map(|s| s.mime_types());
+        self.note_new_selection(ty, mimes.clone().unwrap_or_default());
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(ty, mimes) {
+                tracing::warn!(?e, "xwayland: forwarding selection to X11 failed");
+            }
+        }
     }
 
     fn send_selection(
@@ -290,11 +298,20 @@ impl SelectionHandler for ShoestringWm {
         mime_type: String,
         fd: std::os::fd::OwnedFd,
         _seat: smithay::input::Seat<Self>,
-        _user_data: &(),
+        user_data: &SelectionOrigin,
     ) {
-        // A client is pasting a selection we set (e.g. one pulled from a remote
-        // machine) — serve the cached bytes.
-        self.serve_clipboard_selection(ty, mime_type, fd);
+        // A Wayland client is pasting a selection the WM side owns: serve the
+        // remote broker's cache, or fetch the bytes from the X11 owner.
+        match user_data {
+            SelectionOrigin::Remote => self.serve_clipboard_selection(ty, mime_type, fd),
+            SelectionOrigin::Xwayland => {
+                if let Some(xwm) = self.xwm.as_mut() {
+                    if let Err(e) = xwm.send_selection(ty, mime_type, fd) {
+                        tracing::warn!(?e, "xwayland: X11 selection fetch failed");
+                    }
+                }
+            }
+        }
     }
 }
 

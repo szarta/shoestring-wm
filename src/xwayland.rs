@@ -50,6 +50,7 @@ use smithay::{
     },
 };
 
+use crate::clipboard::SelectionOrigin;
 use crate::layout::LayoutState;
 
 use crate::state::ShoestringWm;
@@ -414,6 +415,18 @@ impl XwmHandler for ShoestringWm {
         mime_type: String,
         fd: OwnedFd,
     ) {
+        // An X11 client is pasting. A selection the remote broker set lives in
+        // our cache; anything else belongs to a Wayland client.
+        let remote = match selection {
+            SelectionTarget::Clipboard => current_data_device_selection_userdata(&self.seat)
+                .is_some_and(|o| *o == SelectionOrigin::Remote),
+            SelectionTarget::Primary => current_primary_selection_userdata(&self.seat)
+                .is_some_and(|o| *o == SelectionOrigin::Remote),
+        };
+        if remote {
+            self.serve_clipboard_selection(selection, mime_type, fd);
+            return;
+        }
         match selection {
             SelectionTarget::Clipboard => {
                 if let Err(e) = request_data_device_client_selection(&self.seat, mime_type, fd) {
@@ -429,25 +442,31 @@ impl XwmHandler for ShoestringWm {
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        // Keep the remote broker's mime view current so `GetClipboard` can
+        // read an X11 selection too.
+        self.note_new_selection(selection, mime_types.clone());
+        let origin = SelectionOrigin::Xwayland;
         match selection {
             SelectionTarget::Clipboard => {
-                set_data_device_selection(&self.display_handle, &self.seat, mime_types, ())
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types, origin)
             }
             SelectionTarget::Primary => {
-                set_primary_selection(&self.display_handle, &self.seat, mime_types, ())
+                set_primary_selection(&self.display_handle, &self.seat, mime_types, origin)
             }
         }
     }
 
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        // Only clear a selection the bridge set; leave a remote one alone.
+        let bridged = |o: &SelectionOrigin| *o == SelectionOrigin::Xwayland;
         match selection {
             SelectionTarget::Clipboard => {
-                if current_data_device_selection_userdata(&self.seat).is_some() {
+                if current_data_device_selection_userdata(&self.seat).is_some_and(|o| bridged(&o)) {
                     clear_data_device_selection(&self.display_handle, &self.seat)
                 }
             }
             SelectionTarget::Primary => {
-                if current_primary_selection_userdata(&self.seat).is_some() {
+                if current_primary_selection_userdata(&self.seat).is_some_and(|o| bridged(&o)) {
                     clear_primary_selection(&self.display_handle, &self.seat)
                 }
             }

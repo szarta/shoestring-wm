@@ -65,6 +65,18 @@ const TEXT_MIMES: &[&str] = &[
     "TEXT",
 ];
 
+/// Who set a compositor-owned selection. Both the remote broker and the
+/// XWayland bridge own selections on the WM's side of the protocol, so a
+/// Wayland client's paste has to be routed by origin: the broker serves its
+/// cache, the bridge forwards to the X11 owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionOrigin {
+    /// Set by [`ShoestringWm::handle_set_clipboard`]; bytes live in our cache.
+    Remote,
+    /// Mirrors an X11 client's selection; bytes live in that client.
+    Xwayland,
+}
+
 /// Live state for the clipboard broker, owned by [`ShoestringWm`].
 #[derive(Default)]
 pub struct ClipboardBroker {
@@ -279,11 +291,23 @@ impl ShoestringWm {
         if primary {
             self.clipboard.primary_cache = cache;
             self.clipboard.primary_mimes = mimes.clone();
-            set_primary_selection(&dh, &self.seat, mimes, ());
+            set_primary_selection(&dh, &self.seat, mimes.clone(), SelectionOrigin::Remote);
         } else {
             self.clipboard.clipboard_cache = cache;
             self.clipboard.clipboard_mimes = mimes.clone();
-            set_data_device_selection(&dh, &self.seat, mimes, ());
+            set_data_device_selection(&dh, &self.seat, mimes.clone(), SelectionOrigin::Remote);
+        }
+        // Advertise it to X11 clients too; their pastes come back through
+        // `XwmHandler::send_selection`, which serves this cache.
+        let target = if primary {
+            SelectionTarget::Primary
+        } else {
+            SelectionTarget::Clipboard
+        };
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(target, Some(mimes)) {
+                tracing::warn!(?e, "xwayland: advertising remote selection failed");
+            }
         }
     }
 
