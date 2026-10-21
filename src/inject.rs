@@ -490,6 +490,7 @@ impl ShoestringWm {
             .unwrap_or_default()
             .to_f64();
         let location = (origin.x + x, origin.y + y);
+        self.graft_pointer_focus = Some(surface.clone());
         let focus = Some((surface, origin));
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.seat.get_pointer().expect("seat must have pointer");

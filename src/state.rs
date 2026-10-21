@@ -323,6 +323,12 @@ pub struct ShoestringWm {
     /// then see enter/leave/motion. Updated wherever we hand the pointer a new
     /// focus so the refresh pass doesn't re-send motion the client already saw.
     pub last_pointer_focus: Option<(WlSurface, Point<f64, Logical>)>,
+    /// The surface graft input last pinned the pointer to (see
+    /// `inject_input_to_window`). A grafted window need not be under the
+    /// cursor: it may be occluded, minimized, or on another workspace.
+    /// [`Self::refresh_pointer_focus`] leaves that focus alone until other
+    /// pointer input moves it, so the graft's button press still lands there.
+    pub graft_pointer_focus: Option<WlSurface>,
 
     pub ipc: Option<crate::ipc::Server>,
     /// Whether the active backend can render a single window to an offscreen
@@ -894,6 +900,7 @@ impl ShoestringWm {
             active_shortcuts_inhibitor: None,
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
+            graft_pointer_focus: None,
             ipc: None,
             window_capture_supported: false,
             backend_name: "wlcs",
@@ -1159,6 +1166,7 @@ impl ShoestringWm {
     /// running it every loop iteration costs one [`Self::surface_under`] lookup.
     pub fn refresh_pointer_focus(&mut self) {
         use smithay::input::pointer::MotionEvent;
+        use smithay::reexports::wayland_server::Resource;
         use smithay::utils::SERIAL_COUNTER;
         use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 
@@ -1167,6 +1175,20 @@ impl ShoestringWm {
         };
         if pointer.is_grabbed() {
             return;
+        }
+
+        // Graft input pinned the focus to a window that may not be under the
+        // cursor; keep it while it is still the delivered focus.
+        if let Some(pinned) = &self.graft_pointer_focus {
+            let still_pinned = pinned.is_alive()
+                && self
+                    .last_pointer_focus
+                    .as_ref()
+                    .is_some_and(|(s, _)| s == pinned);
+            if still_pinned {
+                return;
+            }
+            self.graft_pointer_focus = None;
         }
 
         let location = pointer.current_location();
