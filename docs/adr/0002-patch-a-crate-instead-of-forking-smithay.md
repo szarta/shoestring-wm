@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted (2026-10-19).
+Accepted (2026-10-19). Amended by [ADR 0004](0004-replace-a-small-dependency-instead-of-vendoring.md):
+when we use only a little of a crate and a vendor has no near-term way
+out, replace it instead. The `pam-client2` vendor below was replaced that
+way.
 
 ## Context
 
@@ -13,8 +16,7 @@ commit (`Cargo.toml`, `crates/wlcs-shoestring/Cargo.toml`).
 
 Twice a dependency inside that tree has blocked a platform:
 
-- `pam-client2` built only against Linux-PAM, so `shoestring-lock` did
-  not build on FreeBSD.
+- `shoestring-lock` needed a patched `pam-client2` to build on FreeBSD.
 - On 2026-10-19 FreeBSD 15.1 shipped libdisplay-info 0.4, which the
   newest released `libdisplay-info-sys` rejects, breaking the build that
   `smithay-drm-extras` pulls in.

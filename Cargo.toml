@@ -304,16 +304,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client", "wayland-client
 # `staging` adds ext-workspace-v1 for tests/ext_workspace.rs.
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging", "wayland-client"] }
 
-# shoestring-lock authenticates via pam-client2, which only compiles
-# against Linux-PAM: it hardcodes `const char *` for `pam_message.msg`
-# (OpenPAM uses `char *` -> 8x E0308) and references the Linux-PAM-only
-# `PAM_CONV_AGAIN` / `PAM_INCOMPLETE` codes (absent on OpenPAM -> E0425).
-# That left shoestring-lock the one workspace crate that wouldn't build on
-# FreeBSD/NetBSD/macOS. We vendor a minimal fork that cfg-gates both behind
-# an `openpam` flag (set by its build.rs, mirroring pam-sys2's target
-# selection); behaviour on Linux is byte-for-byte upstream. See
-# third_party/pam-client2/PATCH.md.
-# Upstream report/MR: https://gitlab.com/LeChatP/rust-pam-client/
+# Crates the dependency tree needs patched, vendored under third_party/
+# (ADR 0002); each has a PATCH.md with its provenance and drop condition.
 #
 # KEEP THIS SECTION LAST. The FreeBSD ports cargo framework
 # (Mk/Scripts/cargo-crates-git-configure.awk) comments out every `git =`
@@ -321,7 +313,6 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable", "stagi
 # above the smithay git dependencies it silently orphaned them and broke
 # `make stage` (packaging/freebsd). Below them, it's harmless.
 [patch.crates-io]
-pam-client2 = { path = "third_party/pam-client2" }
 libdisplay-info = { path = "third_party/libdisplay-info-rs/libdisplay-info" }
 libdisplay-info-sys = { path = "third_party/libdisplay-info-rs/libdisplay-info-sys" }
 libdisplay-info-derive = { path = "third_party/libdisplay-info-rs/libdisplay-info-derive" }

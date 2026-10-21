@@ -557,7 +557,8 @@ revisited deliberately rather than by accident:
   rendering exceptions (§2) are the documented precedent for what "justified"
   looks like.
 - **Portability gaps.** PAM (the locker) and some `/proc`-based metrics are
-  Linux-shaped; the BSD path cfg-gates them (see `third_party/pam-client2`).
+  Linux-shaped; the BSD path cfg-gates them (see
+  `crates/shoestring-lock/src/pam.rs`).
   New OS touchpoints must degrade gracefully when their facility is absent.
 
 ---

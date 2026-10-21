@@ -151,9 +151,10 @@ jobs:
 
   # The same fmt/clippy/test/build sequence on FreeBSD, inside a VM action
   # (GitHub has no native FreeBSD runner). Catches OpenPAM/libudev-devd
-  # portability regressions — notably the vendored pam-client2 fork that
-  # lets shoestring-lock build there (third_party/pam-client2). Deps mirror
-  # the FreeBSD list in docs/install.rst.
+  # portability regressions — notably shoestring-lock's PAM module
+  # (crates/shoestring-lock/src/pam.rs), whose conversation tests run here
+  # against OpenPAM's return codes. Deps mirror the FreeBSD list in
+  # docs/install.rst.
   #
   # The two PipeWire-linked crates (xdg-desktop-portal-shoestring and
   # shoestring-mediad) are EXCLUDED here: on FreeBSD they're the optional

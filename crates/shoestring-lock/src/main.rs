@@ -22,6 +22,7 @@
 //! shoestring-wm via the `Action::Lock` / `shoestring-ctl lock` paths.
 
 mod maze;
+mod pam;
 
 use std::{
     fs,
@@ -913,33 +914,10 @@ impl Dispatch<WlKeyboard, ()> for State {
 
 // ---- PAM ----------------------------------------------------------------
 
-/// Minimal ConversationHandler: any echo-off prompt (PAM's password
-/// prompt) replies with our cached password. Echo-on (e.g. username,
-/// 2FA prompts) is left unimplemented in the MVP — Linux-PAM stacks
-/// almost never echo-on for a desktop login.
-struct PasswordConv {
-    password: std::ffi::CString,
-}
-
-impl pam_client2::ConversationHandler for PasswordConv {
-    fn prompt_echo_on(
-        &mut self,
-        _prompt: &std::ffi::CStr,
-    ) -> Result<std::ffi::CString, pam_client2::ErrorCode> {
-        Err(pam_client2::ErrorCode::CONV_ERR)
-    }
-    fn prompt_echo_off(
-        &mut self,
-        _prompt: &std::ffi::CStr,
-    ) -> Result<std::ffi::CString, pam_client2::ErrorCode> {
-        Ok(self.password.clone())
-    }
-    fn text_info(&mut self, _msg: &std::ffi::CStr) {}
-    fn error_msg(&mut self, msg: &std::ffi::CStr) {
-        tracing::debug!(?msg, "pam error_msg");
-    }
-}
-
+/// Verify the typed password for `$USER` through the PAM service. The
+/// conversation (see [`pam`]) answers echo-off prompts with the password and
+/// refuses echo-on ones (username, 2FA), which a desktop unlock stack almost
+/// never asks.
 fn verify_password(state: &mut State) {
     let user = match std::env::var("USER") {
         Ok(u) => u,
@@ -948,43 +926,32 @@ fn verify_password(state: &mut State) {
             return;
         }
     };
-    let password_plain = std::mem::take(&mut state.password);
+    let password = pam::Secret::new(std::mem::take(&mut state.password));
     state.status = "verifying…".into();
     tracing::debug!(user, "attempting PAM auth");
 
-    let password = match std::ffi::CString::new(password_plain) {
-        Ok(c) => c,
-        Err(_) => {
-            state.status = "password contains NUL".into();
-            return;
+    match pam::verify(&state.pam_service, &user, password) {
+        Ok(()) => {
+            tracing::info!("auth ok, unlocking");
+            if let Some(lock) = state.lock.take() {
+                lock.unlock_and_destroy();
+            }
+            state.finished = true;
         }
-    };
-    let conv = PasswordConv { password };
-    let mut ctx = match pam_client2::Context::new(&state.pam_service, Some(&user), conv) {
-        Ok(c) => c,
-        Err(e) => {
+        Err(e @ (pam::Error::NulInPassword | pam::Error::NulInName)) => {
+            state.status = e.to_string();
+        }
+        Err(e @ pam::Error::Start(_)) => {
             state.status = format!("pam init failed: {e}");
             tracing::warn!(service = %state.pam_service, error = %e, "pam init failed");
-            return;
         }
-    };
-    match ctx.authenticate(pam_client2::Flag::NONE) {
-        Ok(()) => match ctx.acct_mgmt(pam_client2::Flag::NONE) {
-            Ok(()) => {
-                tracing::info!("auth ok, unlocking");
-                if let Some(lock) = state.lock.take() {
-                    lock.unlock_and_destroy();
-                }
-                state.finished = true;
-            }
-            Err(e) => {
-                tracing::info!(error = %e, "acct_mgmt rejected user");
-                state.status = "account disabled".into();
-            }
-        },
-        Err(e) => {
+        Err(e @ pam::Error::Auth(_)) => {
             tracing::info!(error = %e, "auth failed");
             state.status = "authentication failed".into();
+        }
+        Err(e @ pam::Error::Account(_)) => {
+            tracing::info!(error = %e, "acct_mgmt rejected user");
+            state.status = "account disabled".into();
         }
     }
 }

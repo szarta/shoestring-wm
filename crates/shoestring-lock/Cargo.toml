@@ -25,16 +25,13 @@ tempfile = "3"
 # Software-rasterized text for the prompt + status line.
 fontdue = "0.9"
 
-# PAM password verification. pam-client2 / pam-sys2 ship hand-written
-# FFI (no bindgen) so they build without libclang. Runtime still needs
-# libpam.so.0 — present on every PAM-enabled distro.
-pam-client2 = { version = "0.5", default-features = false }
-
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# poll(2) for the frame-paced event loop. Already transitively in
-# our tree via memmap2 / xkbcommon, so no new external crate.
+# poll(2) for the frame-paced event loop, and malloc/free for PAM
+# conversation replies (src/pam.rs links libpam directly; no PAM crate).
+# Already transitively in our tree via memmap2 / xkbcommon, so no new
+# external crate.
 libc = "0.2"

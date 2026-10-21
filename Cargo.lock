@@ -235,9 +235,6 @@ name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "block-buffer"
@@ -1861,25 +1858,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pam-client2"
-version = "0.5.5"
-dependencies = [
- "bitflags 2.13.0",
- "libc",
- "pam-sys2",
- "rustversion",
-]
-
-[[package]]
-name = "pam-sys2"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e07ea89c210813e1a48fc32cb358ba693aae8ca70163461e22d11f1884bf1d"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2581,7 +2559,6 @@ dependencies = [
  "fontdue",
  "libc",
  "memmap2",
- "pam-client2",
  "tempfile",
  "tracing",
  "tracing-subscriber",

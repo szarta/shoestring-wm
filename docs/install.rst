@@ -245,8 +245,8 @@ your kernel; verify ``/dev/dri/card0`` exists after a reboot. The
 installed.
 
 **The screen locker on FreeBSD.** ``shoestring-lock`` builds and runs on
-FreeBSD (via a vendored, OpenPAM-portable ``pam-client2`` under
-``third_party/``). It authenticates through a dedicated ``shoestring-lock``
+FreeBSD: its PAM client is a small module that builds against both
+Linux-PAM and OpenPAM. It authenticates through a dedicated ``shoestring-lock``
 PAM policy that, on FreeBSD, delegates to the setuid
 ``unix-selfauth-helper`` - so the locker binary itself stays unprivileged.
 A **from-source** install (the port does this for you) must therefore

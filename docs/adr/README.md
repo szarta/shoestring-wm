@@ -36,3 +36,5 @@ Each file has:
   crate under `third_party/` instead of forking](0002-patch-a-crate-instead-of-forking-smithay.md)
 - [0003: Every workspace crate shares the workspace
   version](0003-every-workspace-crate-shares-the-workspace-version.md)
+- [0004: Replace a small dependency instead of vendoring
+  it](0004-replace-a-small-dependency-instead-of-vendoring.md)

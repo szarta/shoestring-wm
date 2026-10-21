@@ -40,8 +40,11 @@ FreeBSD-friendly (the `login` fallback exists on every BSD PAM
 install). `--pam-service` CLI flag overrides when distro defaults are
 wrong. ✓
 
-`pam-client2` is hand-written FFI (no bindgen); links against
-`libpam.so` which is present on every PAM-using OS. ✓
+`crates/shoestring-lock/src/pam.rs` is a small hand-written FFI module
+(no PAM crate, no bindgen) that links `libpam` directly, present on
+every PAM-using OS. It builds against both Linux-PAM and OpenPAM; the
+one return code it sends that differs between them (`PAM_CONV_ERR`) is
+set per platform from each implementation's headers. ✓
 
 ### Path assumptions in our code
 
