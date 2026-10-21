@@ -21,9 +21,9 @@ be dismissed by other means (VT switching aside, which the compositor
 governs).
 
 The password prompt is hidden while the screensaver runs and appears as
-soon as you begin typing. It hides again - discarding anything typed so
-far - when you press **Escape**, or automatically after roughly eight
-seconds without a keystroke.
+soon as you begin typing; the maze pauses while it shows. It hides again -
+discarding anything typed so far - when you press **Escape**, or
+automatically after roughly eight seconds without a keystroke.
 
 Options
 -------

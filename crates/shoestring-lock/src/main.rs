@@ -21,22 +21,26 @@
 //! unattended workstation usable on a single-user desktop. Spawned by
 //! shoestring-wm via the `Action::Lock` / `shoestring-ctl lock` paths.
 
+mod canvas;
 mod maze;
 mod pam;
 
 use std::{
     fs,
-    io::Write,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
+use canvas::{Canvas, Rect, Target};
 use clap::Parser;
 use fontdue::{Font, FontSettings};
-use memmap2::MmapMut;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
@@ -46,7 +50,7 @@ use wayland_client::{
         wl_output::WlOutput,
         wl_registry::WlRegistry,
         wl_seat::{self, Capability, WlSeat},
-        wl_shm::{self, WlShm},
+        wl_shm::WlShm,
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
@@ -117,6 +121,15 @@ struct Animation {
     rng: maze::Rng,
 }
 
+/// What an animation tick changed.
+enum Change {
+    None,
+    /// These cells changed state.
+    Cells(Vec<(u16, u16)>),
+    /// A new maze: repaint everything.
+    All,
+}
+
 #[derive(Debug)]
 enum Phase {
     /// Showing the freshly-generated maze, untouched, before the
@@ -165,22 +178,23 @@ impl Animation {
         };
     }
 
-    /// Advance the animation. Returns `true` if anything visible
-    /// changed (caller should redraw).
-    fn tick(&mut self) -> bool {
+    /// Advance the animation and say what needs repainting.
+    fn tick(&mut self) -> Change {
         let now = Instant::now();
         match self.phase {
             Phase::PreSolve { until } => {
                 if now >= until {
                     self.phase = Phase::Solving;
                 }
-                false
+                Change::None
             }
             Phase::Solving => {
-                let mut dirty = false;
+                let mut cells = Vec::new();
                 for _ in 0..STEPS_PER_FRAME {
-                    if self.solver.step(&self.maze).is_some() {
-                        dirty = true;
+                    match self.solver.step(&self.maze) {
+                        Some(maze::DrawEvent::EnteredLive(x, y))
+                        | Some(maze::DrawEvent::MarkedDead(x, y)) => cells.push((x, y)),
+                        Some(maze::DrawEvent::Solved) | None => {}
                     }
                     if self.solver.finished() {
                         self.phase = Phase::PostSolve {
@@ -189,14 +203,18 @@ impl Animation {
                         break;
                     }
                 }
-                dirty
+                if cells.is_empty() {
+                    Change::None
+                } else {
+                    Change::Cells(cells)
+                }
             }
             Phase::PostSolve { until } => {
                 if now >= until {
                     self.regenerate();
-                    return true;
+                    return Change::All;
                 }
-                false
+                Change::None
             }
         }
     }
@@ -263,6 +281,8 @@ struct OutputEntry {
     /// Per-output screensaver state. Built lazily on first configure (need the
     /// size), rebuilt on resize or scale change — it is sized in physical px.
     anim: Option<Animation>,
+    /// The output's pixels and the buffers that show them; built on first draw.
+    canvas: Option<Canvas>,
 }
 
 struct State {
@@ -301,8 +321,7 @@ struct State {
     status: String,
     /// Whether the password prompt is currently drawn. Hidden until the
     /// user starts typing; hidden again on Escape or after
-    /// [`PROMPT_TIMEOUT`] of inactivity. The maze runs underneath either
-    /// way.
+    /// [`PROMPT_TIMEOUT`] of inactivity. The maze pauses while it shows.
     prompt_visible: bool,
     /// When the prompt should auto-hide. Only meaningful while
     /// `prompt_visible`; bumped forward on every keystroke.
@@ -372,6 +391,7 @@ fn run(cli: Cli) -> Result<()> {
                     fractional: None,
                     drawn: false,
                     anim: None,
+                    canvas: None,
                 }
             })
             .collect()
@@ -470,7 +490,7 @@ fn run(cli: Cli) -> Result<()> {
             // deadline, falling back to the bare screensaver.
             if state.prompt_visible && Instant::now() >= state.prompt_deadline {
                 state.hide_prompt();
-                redraw_all(&mut state, &qh);
+                redraw_prompt(&mut state, &qh);
             }
         }
     }
@@ -483,16 +503,31 @@ fn run(cli: Cli) -> Result<()> {
 /// Advance every output's screensaver animation and redraw the ones
 /// that report dirty. Called once per frame.
 fn tick_animations(state: &mut State, qh: &QueueHandle<State>) {
+    present_leftovers(state, qh);
+    // The maze holds still while the prompt is up, so typing repaints only
+    // the prompt (and a remote viewer could watch it cheaply).
+    if state.prompt_visible {
+        return;
+    }
     for i in 0..state.outputs.len() {
-        let dirty = state.outputs[i]
-            .anim
-            .as_mut()
-            .map(|a| a.tick())
-            .unwrap_or(false);
-        if dirty && state.outputs[i].size.is_some() {
-            if let Err(e) = redraw_output(state, qh, i) {
-                tracing::warn!(idx = i, error = %e, "redraw failed");
+        if state.outputs[i].size.is_none() {
+            continue;
+        }
+        let regions = match state.outputs[i].anim.as_mut().map(|a| a.tick()) {
+            None | Some(Change::None) => continue,
+            Some(Change::All) => None,
+            Some(Change::Cells(cells)) => {
+                let anim = state.outputs[i].anim.as_ref().expect("ticked above");
+                Some(
+                    cells
+                        .iter()
+                        .map(|&(x, y)| cell_region(anim, x, y))
+                        .collect(),
+                )
             }
+        };
+        if let Err(e) = redraw(state, qh, i, regions) {
+            tracing::warn!(idx = i, error = %e, "redraw failed");
         }
     }
 }
@@ -648,15 +683,20 @@ impl Dispatch<WpFractionalScaleV1, OutputSurfaceData> for State {
     }
 }
 
-impl Dispatch<WlBuffer, ()> for State {
+// The user data is the buffer's busy flag (see [`canvas`]): the compositor
+// releasing it makes it reusable.
+impl Dispatch<WlBuffer, Arc<AtomicBool>> for State {
     fn event(
         _: &mut Self,
         _: &WlBuffer,
-        _: <WlBuffer as wayland_client::Proxy>::Event,
-        _: &(),
+        event: <WlBuffer as wayland_client::Proxy>::Event,
+        busy: &Arc<AtomicBool>,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wayland_client::protocol::wl_buffer::Event::Release = event {
+            busy.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -851,7 +891,7 @@ impl Dispatch<WlKeyboard, ()> for State {
                 // keys (arrows, Esc) still bring the prompt up.
                 if !state.prompt_visible {
                     state.wake_prompt();
-                    redraw_all(state, qh);
+                    redraw_prompt(state, qh);
                     return;
                 }
                 // wayland keycode is evdev (offset 8 from xkb keycode).
@@ -904,7 +944,7 @@ impl Dispatch<WlKeyboard, ()> for State {
                     dirty = true;
                 }
                 if dirty {
-                    redraw_all(state, qh);
+                    redraw_prompt(state, qh);
                 }
             }
             _ => {}
@@ -987,17 +1027,41 @@ fn warn_if_pam_service_missing(service: &str) {
 
 // ---- Drawing ------------------------------------------------------------
 
-fn redraw_all(state: &mut State, qh: &QueueHandle<State>) {
+/// Repaint all of output `idx`.
+fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Result<()> {
+    redraw(state, qh, idx, None)
+}
+
+/// Repaint the prompt on every output: where it was (if it moved, shrank, or
+/// was hidden) and where it is now.
+fn redraw_prompt(state: &mut State, qh: &QueueHandle<State>) {
     for i in 0..state.outputs.len() {
-        if state.outputs[i].size.is_some() {
+        if state.outputs[i].size.is_none() {
+            continue;
+        }
+        let Some(old) = state.outputs[i].canvas.as_ref().map(|c| c.prompt_box) else {
+            // Nothing drawn yet: paint everything.
             if let Err(e) = redraw_output(state, qh, i) {
                 tracing::warn!(idx = i, error = %e, "redraw failed");
             }
+            continue;
+        };
+        let new = prompt_layout(state, i).map(|l| l.bbox);
+        let regions: Vec<Rect> = old.into_iter().chain(new).collect();
+        if let Err(e) = redraw(state, qh, i, Some(regions)) {
+            tracing::warn!(idx = i, error = %e, "redraw failed");
         }
     }
 }
 
-fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Result<()> {
+/// Repaint `regions` of output `idx` (all of it when `None`) and show them.
+/// The canvas keeps the rest of the screen from earlier frames.
+fn redraw(
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    idx: usize,
+    regions: Option<Vec<Rect>>,
+) -> Result<()> {
     // `(w, h)` is the logical surface size; the buffer + maze render at physical
     // `(pw, ph)` and the viewport maps it back. The maze `anim` is already sized
     // in physical px (see configure / preferred_scale).
@@ -1011,133 +1075,143 @@ fn redraw_output(state: &mut State, qh: &QueueHandle<State>, idx: usize) -> Resu
         return Ok(());
     }
     let scale = state.outputs[idx].scale;
-    let viewport = state.outputs[idx].viewport.clone();
     let pw = ((w as f64) * scale).round().max(1.0) as u32;
     let ph = ((h as f64) * scale).round().max(1.0) as u32;
 
-    let stride = pw as i32 * 4;
-    let size = (stride as usize) * ph as usize;
-    let mut tmp = tempfile::tempfile()?;
-    tmp.set_len(size as u64)?;
-    // Pre-fill so a peek before our mmap stamp still shows the bg.
-    {
-        let mut row = vec![0u8; stride as usize];
-        let bg = COLOR_BG.to_ne_bytes();
-        for px in row.as_chunks_mut::<4>().0 {
-            px.copy_from_slice(&bg);
-        }
-        for _ in 0..ph {
-            tmp.write_all(&row)?;
-        }
+    // A new or resized surface gets a fresh canvas, painted in full.
+    let resized = state.outputs[idx]
+        .canvas
+        .as_ref()
+        .is_none_or(|c| (c.w, c.h) != (pw, ph));
+    if resized {
+        state.outputs[idx].canvas = Some(Canvas::new(pw, ph));
     }
-    let mut mmap = unsafe { MmapMut::map_mut(&tmp)? };
-    fill_solid(&mut mmap, pw, ph, COLOR_BG);
+    let prompt = prompt_layout(state, idx);
+    let entry = &mut state.outputs[idx];
+    let canvas = entry.canvas.as_mut().expect("created above");
+    let regions = match regions {
+        Some(r) if !resized => r,
+        _ => vec![canvas.full()],
+    };
 
-    // Maze underlay. Drawn first so the prompt overlay below
-    // composites on top.
-    if let Some(anim) = state.outputs[idx].anim.as_ref() {
-        draw_maze(&mut mmap, pw, ph, anim);
-    }
-
-    // Prompt overlay: centered 3-line block with a solid backdrop
-    // so the text stays readable over the busy maze. Hidden until the
-    // user starts typing (see `prompt_visible`); the maze alone shows
-    // otherwise.
-    if state.prompt_visible {
-        let title = format!("{} · locked", state.hostname);
-        let masked: String = "•".repeat(state.password.chars().count());
-        let prompt = format!("Password: {masked}");
-        let font_px = state.font_size * scale as f32;
-        let lines = [title.as_str(), prompt.as_str(), state.status.as_str()];
-
-        let line_metrics =
-            state
-                .font
-                .horizontal_line_metrics(font_px)
-                .unwrap_or(fontdue::LineMetrics {
-                    ascent: font_px * 0.8,
-                    descent: -font_px * 0.2,
-                    line_gap: font_px * 0.2,
-                    new_line_size: font_px * 1.2,
-                });
-        let line_h =
-            (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).max(font_px);
-        let total_h = line_h * lines.len() as f32;
-        let max_text_w = lines
-            .iter()
-            .map(|l| measure_text(&state.font, font_px, l))
-            .max()
-            .unwrap_or(0);
-        let pad_x = (font_px * 1.5).round() as i32;
-        let pad_y = (font_px * 0.8).round() as i32;
-        let box_w = max_text_w + pad_x * 2;
-        let box_h = total_h.round() as i32 + pad_y * 2;
-        let box_x = (pw as i32 - box_w) / 2;
-        let box_y = ((ph as f32 - total_h) / 2.0).round() as i32 - pad_y;
-        fill_rect(
-            &mut mmap,
-            pw,
-            ph,
-            box_x,
-            box_y,
-            box_w,
-            box_h,
-            COLOR_PROMPT_BG,
-        );
-
-        let text_top = box_y + pad_y;
-        for (i, line) in lines.iter().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-            let text_w = measure_text(&state.font, font_px, line);
-            let x = box_x + (box_w - text_w) / 2;
-            let baseline_y = text_top + (i as f32 * line_h + line_metrics.ascent).round() as i32;
-            draw_text(
-                &mut mmap,
-                pw,
-                ph,
-                &state.font,
-                font_px,
-                x,
-                baseline_y,
-                line,
-                0xFFE0E0E0,
-            );
+    for &region in &regions {
+        let mut t = canvas.target(region);
+        t.fill_rect(region, COLOR_BG);
+        // Maze underlay, then the prompt over it.
+        if let Some(anim) = entry.anim.as_ref() {
+            draw_maze(&mut t, anim);
+        }
+        if let Some(layout) = prompt.as_ref() {
+            draw_prompt(&mut t, &state.font, layout);
         }
     }
+    canvas.prompt_box = prompt.map(|l| l.bbox);
 
-    let pool: WlShmPool = state.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
-    let buffer: WlBuffer = pool.create_buffer(
-        0,
-        pw as i32,
-        ph as i32,
-        stride,
-        wl_shm::Format::Argb8888,
-        qh,
-        (),
-    );
-    pool.destroy();
-    drop(mmap);
-
-    surface.attach(Some(&buffer), 0, 0);
-    if let Some(vp) = viewport.as_ref() {
+    if let Some(vp) = entry.viewport.as_ref() {
         vp.set_destination(w as i32, h as i32);
     }
-    surface.damage_buffer(0, 0, pw as i32, ph as i32);
-    surface.commit();
-    state.outputs[idx].drawn = true;
-    buffer.destroy();
+    canvas.present(&state.shm, qh, &surface, &regions)?;
+    entry.drawn = true;
     Ok(())
 }
 
-/// Render the current state of `anim` into the buffer. Visited
+/// Commit frames that found every buffer busy, once one is free again.
+fn present_leftovers(state: &mut State, qh: &QueueHandle<State>) {
+    for entry in &mut state.outputs {
+        let (Some(canvas), Some(surface)) = (entry.canvas.as_mut(), entry.surface.as_ref()) else {
+            continue;
+        };
+        if canvas.has_unpresented() {
+            if let Err(e) = canvas.present(&state.shm, qh, surface, &[]) {
+                tracing::warn!(error = %e, "present failed");
+            }
+        }
+    }
+}
+
+/// Where the password prompt goes on output `idx`, or `None` while hidden.
+struct PromptLayout {
+    lines: [String; 3],
+    font_px: f32,
+    /// The backdrop box; everything the prompt draws lies inside it.
+    bbox: Rect,
+    line_h: f32,
+    ascent: f32,
+}
+
+fn prompt_layout(state: &State, idx: usize) -> Option<PromptLayout> {
+    if !state.prompt_visible {
+        return None;
+    }
+    let entry = &state.outputs[idx];
+    let (w, h) = entry.size?;
+    let scale = entry.scale;
+    let pw = ((w as f64) * scale).round().max(1.0) as i32;
+    let ph = ((h as f64) * scale).round().max(1.0) as f32;
+
+    // Centered 3-line block with a solid backdrop so the text stays readable
+    // over the maze.
+    let title = format!("{} · locked", state.hostname);
+    let masked: String = "•".repeat(state.password.chars().count());
+    let prompt = format!("Password: {masked}");
+    let lines = [title, prompt, state.status.clone()];
+    let font_px = state.font_size * scale as f32;
+    let line_metrics =
+        state
+            .font
+            .horizontal_line_metrics(font_px)
+            .unwrap_or(fontdue::LineMetrics {
+                ascent: font_px * 0.8,
+                descent: -font_px * 0.2,
+                line_gap: font_px * 0.2,
+                new_line_size: font_px * 1.2,
+            });
+    let line_h = (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).max(font_px);
+    let total_h = line_h * lines.len() as f32;
+    let max_text_w = lines
+        .iter()
+        .map(|l| measure_text(&state.font, font_px, l))
+        .max()
+        .unwrap_or(0);
+    let pad_x = (font_px * 1.5).round() as i32;
+    let pad_y = (font_px * 0.8).round() as i32;
+    let box_w = max_text_w + pad_x * 2;
+    let box_h = total_h.round() as i32 + pad_y * 2;
+    let box_x = (pw - box_w) / 2;
+    let box_y = ((ph - total_h) / 2.0).round() as i32 - pad_y;
+    Some(PromptLayout {
+        lines,
+        font_px,
+        bbox: Rect::new(box_x, box_y, box_w, box_h),
+        line_h,
+        ascent: line_metrics.ascent,
+    })
+}
+
+fn draw_prompt(t: &mut Target, font: &Font, layout: &PromptLayout) {
+    let b = layout.bbox;
+    t.fill_rect(b, COLOR_PROMPT_BG);
+    let pad_y = (layout.font_px * 0.8).round() as i32;
+    let text_top = b.y + pad_y;
+    for (i, line) in layout.lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let text_w = measure_text(font, layout.font_px, line);
+        let x = b.x + (b.w - text_w) / 2;
+        let baseline_y = text_top + (i as f32 * layout.line_h + layout.ascent).round() as i32;
+        draw_text(t, font, layout.font_px, x, baseline_y, line, 0xFFE0E0E0);
+    }
+}
+
+/// Render the current state of `anim` within `t`'s clip. Visited
 /// cells go down first (live green / dead red), inset by `wp`
 /// on every side so the wall pass that follows ends up with the
 /// xscreensaver-style black border on both sides of every line.
 /// Open doorways between two visited cells get a small color bridge
-/// across the wall plane so the trail reads as continuous.
-fn draw_maze(mmap: &mut MmapMut, w: u32, h: u32, anim: &Animation) {
+/// across the wall plane so the trail reads as continuous. Only the
+/// cells overlapping the clip are visited.
+fn draw_maze(t: &mut Target, anim: &Animation) {
     let cs = anim.cell_px as i32;
     let (ox, oy) = anim.offset;
     let cols = anim.maze.width();
@@ -1147,6 +1221,19 @@ fn draw_maze(mmap: &mut MmapMut, w: u32, h: u32, anim: &Animation) {
     let wp = ((anim.cell_px / 12).max(1)) as i32;
     let inner = cs - 2 * wp;
 
+    // The cells the clip overlaps.
+    let clip = t.clip;
+    if clip.is_empty() {
+        return;
+    }
+    let cell_range = |lo: i32, len: i32, origin: i32, count: u16| {
+        let first = ((lo - origin).div_euclid(cs)).clamp(0, count as i32);
+        let last = ((lo + len - 1 - origin).div_euclid(cs) + 1).clamp(0, count as i32);
+        (first as u16)..(last as u16)
+    };
+    let xs = cell_range(clip.x, clip.w, ox, cols);
+    let ys = cell_range(clip.y, clip.h, oy, rows);
+
     let color_of = |x: u16, y: u16| -> Option<u32> {
         match anim.solver.cell_state(x, y) {
             maze::CellState::Untouched => None,
@@ -1155,91 +1242,68 @@ fn draw_maze(mmap: &mut MmapMut, w: u32, h: u32, anim: &Animation) {
         }
     };
 
-    for y in 0..rows {
-        for x in 0..cols {
+    for y in ys.clone() {
+        for x in xs.clone() {
             let Some(color) = color_of(x, y) else {
                 continue;
             };
             let px = ox + x as i32 * cs;
             let py = oy + y as i32 * cs;
             if inner > 0 {
-                fill_rect(mmap, w, h, px + wp, py + wp, inner, inner, color);
+                t.fill_rect(Rect::new(px + wp, py + wp, inner, inner), color);
             }
             // Bridge the wall gap toward each visited neighbour we
             // share an open doorway with. N/W per cell is enough —
             // S/E end up drawn by the neighbour's pass.
             let walls = anim.maze.walls(x, y);
             if walls & maze::WALL_N == 0 && y > 0 && color_of(x, y - 1).is_some() && inner > 0 {
-                fill_rect(mmap, w, h, px + wp, py, inner, wp, color);
+                t.fill_rect(Rect::new(px + wp, py, inner, wp), color);
             }
             if walls & maze::WALL_W == 0 && x > 0 && color_of(x - 1, y).is_some() && inner > 0 {
-                fill_rect(mmap, w, h, px, py + wp, wp, inner, color);
+                t.fill_rect(Rect::new(px, py + wp, wp, inner), color);
             }
         }
     }
 
     // Walls. N + W per cell covers every interior edge exactly once;
     // the S row + E column passes finish the outer border.
-    for y in 0..rows {
-        for x in 0..cols {
+    for y in ys.clone() {
+        for x in xs.clone() {
             let walls = anim.maze.walls(x, y);
             let px = ox + x as i32 * cs;
             let py = oy + y as i32 * cs;
             if walls & maze::WALL_N != 0 {
-                fill_rect(mmap, w, h, px, py, cs, wp, COLOR_WALL);
+                t.fill_rect(Rect::new(px, py, cs, wp), COLOR_WALL);
             }
             if walls & maze::WALL_W != 0 {
-                fill_rect(mmap, w, h, px, py, wp, cs, COLOR_WALL);
+                t.fill_rect(Rect::new(px, py, wp, cs), COLOR_WALL);
             }
         }
     }
-    let bottom_y = oy + rows as i32 * cs - wp;
-    for x in 0..cols {
-        let walls = anim.maze.walls(x, rows - 1);
-        if walls & maze::WALL_S != 0 {
-            fill_rect(mmap, w, h, ox + x as i32 * cs, bottom_y, cs, wp, COLOR_WALL);
+    if ys.end == rows {
+        let bottom_y = oy + rows as i32 * cs - wp;
+        for x in xs.clone() {
+            if anim.maze.walls(x, rows - 1) & maze::WALL_S != 0 {
+                t.fill_rect(Rect::new(ox + x as i32 * cs, bottom_y, cs, wp), COLOR_WALL);
+            }
         }
     }
-    let right_x = ox + cols as i32 * cs - wp;
-    for y in 0..rows {
-        let walls = anim.maze.walls(cols - 1, y);
-        if walls & maze::WALL_E != 0 {
-            fill_rect(mmap, w, h, right_x, oy + y as i32 * cs, wp, cs, COLOR_WALL);
+    if xs.end == cols {
+        let right_x = ox + cols as i32 * cs - wp;
+        for y in ys {
+            if anim.maze.walls(cols - 1, y) & maze::WALL_E != 0 {
+                t.fill_rect(Rect::new(right_x, oy + y as i32 * cs, wp, cs), COLOR_WALL);
+            }
         }
     }
 }
 
-fn fill_solid(mmap: &mut MmapMut, w: u32, h: u32, color: u32) {
-    fill_rect(mmap, w, h, 0, 0, w as i32, h as i32, color);
-}
-
-#[allow(clippy::too_many_arguments)] // positional (mmap,dst_w,dst_h,x,y,w,h,color) reads cleanly
-fn fill_rect(
-    mmap: &mut MmapMut,
-    dst_w: u32,
-    dst_h: u32,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    color: u32,
-) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let x0 = x.max(0) as u32;
-    let y0 = y.max(0) as u32;
-    let x1 = (x + w).max(0).min(dst_w as i32) as u32;
-    let y1 = (y + h).max(0).min(dst_h as i32) as u32;
-    if x1 <= x0 || y1 <= y0 {
-        return;
-    }
-    let stride = dst_w as usize * 4;
-    let row: Vec<u8> = color.to_ne_bytes().repeat((x1 - x0) as usize);
-    for yy in y0..y1 {
-        let off = yy as usize * stride + x0 as usize * 4;
-        mmap[off..off + row.len()].copy_from_slice(&row);
-    }
+/// The region a change to cell `(x, y)` repaints: the cell itself plus its
+/// east and south neighbours, whose doorway bridges take the cell's colour.
+fn cell_region(anim: &Animation, x: u16, y: u16) -> Rect {
+    let cs = anim.cell_px as i32;
+    let (ox, oy) = anim.offset;
+    Rect::new(ox + x as i32 * cs, oy + y as i32 * cs, 2 * cs, 2 * cs)
 }
 
 fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
@@ -1250,11 +1314,8 @@ fn measure_text(font: &Font, size_px: f32, text: &str) -> i32 {
     w.ceil() as i32
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_text(
-    mmap: &mut MmapMut,
-    dst_w: u32,
-    dst_h: u32,
+    t: &mut Target,
     font: &Font,
     size_px: f32,
     x_start: i32,
@@ -1267,10 +1328,7 @@ fn draw_text(
         let (metrics, bitmap) = font.rasterize(ch, size_px);
         let gx = (pen_x + metrics.xmin as f32).round() as i32;
         let gy = baseline_y - (metrics.ymin + metrics.height as i32);
-        blit_alpha(
-            mmap,
-            dst_w,
-            dst_h,
+        t.blit_alpha(
             gx,
             gy,
             metrics.width as u32,
@@ -1279,49 +1337,6 @@ fn draw_text(
             color,
         );
         pen_x += metrics.advance_width;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn blit_alpha(
-    mmap: &mut MmapMut,
-    dst_w: u32,
-    dst_h: u32,
-    dst_x: i32,
-    dst_y: i32,
-    src_w: u32,
-    src_h: u32,
-    src: &[u8],
-    color: u32,
-) {
-    if src_w == 0 || src_h == 0 {
-        return;
-    }
-    let [fb, fg, fr, _fa] = color.to_le_bytes();
-    let stride = dst_w as usize * 4;
-    for sy in 0..src_h as i32 {
-        let dy = dst_y + sy;
-        if dy < 0 || dy >= dst_h as i32 {
-            continue;
-        }
-        for sx in 0..src_w as i32 {
-            let dx = dst_x + sx;
-            if dx < 0 || dx >= dst_w as i32 {
-                continue;
-            }
-            let coverage = src[(sy as u32 * src_w + sx as u32) as usize];
-            if coverage == 0 {
-                continue;
-            }
-            let off = dy as usize * stride + dx as usize * 4;
-            let a = coverage as i32;
-            for (i, fg_chan) in [fb, fg, fr].iter().enumerate() {
-                let bg = mmap[off + i] as i32;
-                let out = bg + (a * (*fg_chan as i32 - bg)) / 255;
-                mmap[off + i] = out.clamp(0, 255) as u8;
-            }
-            mmap[off + 3] = 0xFF;
-        }
     }
 }
 
@@ -1352,4 +1367,53 @@ fn read_hostname() -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "host".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Paint `region` of a `w`×`h` frame the way [`redraw`] does, minus the
+    /// prompt.
+    fn paint(px: &mut [u8], w: u32, h: u32, anim: &Animation, region: Rect) {
+        let mut t = Target {
+            px,
+            w,
+            clip: region.intersect(&Rect::new(0, 0, w as i32, h as i32)),
+        };
+        t.fill_rect(region, COLOR_BG);
+        draw_maze(&mut t, anim);
+    }
+
+    /// Repainting only each changed cell's region, frame after frame, leaves
+    /// exactly the pixels a full repaint would.
+    #[test]
+    fn cell_regions_cover_every_changed_pixel() {
+        let (w, h) = (403, 301); // not a multiple of the cell size
+        let mut anim = Animation::new(w, h);
+        anim.phase = Phase::Solving;
+        let full = Rect::new(0, 0, w as i32, h as i32);
+        let mut incremental = vec![0u8; (w * h * 4) as usize];
+        paint(&mut incremental, w, h, &anim, full);
+
+        let mut frames = 0;
+        while !anim.solver.finished() {
+            if let Change::Cells(cells) = anim.tick() {
+                for (x, y) in cells {
+                    let region = cell_region(&anim, x, y);
+                    paint(&mut incremental, w, h, &anim, region);
+                }
+            }
+            frames += 1;
+            if frames % 50 == 0 || anim.solver.finished() {
+                let mut fresh = vec![0u8; (w * h * 4) as usize];
+                paint(&mut fresh, w, h, &anim, full);
+                assert!(
+                    incremental == fresh,
+                    "frame {frames} differs from a full repaint"
+                );
+            }
+        }
+        assert!(frames > 10, "the solver finished too fast to test anything");
+    }
 }
