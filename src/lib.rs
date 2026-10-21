@@ -11,6 +11,7 @@
 pub mod backend;
 pub mod binds;
 pub mod capture_stream;
+pub mod child_reaper;
 mod clipboard;
 mod config_watcher;
 mod confirm;

@@ -110,8 +110,7 @@ impl ShoestringWm {
     /// Execute `action` by spawning the first available candidate in its
     /// fallback chain. Fire-and-forget: `systemctl`/`loginctl`/`shutdown`
     /// all return promptly after handing the request to the init/session
-    /// manager, so we don't wait (and couldn't reliably — `SA_NOCLDWAIT`
-    /// auto-reaps; see [`crate::confirm`]). A wholly unresolved chain is a
+    /// manager, so we don't wait; [`crate::child_reaper`] reaps them. A wholly unresolved chain is a
     /// logged warning, never a panic — matches the graceful-degradation
     /// posture for systemd-optional systems.
     pub fn run_power_action(&mut self, action: PowerAction) {
@@ -123,7 +122,8 @@ impl ShoestringWm {
             cmd.args(*args);
             match cmd.spawn() {
                 Ok(child) => {
-                    tracing::info!(pid = child.id(), program, ?args, ?action, "power action");
+                    let pid = crate::child_reaper::track(child);
+                    tracing::info!(pid, program, ?args, ?action, "power action");
                     return;
                 }
                 // Found on PATH but failed to launch — try the next tool.

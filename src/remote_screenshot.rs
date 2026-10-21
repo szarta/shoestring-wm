@@ -40,10 +40,10 @@ use crate::state::ShoestringWm;
 
 /// In-flight subprocess. Completion needs two independent signals: both
 /// pipes reaching EOF (output fully drained) *and* the child's exit status
-/// arriving from the global SIGCHLD reaper (see `main::install_sigchld_autoreap`).
+/// arriving from [`crate::child_reaper`], which tracks the child.
 /// Whichever lands last triggers `maybe_finalize`. We do not `wait()` the
-/// child ourselves — the reaper already collected it, so a direct wait would
-/// race to ECHILD; the status is delivered via `note_screenshot_reaped`.
+/// child ourselves (a blocking wait would stall the event loop); the status
+/// is delivered via `note_screenshot_reaped`.
 pub struct Pending {
     /// IPC client whose `Request::Screenshot` we're answering. Held by
     /// `Rc` so the connection stays alive across calloop iterations
@@ -51,7 +51,7 @@ pub struct Pending {
     pub(crate) client: Rc<RefCell<crate::ipc::Client>>,
     pub client_id: crate::ipc::ClientId,
     /// PID of the spawned `shoestring-screenshot`, used to match the
-    /// reaped-status record from the SIGCHLD drain.
+    /// status the child reaper reports.
     pid: i32,
     /// Exit status, once the reaper has delivered it. `None` until then.
     exit_status: Option<std::process::ExitStatus>,
@@ -149,11 +149,9 @@ impl ShoestringWm {
             .stderr
             .take()
             .expect("piped stderr must exist on spawn");
-        let pid = child.id() as i32;
-        // The global SIGCHLD reaper owns reaping from here on; we only need
-        // the pid to match its status record. Dropping `child` without
-        // waiting is safe (std's Child::drop neither waits nor kills).
-        drop(child);
+        // The child reaper owns reaping from here on; we only need the pid to
+        // match the status it reports.
+        let pid = crate::child_reaper::track(child);
 
         let pending_id = self.next_remote_screenshot_id();
 

@@ -132,9 +132,10 @@ impl ShoestringWm {
                     cmd.env("WAYLAND_DISPLAY", socket);
                 }
                 match cmd.spawn() {
-                    Ok(child) => tracing::info!(
-                        pid = child.id(), %command, ?args, "spawned via binding"
-                    ),
+                    Ok(child) => {
+                        let pid = crate::child_reaper::track(child);
+                        tracing::info!(pid, %command, ?args, "spawned via binding");
+                    }
                     Err(e) => tracing::warn!(%command, error = %e, "spawn failed"),
                 }
             }
@@ -239,7 +240,10 @@ impl ShoestringWm {
                     cmd.env("WAYLAND_DISPLAY", socket);
                 }
                 match cmd.spawn() {
-                    Ok(child) => tracing::info!(pid = child.id(), "screenshot spawned"),
+                    Ok(child) => {
+                        let pid = crate::child_reaper::track(child);
+                        tracing::info!(pid, "screenshot spawned");
+                    }
                     Err(e) => tracing::warn!(error = %e, "screenshot spawn failed"),
                 }
             }
@@ -317,7 +321,10 @@ impl ShoestringWm {
             cmd.env("WAYLAND_DISPLAY", socket);
         }
         match cmd.spawn() {
-            Ok(child) => tracing::info!(pid = child.id(), %cmd_line, "spawned lock"),
+            Ok(child) => {
+                let pid = crate::child_reaper::track(child);
+                tracing::info!(pid, %cmd_line, "spawned lock");
+            }
             Err(e) => tracing::warn!(%cmd_line, error = %e, "spawn lock failed"),
         }
     }
@@ -337,7 +344,10 @@ impl ShoestringWm {
             cmd.env("WAYLAND_DISPLAY", socket);
         }
         match cmd.spawn() {
-            Ok(child) => tracing::info!(pid = child.id(), ?args, "spawned mediad"),
+            Ok(child) => {
+                let pid = crate::child_reaper::track(child);
+                tracing::info!(pid, ?args, "spawned mediad");
+            }
             Err(e) => tracing::warn!(?args, error = %e, "spawn mediad failed"),
         }
     }

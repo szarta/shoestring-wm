@@ -8,11 +8,10 @@
 //!
 //! The helper writes its decision as a single ASCII digit on stdout
 //! right before exiting (`0` = accept, anything else = cancel/error).
-//! We read that byte instead of calling `waitpid` because the WM
-//! installs `SA_NOCLDWAIT` (see `install_sigchld_autoreap` in main.rs)
-//! to keep spawned helpers from zombifying — that auto-reap makes
-//! `Child::wait` fail with `ECHILD`, so the exit code is unreachable.
-//! Pipe EOF still gives us the "helper exited" notification.
+//! We read that byte from the pipe so the event loop never blocks on
+//! `waitpid` while the dialog is up. Pipe EOF gives us the "helper exited"
+//! notification. The WM keeps the `Child` and waits on it itself once the
+//! pipe closes, so the child is not handed to [`crate::child_reaper`].
 //!
 //! Only one confirm dialog is active at a time. A second
 //! `confirm_action` call while one is pending is dropped — this keeps
@@ -154,9 +153,8 @@ impl ShoestringWm {
     /// Helper exited (or its pipe errored out). Dispatch the
     /// `on_accept` callback if the helper signalled accept on stdout.
     ///
-    /// `wait()` here is best-effort: SA_NOCLDWAIT auto-reaps the
-    /// helper before we get here, so the call almost always returns
-    /// `ECHILD`. We don't rely on it.
+    /// The `wait()` here reaps the helper, which has closed (or errored) its
+    /// stdout and so is normally exiting; the exit status itself is not used.
     fn finalize_confirm(&mut self, accepted: bool) {
         let Some(mut pending) = self.pending_confirm.take() else {
             return;

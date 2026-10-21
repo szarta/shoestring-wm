@@ -13,7 +13,7 @@ use std::{
     cell::RefCell,
     io::Read,
     os::fd::{AsFd, AsRawFd, BorrowedFd},
-    process::{Child, Stdio},
+    process::Stdio,
     rc::Rc,
     time::Duration,
 };
@@ -31,10 +31,8 @@ use crate::state::ShoestringWm;
 pub struct Pending {
     pub(crate) client: Rc<RefCell<crate::ipc::Client>>,
     pub client_id: crate::ipc::ClientId,
-    /// Kept solely so a timeout can `kill()` it; we never `wait()` it (the
-    /// global SIGCHLD reaper does that — see `main::install_sigchld_autoreap`).
-    child: Child,
-    /// PID, used to match the reaped-status record from the SIGCHLD drain.
+    /// PID of the child, which [`crate::child_reaper`] tracks: it reaps the
+    /// child, matches its status back here, and lets a timeout kill it.
     pid: i32,
     /// Exit status, once the reaper has delivered it. `None` until then.
     exit_status: Option<std::process::ExitStatus>,
@@ -100,13 +98,12 @@ impl ShoestringWm {
             .stderr
             .take()
             .expect("piped stderr must exist on spawn");
-        let pid = child.id() as i32;
+        let pid = crate::child_reaper::track(child);
 
         let pending_id = self.next_remote_command_id();
         let pending = Pending {
             client,
             client_id,
-            child,
             pid,
             exit_status: None,
             stdout_buf: Vec::new(),
@@ -148,8 +145,8 @@ impl ShoestringWm {
     /// Spawn a `run_command` with `detach: true`: its own session (`setsid`,
     /// so it outlives the request and isn't in the WM's process group), stdio
     /// to `/dev/null`, no pipes and no pending-command bookkeeping. Returns the
-    /// child PID. When it exits, the global SIGCHLD reaper collects it (see
-    /// [`ShoestringWm::note_child_reaped`], which lets unmatched pids go), so it
+    /// child PID. [`crate::child_reaper`] reaps it when it exits (and
+    /// [`ShoestringWm::note_child_reaped`] lets its unmatched pid go), so it
     /// never zombies while the WM lives.
     pub(crate) fn spawn_detached_command(
         &mut self,
@@ -177,9 +174,8 @@ impl ShoestringWm {
         let child = cmd
             .spawn()
             .with_context(|| format!("spawn {:?}", argv[0]))?;
-        let pid = child.id() as i32;
-        // Drop the Child handle: we deliberately do not wait on it. The global
-        // SIGCHLD reaper waitpid()s it on exit.
+        // We deliberately do not wait on it; the reaper does.
+        let pid = crate::child_reaper::track(child);
         tracing::info!(?argv, pid, "detached command started");
         Ok(pid)
     }
@@ -225,10 +221,9 @@ impl ShoestringWm {
         let Some(p) = self.pending_commands.get_mut(&pending_id) else {
             return;
         };
-        // Std's Child::kill sends SIGKILL on Unix. We log but ignore
-        // errors: ESRCH just means the child already exited between
-        // the timer firing and us reaching here.
-        if let Err(e) = p.child.kill() {
+        // SIGKILL. We log but ignore errors: ESRCH just means the child
+        // was reaped between the timer firing and us reaching here.
+        if let Err(e) = crate::child_reaper::kill(p.pid) {
             tracing::debug!(error = %e, "run_command kill (child already exited?)");
         } else {
             tracing::info!(?pending_id, "run_command timed out → SIGKILL");
