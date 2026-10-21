@@ -40,7 +40,13 @@ cargo build -p shoestring-wm
 runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/sw-headless.XXXXXX")"
 chmod 700 "$runtime_dir"
 wm_log="$runtime_dir/wm.log"
+# The WM's own stdout/stderr, kept apart from its tracing log: a panic
+# message lands here, not in $wm_log.
+wm_stderr="$runtime_dir/wm.stderr"
 export LIBGL_ALWAYS_SOFTWARE=1
+# An in-session caller exports the live WM's IPC socket here, and IPC clients
+# prefer it over the runtime dir. Drop it so the tests reach the nested WM.
+unset SHOESTRING_WM_SOCKET
 
 # Minimal config: no autostart clients (the bar / applets / portal aren't built
 # or installed in CI and only add noise + load to the test compositor).
@@ -51,6 +57,21 @@ autostart = []
 TOML
 
 wm_pid=""
+
+# Print the WM's log tail and its stderr, and say whether it is still running.
+dump_wm() {
+    tail -n "$1" "$wm_log" >&2 || true
+    if [ -s "$wm_stderr" ]; then
+        echo "==> WM stderr:" >&2
+        tail -60 "$wm_stderr" >&2 || true
+    fi
+    if [ -n "$wm_pid" ] && ! kill -0 "$wm_pid" 2>/dev/null; then
+        wm_status=0
+        wait "$wm_pid" || wm_status=$?
+        echo "==> WM is no longer running (exit status $wm_status)" >&2
+    fi
+}
+
 cleanup() {
     [ -n "$wm_pid" ] && kill "$wm_pid" 2>/dev/null || true
     rm -rf "$runtime_dir"
@@ -61,7 +82,7 @@ echo "==> launching headless WM (runtime dir: $runtime_dir)"
 env -u WAYLAND_DISPLAY \
     XDG_RUNTIME_DIR="$runtime_dir" \
     SHOESTRING_WM_LOG="$wm_log" \
-    "$wm_bin" --backend winit --config "$config" >/dev/null 2>&1 &
+    "$wm_bin" --backend winit --config "$config" >"$wm_stderr" 2>&1 &
 wm_pid=$!
 
 # Wait for the WM's wayland socket to appear (it creates wayland-N in the
@@ -72,7 +93,7 @@ for _ in $(seq 1 100); do
     [ -n "$socket" ] && break
     if ! kill -0 "$wm_pid" 2>/dev/null; then
         echo "error: WM exited before opening a socket; log:" >&2
-        cat "$wm_log" >&2 || true
+        dump_wm +1
         exit 1
     fi
     sleep 0.3
@@ -80,7 +101,7 @@ done
 
 if [ -z "$socket" ]; then
     echo "error: timed out waiting for the WM's wayland socket; log:" >&2
-    tail -40 "$wm_log" >&2 || true
+    dump_wm 40
     exit 1
 fi
 
@@ -96,6 +117,6 @@ XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_display" \
 
 if [ "$status" -ne 0 ]; then
     echo "==> integration tests failed; WM log tail:" >&2
-    tail -60 "$wm_log" >&2 || true
+    dump_wm 60
 fi
 exit "$status"
