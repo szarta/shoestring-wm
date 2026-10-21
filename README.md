@@ -189,8 +189,8 @@ automatically to a surfaceless EGL platform backed by Mesa's **llvmpipe**
 software rasterizer, producing real, capturable frames either way (the
 compositing and capture/stream path is byte-identical between the two —
 see `docs/running.rst`). This is the foundation for remote-desktop *serve
-mode* (`docs/remote.rst`) and ships today as a 325 MB, GPU-optional Docker
-image — `docker run` with no `--device` needed (`docs/containers.rst`).
+mode* (`docs/remote.rst`) and ships today as a roughly 330 MB, GPU-optional
+Docker image — `docker run` with no `--device` needed (`docs/containers.rst`).
 
 Some context on where this sits relative to comparable projects: wlroots
 compositors (Sway, River, Hyprland) have had a mature no-GPU option for

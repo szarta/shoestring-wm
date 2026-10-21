@@ -19,7 +19,7 @@
 #   shoestring-remote-client --connect "$XDG_RUNTIME_DIR/sandbox/shoestring-remote.sock"
 
 # ---- build stage -------------------------------------------------------------
-FROM rust:1-bookworm AS build
+FROM docker.io/library/rust:1-bookworm AS build
 
 # Build deps for the *headless* WM only: wayland + xkbcommon + drm/gbm/egl. We
 # deliberately build no winit/tty backend, so the udev / libinput / libseat /
@@ -52,7 +52,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
        target/release/shoestring-screenshot /out/
 
 # ---- runtime stage -----------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 
 # Runtime libs + Mesa. The Mesa software stack (libgl1-mesa-dri ships swrast /
 # llvmpipe; libegl-mesa0 is the Mesa EGL driver) is what lets the headless
