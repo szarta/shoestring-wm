@@ -191,7 +191,11 @@ fn main() -> Result<()> {
         Mode::Commands | Mode::Bookmarks => {
             let source = cli.source.unwrap_or_else(|| default_source(cli.mode));
             let c = match cli.mode {
-                Mode::Commands => load_command_list(&source),
+                Mode::Commands => {
+                    let mut cmds = builtin_commands();
+                    cmds.extend(load_command_list(&source));
+                    cmds
+                }
                 Mode::Bookmarks => load_bookmarks_md(&source),
                 Mode::Windows => unreachable!(),
             };
@@ -456,6 +460,23 @@ fn window_candidate(w: WindowSummary) -> Candidate {
         display,
         invoke: w.id,
     }
+}
+
+/// Built-in commands that always appear in Commands mode, regardless of the
+/// executables file. These use a human-readable display name so they're
+/// easy to find by typing "screenshot", but invoke is the raw argv that
+/// dispatch_selection whitespace-splits and spawns.
+fn builtin_commands() -> Vec<Candidate> {
+    vec![
+        Candidate {
+            display: "Screenshot: Full Screen".to_string(),
+            invoke: "shoestring-screenshot".to_string(),
+        },
+        Candidate {
+            display: "Screenshot: Selection".to_string(),
+            invoke: "shoestring-screenshot --region".to_string(),
+        },
+    ]
 }
 
 /// Load the curated command list. One command per line; lines may contain
