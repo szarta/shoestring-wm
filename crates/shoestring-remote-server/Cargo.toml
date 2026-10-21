@@ -23,6 +23,10 @@ serde_json = "1"
 # Lightweight error type for `main` and the bridge threads.
 anyhow = "1"
 
+# SO_PEERCRED / getpeereid: read a Unix peer's uid to refuse other users.
+# Already in the workspace tree, so no new external crate.
+libc = "0.2"
+
 # Structured logs, env-filterable + redirectable to a file
 # (SHOESTRING_REMOTE_SERVER_LOG), matching the rest of the suite.
 tracing = "0.1"

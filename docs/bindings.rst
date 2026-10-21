@@ -94,15 +94,20 @@ cliphist, copyq - instead want ``[clipboard] data_control = true``; see
 
 A remote joins the axis by running **shoestring-remote-client** on the local
 machine. It connects out to a remote box's ``shoestring-remote-server`` (reached
-over an ``ssh -L`` tunnel or plain loopback), presents that desktop fullscreen,
-and registers on the axis so ``Super+J``/``K`` reach it::
+by forwarding the server's Unix socket over ssh), presents that desktop
+fullscreen, and registers on the axis so ``Super+J``/``K`` reach it::
 
-    # On the served box: enable serve mode (see the remote-server) so its
-    # listener opens, reached locally as 127.0.0.1:7355 via:
-    ssh -L 7355:127.0.0.1:7355 user@served-box
+    # On the served box: enable serve mode (shoestring-ctl remote on) so the
+    # server's socket appears, then forward it from the local machine:
+    ssh -N -L "$XDG_RUNTIME_DIR/served-box.sock:/run/user/1000/shoestring-remote-wayland-1.sock" \
+        user@served-box
 
     # On the local machine:
-    shoestring-remote-client --connect 127.0.0.1:7355 --label served-box
+    shoestring-remote-client --connect "$XDG_RUNTIME_DIR/served-box.sock"
+
+The remote path is the served box's ``$XDG_RUNTIME_DIR`` (usually
+``/run/user/<uid>``) and its ``$WAYLAND_DISPLAY``; ``ls /run/user/$(id -u)``
+there shows it. The label defaults to the socket's file name.
 
 While that client is the active view its surface is shown and all local input is
 forwarded to the served box; ``Super+Escape`` returns to local and hides it. The

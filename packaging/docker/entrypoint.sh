@@ -17,13 +17,22 @@ mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 export XDG_RUNTIME_DIR
 
-# Remote bridge bind/port. Exported so the WM-spawned shoestring-remote-server
-# inherits them. Bind defaults to 0.0.0.0 because `-p` publishes to the
-# container interface, not loopback — publish to host loopback
-# (`-p 127.0.0.1:7355:7355`) and/or ssh -L for the loopback-only safety the
-# bare server assumes.
-export SHOESTRING_REMOTE_BIND="${SHOESTRING_REMOTE_BIND:-0.0.0.0}"
-export SHOESTRING_REMOTE_PORT="${SHOESTRING_REMOTE_PORT:-7355}"
+# The remote bridge listens on a Unix socket (the image sets
+# SHOESTRING_REMOTE_SOCKET) in a directory the host bind-mounts, and accepts
+# only this container user's uid. Make sure the directory exists and is private
+# even when nothing is mounted over it. SHOESTRING_REMOTE_TCP=ADDR:PORT opts
+# into TCP instead, which checks nobody: see docs/containers.rst.
+if [ -n "${SHOESTRING_REMOTE_TCP:-}" ]; then
+    # The image's socket default would conflict with an explicit TCP choice.
+    unset SHOESTRING_REMOTE_SOCKET
+    log "WARN: remote server on TCP $SHOESTRING_REMOTE_TCP: nothing checks who connects"
+elif [ -n "${SHOESTRING_REMOTE_SOCKET:-}" ]; then
+    mkdir -p "$(dirname "$SHOESTRING_REMOTE_SOCKET")"
+    chmod 700 "$(dirname "$SHOESTRING_REMOTE_SOCKET")"
+fi
+if [ -n "${SHOESTRING_REMOTE_BIND:-}${SHOESTRING_REMOTE_PORT:-}" ]; then
+    log "WARN: SHOESTRING_REMOTE_BIND/PORT are no longer supported (the remote server will refuse to start); use SHOESTRING_REMOTE_TCP=ADDR:PORT"
+fi
 
 CONFIG="${SHOESTRING_WM_CONFIG:-/etc/shoestring-wm/config.toml}"
 

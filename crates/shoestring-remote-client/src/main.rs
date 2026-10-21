@@ -19,12 +19,12 @@ mod graft;
 mod net;
 mod wm;
 
-use std::net::TcpStream;
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
 use memmap2::MmapMut;
 use shoestring_ipc::{Event as IpcEvent, RawInput};
+use shoestring_remote::transport::{Stream, Target};
 use shoestring_remote::{apply_tile, ClientMessage, CursorUpdate, ServerMessage};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -83,9 +83,11 @@ fn main() -> Result<()> {
 // ---- CLI -----------------------------------------------------------------
 
 struct Cli {
-    /// `host:port` of the remote server (reached over an ssh -L tunnel or loopback).
-    connect: String,
-    /// Machine name shown on the local machine-axis (defaults to the host part).
+    /// The remote server: a Unix socket path (normally the local end of an
+    /// `ssh -L` socket forward) or a TCP `host:port`.
+    connect: Target,
+    /// Machine name shown on the local machine-axis (defaults to the socket's
+    /// file stem, or the host part of `host:port`).
     label: String,
     /// `Some(selector)` selects **graft mode**: present the single remote window
     /// matching `selector` (app_id / title / foreign-toplevel id) as a local
@@ -100,7 +102,7 @@ enum CliAction {
 }
 
 fn parse_cli() -> Result<CliAction> {
-    let mut connect: Option<String> = None;
+    let mut connect: Option<Target> = None;
     let mut label: Option<String> = None;
     let mut graft: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -109,24 +111,19 @@ fn parse_cli() -> Result<CliAction> {
             "-h" | "--help" => return Ok(CliAction::Help),
             "-V" | "--version" => return Ok(CliAction::Version),
             "--connect" => {
-                connect = Some(
-                    args.next()
-                        .context("--connect needs a host:port argument")?,
-                )
+                connect = Some(Target::parse(
+                    &args
+                        .next()
+                        .context("--connect needs a socket path or host:port")?,
+                ))
             }
             "--label" => label = Some(args.next().context("--label needs a name argument")?),
             "--graft" => graft = Some(args.next().context("--graft needs a selector argument")?),
             other => anyhow::bail!("unknown argument: {other} (try --help)"),
         }
     }
-    let connect = connect.context("--connect <host:port> is required (try --help)")?;
-    // Default the label to the host part of the connect target.
-    let label = label.unwrap_or_else(|| {
-        connect
-            .rsplit_once(':')
-            .map(|(h, _)| h.to_string())
-            .unwrap_or_else(|| connect.clone())
-    });
+    let connect = connect.context("--connect <socket|host:port> is required (try --help)")?;
+    let label = label.unwrap_or_else(|| default_label(&connect));
     Ok(CliAction::Run(Cli {
         connect,
         label,
@@ -134,15 +131,33 @@ fn parse_cli() -> Result<CliAction> {
     }))
 }
 
+/// The machine-axis name when `--label` isn't given: the socket's file stem
+/// (`box.sock` → `box`), or the host part of `host:port`.
+fn default_label(target: &Target) -> String {
+    match target {
+        Target::Unix(path) => path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "remote".into()),
+        Target::Tcp(addr) => addr
+            .rsplit_once(':')
+            .map(|(host, _)| host.to_string())
+            .unwrap_or_else(|| addr.clone()),
+    }
+}
+
 fn help_text() -> String {
     format!(
         "shoestring-remote-client {}\n\
          View and drive a remote shoestring-wm desktop.\n\n\
-         USAGE:\n  shoestring-remote-client --connect <host:port> [--label <name>] [--graft <selector>]\n\n\
+         USAGE:\n  shoestring-remote-client --connect <socket|host:port> [--label <name>] [--graft <selector>]\n\n\
          OPTIONS:\n\
-         \x20 --connect <host:port>  Remote shoestring-remote-server endpoint (e.g. an\n\
-         \x20                        `ssh -L 7355:127.0.0.1:7355` tunnel: 127.0.0.1:7355).\n\
-         \x20 --label <name>         Name shown on the local machine-axis (default: host).\n\
+         \x20 --connect <socket>     The remote server: normally the local end of an ssh\n\
+         \x20                        socket forward, e.g.\n\
+         \x20                          ssh -N -L \"$XDG_RUNTIME_DIR/box.sock:<remote socket>\" box\n\
+         \x20                        A value without '/' is a TCP host:port instead.\n\
+         \x20 --label <name>         Name shown on the local machine-axis (default: the\n\
+         \x20                        socket's file name, or the host).\n\
          \x20 --graft <selector>     Graft ONE remote window into the local workspace as a\n\
          \x20                        normal window (app_id / title / toplevel-id match),\n\
          \x20                        instead of viewing the whole desktop fullscreen.\n\
@@ -397,9 +412,8 @@ fn run(cli: Cli) -> Result<()> {
 
     // ---- Network handshake (blocking) ----
     tracing::info!(addr = %cli.connect, "connecting to remote server");
-    let mut stream = TcpStream::connect(&cli.connect)
+    let mut stream = Stream::connect(&cli.connect)
         .with_context(|| format!("connect to remote server {}", cli.connect))?;
-    stream.set_nodelay(true).ok();
     shoestring_remote::write_framed(
         &mut stream,
         &ClientMessage::Hello {
@@ -800,6 +814,14 @@ impl Dispatch<WpFractionalScaleV1, ()> for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_label_comes_from_the_socket_name_or_host() {
+        let label = |s: &str| default_label(&Target::parse(s));
+        assert_eq!(label("/run/user/1000/box.sock"), "box");
+        assert_eq!(label("192.168.1.5:7355"), "192.168.1.5");
+        assert_eq!(label("box:7355"), "box");
+    }
 
     // The captured_input -> ClientMessage mapping is the load-bearing relay; lock
     // each variant so a wire/RawInput drift is caught here, not at runtime.

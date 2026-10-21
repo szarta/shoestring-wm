@@ -1,6 +1,6 @@
 //! The network connection to the remote `shoestring-remote-server`.
 //!
-//! One non-blocking TCP stream carrying the duplex `shoestring-remote` wire
+//! One non-blocking stream (a forwarded Unix socket, or TCP) carrying the duplex `shoestring-remote` wire
 //! protocol: we read [`ServerMessage`]s (Ready / Frame tiles / Cursor / Resize /
 //! Bye) and write [`ClientMessage`]s (Hello + relayed input + Bye). The crate's
 //! [`read_framed`] is blocking-exact, which doesn't fit a `poll(2)` loop, so we
@@ -11,14 +11,14 @@
 //! while bytes remain.
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
+use shoestring_remote::transport::Stream;
 use shoestring_remote::{ClientMessage, Message, ServerMessage, MAX_MESSAGE_LEN};
 
 pub struct Net {
-    stream: TcpStream,
+    stream: Stream,
     /// Bytes read from the socket but not yet parsed into whole frames.
     in_buf: Vec<u8>,
     /// Encoded outgoing frames not yet written (partial writes / `WouldBlock`).
@@ -29,7 +29,7 @@ impl Net {
     /// Wrap a stream that the caller has already connected, performed the
     /// blocking `Hello`/`Ready` handshake on, and switched to non-blocking. From
     /// here the stream is driven only from the poll loop.
-    pub fn from_stream(stream: TcpStream) -> Self {
+    pub fn from_stream(stream: Stream) -> Self {
         Net {
             stream,
             in_buf: Vec::new(),
@@ -121,12 +121,10 @@ mod tests {
     // Feed a byte stream through a Net's parser without a real socket by poking
     // in_buf directly — exercises the frame-peeling boundary logic.
     fn parse_all(mut chunks: Vec<Vec<u8>>) -> Vec<ServerMessage> {
-        // A Net needs a stream; use a connected loopback pair we never read/write.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client = std::net::TcpStream::connect(addr).unwrap();
+        // A Net needs a stream; use a connected pair we never read/write.
+        let (client, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut net = Net {
-            stream: client,
+            stream: Stream::Unix(client),
             in_buf: Vec::new(),
             out_buf: Vec::new(),
         };

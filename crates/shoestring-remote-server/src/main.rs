@@ -8,21 +8,23 @@
 //!    makes the remote-gate toggle selectable (greyed until a server registers)
 //!    and means the process's exit forces the gate back off.
 //! 2. Watches [`Event::RemoteChanged`] on that connection. While the gate is
-//!    **on**, it opens a localhost TCP listener (reached over `ssh -L`); while
-//!    **off**, the listener is closed and no port is open — the consent model.
+//!    **on**, it listens on a private Unix socket (reached from another machine
+//!    over `ssh -L`); while **off**, the socket is gone — the consent model.
 //! 3. Per client: streams the served output via the WM's capture subscription
 //!    (damage tiles) and replays the client's raw input back into the WM
 //!    (`inject_input`), reporting the viewer count so the "being viewed" chip
 //!    lights.
 //!
-//! Transport is a single ssh-tunneled stream; there is no auth surface of our
-//! own (reuse existing ssh keys/trust + the named-node workflow).
+//! Transport is a single ssh-forwarded stream. The socket is mode 0600 and a
+//! connection is accepted only from our own uid, so ssh login is the
+//! authentication (see [`listen`]). An explicit `--tcp` listener has no such
+//! check and warns at startup.
 
+mod listen;
 mod session;
 mod viewers;
 mod wm;
 
-use std::net::TcpListener;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -33,17 +35,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer as _;
 
+use listen::{Endpoint, Listener};
 use viewers::Viewers;
-
-/// Default listener port. Bound to loopback only; a remote client reaches it via
-/// `ssh -L <port>:127.0.0.1:<port> served-host` and connects locally.
-const DEFAULT_PORT: u16 = 7355;
-const DEFAULT_BIND: &str = "127.0.0.1";
 
 /// Parsed configuration from CLI flags / env.
 struct Cfg {
-    bind: String,
-    port: u16,
+    endpoint: Endpoint,
     output: Option<String>,
 }
 
@@ -55,10 +52,15 @@ fn main() -> Result<()> {
     init_tracing();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        bind = %cfg.bind,
-        port = cfg.port,
+        endpoint = %cfg.endpoint,
         "shoestring-remote-server starting"
     );
+    if let Endpoint::Tcp(addr) = &cfg.endpoint {
+        match listen::tcp_warning(addr) {
+            Some(warning) => tracing::warn!(%addr, "{warning}"),
+            None => tracing::warn!(%addr, "TCP listener: connections are not checked"),
+        }
+    }
 
     // Register with the WM. The connection is kept alive for the whole process
     // (its drop forces the gate off); we read RemoteChanged events off it.
@@ -172,18 +174,16 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
             return Ok(());
         }
 
-        let addr = format!("{}:{}", cfg.bind, cfg.port);
-        let listener = match TcpListener::bind(&addr) {
+        let listener = match Listener::bind(&cfg.endpoint) {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!(error = %e, %addr, "failed to bind listener; gate stays on but idle");
+                tracing::error!(error = %format!("{e:#}"), endpoint = %cfg.endpoint, "failed to bind listener; gate stays on but idle");
                 // Avoid a hot spin if bind keeps failing while enabled.
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
-        listener.set_nonblocking(true).ok();
-        tracing::info!(%addr, "listening (remote gate on)");
+        tracing::info!(endpoint = %cfg.endpoint, "listening (remote gate on)");
 
         // Accept while the gate stays on. Non-blocking accept + a short sleep so
         // a gate-off is noticed promptly without a dedicated wakeup socket.
@@ -193,20 +193,23 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
                 break;
             }
             match listener.accept() {
-                Ok((net, peer)) => {
-                    tracing::info!(%peer, "client connected");
+                Ok(Some(accepted)) => {
+                    tracing::info!(peer = %accepted.peer, "client connected");
                     let viewers = Arc::clone(viewers);
                     let output = cfg.output.clone();
                     std::thread::Builder::new()
                         .name("session".into())
                         .spawn(move || {
-                            if let Err(e) = session::serve(net, output, viewers) {
+                            if let Err(e) =
+                                session::serve(accepted.stream, accepted.peer, output, viewers)
+                            {
                                 tracing::warn!(error = %e, "session error");
                             }
                         })
                         .ok();
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Nothing pending, or a peer the access check refused.
+                Ok(None) => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
@@ -216,7 +219,7 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
             }
         }
 
-        // Gate off (or accept died): drop the listener so the port closes, and
+        // Gate off (or accept died): drop the listener so the socket goes, and
         // clear the viewer chip. Live sessions end on their own when the WM
         // tears down their capture subscriptions.
         drop(listener);
@@ -233,12 +236,20 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
 /// Parse CLI flags, falling back to env then defaults. Returns `None` if a
 /// help/version flag was handled and the process should exit.
 fn parse_args() -> Result<Option<Cfg>> {
-    let mut bind = std::env::var("SHOESTRING_REMOTE_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
-    let mut port = std::env::var("SHOESTRING_REMOTE_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_PORT);
-    let mut output = std::env::var("SHOESTRING_REMOTE_OUTPUT").ok();
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let mut socket = env("SHOESTRING_REMOTE_SOCKET").map(std::path::PathBuf::from);
+    let mut tcp = env("SHOESTRING_REMOTE_TCP");
+    let mut output = env("SHOESTRING_REMOTE_OUTPUT");
+    // The old TCP-by-default settings. Honouring them would quietly reopen an
+    // unchecked TCP port, so stop with a pointer to the explicit setting.
+    for old in ["SHOESTRING_REMOTE_BIND", "SHOESTRING_REMOTE_PORT"] {
+        if env(old).is_some() {
+            anyhow::bail!(
+                "{old} is no longer supported: the server listens on a Unix socket; \
+                 set SHOESTRING_REMOTE_TCP=ADDR:PORT for TCP"
+            );
+        }
+    }
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -251,15 +262,14 @@ fn parse_args() -> Result<Option<Cfg>> {
                 println!("shoestring-remote-server {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            "--bind" => {
-                bind = args.next().context("--bind needs an address")?;
+            "--socket" => {
+                socket = Some(args.next().context("--socket needs a path")?.into());
             }
-            "--port" => {
-                port = args
-                    .next()
-                    .context("--port needs a number")?
-                    .parse()
-                    .context("--port must be a number")?;
+            "--tcp" => {
+                tcp = Some(args.next().context("--tcp needs ADDR:PORT")?);
+            }
+            "--bind" | "--port" => {
+                anyhow::bail!("{arg} is no longer supported: use --tcp ADDR:PORT (try --help)")
             }
             "--output" => {
                 output = Some(args.next().context("--output needs an output name")?);
@@ -267,7 +277,13 @@ fn parse_args() -> Result<Option<Cfg>> {
             other => anyhow::bail!("unknown argument: {other} (try --help)"),
         }
     }
-    Ok(Some(Cfg { bind, port, output }))
+    let endpoint = match (socket, tcp) {
+        (Some(_), Some(_)) => anyhow::bail!("--socket and --tcp are mutually exclusive"),
+        (Some(path), None) => Endpoint::Unix(path),
+        (None, Some(addr)) => Endpoint::Tcp(addr),
+        (None, None) => Endpoint::default_unix()?,
+    };
+    Ok(Some(Cfg { endpoint, output }))
 }
 
 fn help_text() -> String {
@@ -277,24 +293,29 @@ fn help_text() -> String {
 Usage: shoestring-remote-server [OPTIONS]
 
 Registers with the local shoestring-wm and, while the remote gate is enabled,
-streams the served output and replays client input over a localhost TCP
-listener (reach it from another machine with `ssh -L`).
+streams the served output and replays client input over a Unix socket that
+only this user can connect to. Reach it from another machine with OpenSSH's
+socket forwarding:
+
+  ssh -N -L \"$XDG_RUNTIME_DIR/box.sock:<remote socket path>\" box
+  shoestring-remote-client --connect \"$XDG_RUNTIME_DIR/box.sock\"
 
 Options:
-      --bind ADDR    Listener bind address (default {bind}, loopback only).
-      --port PORT    Listener port (default {port}).
-      --output NAME  Served WM output name (default: the first output).
-  -h, --help         Print this help and exit.
-  -V, --version      Print version and exit.
+      --socket PATH    Listen on this Unix socket (default
+                       $XDG_RUNTIME_DIR/shoestring-remote-$WAYLAND_DISPLAY.sock).
+      --tcp ADDR:PORT  Listen on TCP instead. Nothing checks who connects:
+                       anyone who can reach the port can see and control the
+                       session.
+      --output NAME    Served WM output name (default: the first output).
+  -h, --help           Print this help and exit.
+  -V, --version        Print version and exit.
 
 Environment: SHOESTRING_WM_SOCKET (WM IPC socket, required to find the WM),
-SHOESTRING_REMOTE_BIND / SHOESTRING_REMOTE_PORT / SHOESTRING_REMOTE_OUTPUT
+SHOESTRING_REMOTE_SOCKET / SHOESTRING_REMOTE_TCP / SHOESTRING_REMOTE_OUTPUT
 (same as the flags), SHOESTRING_REMOTE_SERVER_LOG (append tracing to a file),
 RUST_LOG (tracing filter).
 ",
         ver = env!("CARGO_PKG_VERSION"),
-        bind = DEFAULT_BIND,
-        port = DEFAULT_PORT,
     )
 }
 

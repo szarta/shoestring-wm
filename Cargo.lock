@@ -2665,6 +2665,7 @@ name = "shoestring-remote-server"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "libc",
  "serde_json",
  "shoestring-ipc",
  "shoestring-remote",

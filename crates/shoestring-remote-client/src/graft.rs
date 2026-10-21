@@ -19,11 +19,11 @@
 //! Three fds in one `poll(2)` loop: wayland (presentation + local input) and the
 //! network. Unlike serve mode there is no WM-IPC fd — graft never registers.
 
-use std::net::TcpStream;
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
 use memmap2::MmapMut;
+use shoestring_remote::transport::Stream;
 use shoestring_remote::{apply_tile, ClientMessage, ServerMessage};
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
@@ -251,9 +251,8 @@ pub fn run(cli: Cli, selector: String) -> Result<()> {
 
     // ---- Network handshake: Graft first, then await Ready ----
     tracing::info!(addr = %cli.connect, %selector, "connecting to remote server (graft)");
-    let mut stream = TcpStream::connect(&cli.connect)
+    let mut stream = Stream::connect(&cli.connect)
         .with_context(|| format!("connect to remote server {}", cli.connect))?;
-    stream.set_nodelay(true).ok();
     shoestring_remote::write_framed(
         &mut stream,
         &ClientMessage::Graft {

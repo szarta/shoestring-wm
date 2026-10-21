@@ -11,8 +11,8 @@
 //!
 //! ## Framing
 //!
-//! The transport is a single duplex byte stream (the ssh tunnel). Every
-//! message is length-prefixed:
+//! The transport is a single duplex byte stream: a Unix socket by default,
+//! forwarded over ssh (see [`transport`]). Every message is length-prefixed:
 //!
 //! ```text
 //! [ u32 little-endian payload length ][ payload bytes ]
@@ -40,6 +40,7 @@
 
 mod codec;
 mod message;
+pub mod transport;
 
 pub use codec::{apply_tile, encode_tile, extract_tiles};
 pub use message::{

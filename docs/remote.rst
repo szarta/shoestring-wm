@@ -84,25 +84,26 @@ Two standalone binaries plus WM-side plumbing. For the serve / headless case::
    beefy box (no physical display)            thin client (e.g. a Surface)
      shoestring-wm                              shoestring-wm
       ├─ headless backend                        └─ shoestring-remote-client
-      │    surfaceless EGL (GPU or llvmpipe)          ssh-tunnel ↔ server
+      │    surfaceless EGL (GPU or llvmpipe)          ssh socket forward ↔ server
       │    one virtual output, sized by client        decode tiles → fullscreen
       │    timer-driven render loop                   render remote cursor locally
       ├─ damage-capture subscription ─ tiles ─>       forward input while active
       ├─ remote gate + registration + chip       local WM: Super+J/K machine axis
       └─ shoestring-remote-server                       + raw-passthrough capture
-           opens ssh-tunneled listener
+           listens on a private Unix socket
            captures the virtual output, injects input
 
 ``shoestring-remote-server``
     Runs on the box being remoted *into*, added to the WM ``autostart``. A
     privileged IPC bridge: it ``register_remote_server``\ s with the local WM
-    (which makes the remote gate selectable), and while the gate is on it opens
-    an ssh-reachable listener, streams the served output's damage tiles
+    (which makes the remote gate selectable), and while the gate is on it listens
+    on a private Unix socket, streams the served output's damage tiles
     (``capture_stream``), and injects the client's input back through the WM.
     It reports the viewer count so the "being viewed" indicator lights.
 
 ``shoestring-remote-client``
-    Runs on the box you sit at. It ssh-tunnels to a server, decodes and presents
+    Runs on the box you sit at. It connects to a server's socket forwarded over
+    ssh, decodes and presents
     the tile stream as a fullscreen surface (reusing the wallpaper
     ``MemoryRenderBuffer`` path), renders the remote cursor locally, and
     forwards local input while the remote is the active view. It
@@ -164,10 +165,19 @@ The remote gate reuses the existing capability-gate model end to end:
 - A **"being viewed / controlled" indicator** lights while a client is connected
   - a bar chip alongside MUTE/MIC/CAM, the same privacy-opt-in pattern as the
   capture indicator: never silent, always visible.
-- **Transport is an ssh tunnel** - reuse existing keys and trust, no new auth
-  surface, matching the named-node workflow already in use. The server binds
-  loopback; a viewer reaches it over ``ssh -L`` (or, for a container, a
-  loopback-published port - see :doc:`containers`).
+- **ssh login is the authentication.** The server listens on a Unix socket in
+  ``$XDG_RUNTIME_DIR`` (mode 0600) and accepts a connection only from a process
+  running as the same user, checked with ``SO_PEERCRED`` / ``getpeereid``. A
+  viewer forwards that socket with ``ssh -L local.sock:remote.sock``, which
+  runs as the logged-in user, so reaching the session takes an ssh login as
+  that user. Other users on the served box can't connect, and the viewer's end
+  of the forward is a 0600 socket too, so other users there can't ride the
+  tunnel. No new keys or passwords, matching the named-node workflow. For a
+  container see :doc:`containers`.
+- **TCP is opt-in and unchecked.** ``--tcp ADDR:PORT`` (or
+  ``SHOESTRING_REMOTE_TCP``) listens on TCP instead. Nothing checks who connects
+  there: on loopback any local user, and on any other address any host that can
+  reach it, gets the session. The server warns at startup.
 
 Clipboard
 ---------

@@ -60,11 +60,11 @@ The container is the **served** side; you view and drive it from a real desktop
    │  shoestring-wm --backend headless         │
    │     ├─ apps (Wayland / XWayland clients)   │
    │     └─ IPC socket  (automation + observe)  │
-   │  shoestring-remote-server  ─ TCP :7355 ────┼──► ssh -L / published port
+   │  shoestring-remote-server ─ remote/*.sock ─┼──► bind-mounted socket dir
    └────────────────────────────────────────────┘
                                                      │
    ┌─ your desktop ──────────────────────────────────▼─┐
-   │  shoestring-remote-client --connect host:7355      │
+   │  shoestring-remote-client --connect <socket>       │
    │     → appears on the machine axis (Super+J/K)       │
    └─────────────────────────────────────────────────────┘
 
@@ -73,8 +73,9 @@ the compositor, waits for its IPC socket, lets the autostarted
 ``shoestring-remote-server`` register, and opens the remote gate with
 ``shoestring-ctl remote on`` (the server's listener stays closed until the gate
 is on - the same explicit, opt-in sharing gate described in :doc:`bindings`).
-From your desktop, ``shoestring-remote-client`` connects to the published port
-(directly or over an ``ssh -L`` tunnel), and the session joins your machine
+From your desktop, ``shoestring-remote-client`` connects to the server's Unix
+socket through a bind-mounted directory (or over ssh socket forwarding for a
+container on another host), and the session joins your machine
 axis: ``Super+J`` to view and drive it, ``Super+Escape`` to break back out.
 Clipboard moves between you and the container with ``Super+Shift+C`` /
 ``Super+Shift+V`` exactly as between two machines.
@@ -83,15 +84,41 @@ Build the image from the repository root, then run it (no GPU required)::
 
     podman build -t shoestring-wm-headless -f packaging/docker/Dockerfile .
 
-    podman run --rm -p 127.0.0.1:7355:7355 shoestring-wm-headless
+    mkdir -m 700 -p "$XDG_RUNTIME_DIR/sandbox"
+    podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+        -v "$XDG_RUNTIME_DIR/sandbox:/run/shoestring/remote:Z" \
+        shoestring-wm-headless
 
     # then, on your desktop:
-    shoestring-remote-client --connect 127.0.0.1:7355 --label sandbox
+    shoestring-remote-client \
+        --connect "$XDG_RUNTIME_DIR/sandbox/shoestring-remote.sock" --label sandbox
 
-Publishing to host loopback (``-p 127.0.0.1:7355:7355``) keeps the port off the
-network - reach a remote host's container with
-``ssh -L 7355:127.0.0.1:7355 host``. To use the host GPU, add
-``--device /dev/dri/renderD128 --group-add keep-groups``.
+To use the host GPU, add ``--device /dev/dri/renderD128 --group-add
+keep-groups``.
+
+Who can connect
+~~~~~~~~~~~~~~~
+
+The server accepts a connection only from a process running as the container
+user (uid 1000), and its socket is mode 0600 in a 0700 directory.
+``--userns=keep-id:uid=1000,gid=1000`` maps your host user to that uid, so you
+can connect and other host users can't. The bind mount carries only the
+``remote/`` directory, so the WM's own IPC socket stays inside the container.
+
+- ``:Z`` relabels the directory for SELinux; leave it off where SELinux isn't
+  in use.
+- With docker (no user namespace by default), the same mount works when your
+  host uid is 1000; otherwise the server refuses you.
+- For a container on another host, forward its socket over ssh::
+
+      ssh -N -L "$XDG_RUNTIME_DIR/box.sock:/run/user/<uid>/sandbox/shoestring-remote.sock" host
+      shoestring-remote-client --connect "$XDG_RUNTIME_DIR/box.sock" --label box
+
+TCP is still available with ``-e SHOESTRING_REMOTE_TCP=ADDR:PORT`` and ``-p``,
+but nothing checks who connects to it: every user on the host can reach a
+loopback-published port, and anything on the container network can reach
+``0.0.0.0``, and either gets the whole session. Use it only where every such
+user is trusted.
 
 GPU and CPU-only rendering
 --------------------------
@@ -112,9 +139,7 @@ a GPU box with ``-e SHOESTRING_WM_HEADLESS_SOFTWARE=1`` (add
 carry the Mesa software stack (``libgl1-mesa-dri`` / ``mesa-dri-drivers`` -
 which ships ``swrast``/``llvmpipe``) for the fallback to work.
 
-A GPU-less run is therefore just::
-
-    podman run --rm -p 127.0.0.1:7355:7355 shoestring-wm-headless
+A GPU-less run is therefore just the command above, with no ``--device``.
 
 The image carries the Mesa software stack, so this works out of the box.
 
@@ -155,5 +180,6 @@ gets its own disposable, observable, individually-viewable desktop. Pass the
 app's argv in ``$SHOESTRING_APP`` (or add it to the image's ``config.toml``
 ``autostart``)::
 
-    podman run --rm -p 127.0.0.1:7355:7355 \
+    podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+        -v "$XDG_RUNTIME_DIR/sandbox:/run/shoestring/remote:Z" \
         -e SHOESTRING_APP='alacritty' shoestring-wm-headless

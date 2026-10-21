@@ -28,13 +28,22 @@ pull-ins), `shoestring-remote-server`, `shoestring-ctl` — into a
 
 A GPU is **optional**.
 
-```sh
-# CPU-only (Mesa llvmpipe). Nothing special required.
-podman run --rm -p 127.0.0.1:7355:7355 shoestring-wm-headless
+The remote server listens on a Unix socket in `/run/shoestring/remote`.
+Bind-mount a private host directory there, and map your host user to the
+container user (uid 1000) so the server's uid check accepts you:
 
-# GPU-accelerated: pass a render node. --group-add keep-groups (podman) lets the
-# container user reach the host 'render' group; on docker use --group-add <gid>.
-podman run --rm -p 127.0.0.1:7355:7355 \
+```sh
+mkdir -m 700 -p "$XDG_RUNTIME_DIR/sandbox"
+
+# CPU-only (Mesa llvmpipe). Nothing special required.
+podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+    -v "$XDG_RUNTIME_DIR/sandbox:/run/shoestring/remote:Z" \
+    shoestring-wm-headless
+
+# GPU-accelerated: also pass a render node. --group-add keep-groups (podman)
+# lets the container user reach the host 'render' group.
+podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+    -v "$XDG_RUNTIME_DIR/sandbox:/run/shoestring/remote:Z" \
     --device /dev/dri/renderD128 --group-add keep-groups \
     shoestring-wm-headless
 ```
@@ -42,13 +51,22 @@ podman run --rm -p 127.0.0.1:7355:7355 \
 Then, from your desktop:
 
 ```sh
-shoestring-remote-client --connect 127.0.0.1:7355 --label sandbox
+shoestring-remote-client --connect "$XDG_RUNTIME_DIR/sandbox/shoestring-remote.sock" --label sandbox
 ```
 
-Publishing to host loopback (`-p 127.0.0.1:7355:7355`) keeps the port off the
-network; reach a remote host's container with `ssh -L 7355:127.0.0.1:7355 host`.
-The port only opens while the remote gate is on, and the gate couples the
+`:Z` relabels the directory for SELinux; leave it off where SELinux isn't in
+use. With docker (no user namespace by default), the same mount works when
+your host uid is 1000; otherwise the server refuses you. Reach a container on
+another host by forwarding its socket over ssh:
+`ssh -N -L "$XDG_RUNTIME_DIR/box.sock:/run/user/<uid>/sandbox/shoestring-remote.sock" host`.
+
+The socket only exists while the remote gate is on, and the gate couples the
 capture + automation gates — nothing is viewable or driveable until then.
+
+To use TCP instead, set `SHOESTRING_REMOTE_TCP` and publish the port, for
+example `-e SHOESTRING_REMOTE_TCP=0.0.0.0:7355 -p 127.0.0.1:7355:7355`. Nothing
+checks who connects over TCP: every user on the host can reach a
+loopback-published port and get the whole session.
 
 ## One app per container
 
@@ -56,7 +74,8 @@ The true per-app-isolation pattern: one app, one container. Pass its argv in
 `$SHOESTRING_APP`, or bake it into `config.toml`'s `autostart`.
 
 ```sh
-podman run --rm -p 127.0.0.1:7355:7355 \
+podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+    -v "$XDG_RUNTIME_DIR/sandbox:/run/shoestring/remote:Z" \
     -e SHOESTRING_APP='alacritty' shoestring-wm-headless
 ```
 
@@ -67,8 +86,8 @@ podman run --rm -p 127.0.0.1:7355:7355 \
 | `SHOESTRING_WM_HEADLESS_SIZE` | `1920x1080` | Virtual output size `WIDTHxHEIGHT`. |
 | `SHOESTRING_WM_RENDER_NODE` | auto | Render node to try; falls back to software if it can't be opened. |
 | `SHOESTRING_WM_HEADLESS_SOFTWARE` | unset | `1` forces the llvmpipe software path even with a GPU present. |
-| `SHOESTRING_REMOTE_BIND` | `0.0.0.0` | Listener bind address (0.0.0.0 so `-p` reaches it). |
-| `SHOESTRING_REMOTE_PORT` | `7355` | Listener port. |
+| `SHOESTRING_REMOTE_SOCKET` | `/run/shoestring/remote/shoestring-remote.sock` | The remote server's Unix socket. |
+| `SHOESTRING_REMOTE_TCP` | unset | `ADDR:PORT` to listen on TCP instead. Unchecked: anyone who can reach it gets the session. |
 | `SHOESTRING_REMOTE_ENABLE` | `1` | `0` starts gated-off; flip later with `podman exec … shoestring-ctl remote on`. |
 | `SHOESTRING_APP` | unset | Optional app argv to launch into the session. |
 | `SHOESTRING_WM_CONFIG` | `/etc/shoestring-wm/config.toml` | WM config path. |

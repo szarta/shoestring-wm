@@ -12,9 +12,11 @@
 # llvmpipe software rasterizer (slower, but real frames). See docs/containers.rst.
 #
 #   podman build -t shoestring-wm-headless -f packaging/docker/Dockerfile .
-#   podman run --rm -p 127.0.0.1:7355:7355 shoestring-wm-headless   # CPU-only
-#   podman run --rm -p 127.0.0.1:7355:7355 \
-#       --device /dev/dri/renderD128 --group-add keep-groups shoestring-wm-headless
+#   mkdir -m 700 -p "$XDG_RUNTIME_DIR/sandbox"
+#   podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+#       -v "$XDG_RUNTIME_DIR/sandbox:/run/shoestring/remote:Z" \
+#       shoestring-wm-headless                    # add --device ... for a GPU
+#   shoestring-remote-client --connect "$XDG_RUNTIME_DIR/sandbox/shoestring-remote.sock"
 
 # ---- build stage -------------------------------------------------------------
 FROM rust:1-bookworm AS build
@@ -76,15 +78,18 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 # IPC socket paths under the unix-socket length limit (~108 bytes). Render-node
 # access (when a GPU is passed through) needs the container user in the host's
 # 'render' group — use `--group-add keep-groups` (podman) or `--group-add <gid>`.
+#
+# The remote server listens on a Unix socket in /run/shoestring/remote, a
+# directory of its own so a host bind mount exposes only that socket, not the
+# WM's IPC socket. It accepts only the container user's uid (1000), so map your
+# host user to it: `--userns=keep-id:uid=1000,gid=1000` (podman).
 RUN useradd -m -u 1000 -U shoestring \
- && mkdir -p /run/shoestring \
- && chown shoestring:shoestring /run/shoestring \
- && chmod 700 /run/shoestring
+ && mkdir -p /run/shoestring/remote \
+ && chown -R shoestring:shoestring /run/shoestring \
+ && chmod 700 /run/shoestring /run/shoestring/remote
 USER shoestring
 
 ENV XDG_RUNTIME_DIR=/run/shoestring \
     SHOESTRING_WM_HEADLESS_SIZE=1920x1080 \
-    SHOESTRING_REMOTE_BIND=0.0.0.0 \
-    SHOESTRING_REMOTE_PORT=7355
-EXPOSE 7355
+    SHOESTRING_REMOTE_SOCKET=/run/shoestring/remote/shoestring-remote.sock
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

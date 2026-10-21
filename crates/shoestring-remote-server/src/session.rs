@@ -15,13 +15,14 @@
 //! as the frames thread reading a `Bye`/EOF, which then ends the session.
 
 use std::io::{BufReader, BufWriter, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use shoestring_ipc::RawInput;
+use shoestring_remote::transport::Stream;
 use shoestring_remote::{read_framed, write_framed, ClientMessage, ServerMessage};
 
 use crate::viewers::Viewers;
@@ -30,7 +31,7 @@ use crate::wm;
 /// Shutdown handles + a one-shot flag so the first loop to finish can unblock
 /// the other by closing both sockets.
 struct Teardown {
-    net: TcpStream,
+    net: Stream,
     wm_capture: UnixStream,
     done: AtomicBool,
 }
@@ -39,7 +40,7 @@ struct Teardown {
 /// Both write whole `ServerMessage` frames; the mutex makes each write+flush
 /// atomic so a clipboard reply can never interleave mid-frame with a capture
 /// frame on the wire.
-type SharedNet = Arc<Mutex<BufWriter<TcpStream>>>;
+type SharedNet = Arc<Mutex<BufWriter<Stream>>>;
 
 impl Teardown {
     fn stop(&self) {
@@ -51,14 +52,14 @@ impl Teardown {
 }
 
 /// Handle one accepted client connection start to finish. Blocks until the
-/// session ends; bumps the shared viewer count for its lifetime.
-pub fn serve(net: TcpStream, output: Option<String>, viewers: Arc<Viewers>) -> Result<()> {
-    let peer = net
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| "<unknown>".into());
-    net.set_nodelay(true).ok();
-
+/// session ends; bumps the shared viewer count for its lifetime. `peer` only
+/// labels the logs; the listener has already decided the peer may connect.
+pub fn serve(
+    net: Stream,
+    peer: String,
+    output: Option<String>,
+    viewers: Arc<Viewers>,
+) -> Result<()> {
     // The client's first message discriminates the mode:
     // - `Hello` → **serve mode**: stream a whole output. Hello carries the
     //   client's output size/scale (advisory today; the WM serves its own size).
@@ -148,7 +149,7 @@ fn forward_frames(wm_capture: UnixStream, net_out: SharedNet, teardown: &Teardow
 
 /// Read `ClientMessage`s and inject them into the WM until Bye/EOF/error.
 fn forward_input(
-    mut net_in: BufReader<TcpStream>,
+    mut net_in: BufReader<Stream>,
     net_out: SharedNet,
     teardown: &Teardown,
     graft_id: Option<String>,
