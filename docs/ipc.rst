@@ -36,6 +36,91 @@ The reference client (``shoestring-ctl``) and the bar both use the
 ``shoestring-ipc`` crate's ``client_socket_path()`` helper which
 implements this fallback.
 
+.. _ipc-trust-model:
+
+Trust model
+-----------
+
+**Any process that can connect to the socket is trusted with the whole
+session.** That is a deliberate design choice, recorded in
+``docs/adr/0005-ipc-socket-access-is-full-trust.md``. Every client may change
+every gate, so the gates are *consent* switches, not authorization.
+
+Who can connect
+    The socket is mode 0600 inside ``$XDG_RUNTIME_DIR``, which is normally
+    0700 and owned by you, so only processes running as your user can
+    connect. The WM logs a warning at startup if that directory is open to
+    anyone else. To keep a process out of the session, keep it away from the
+    socket: run it as another user, or in a container or sandbox without your
+    ``$XDG_RUNTIME_DIR``.
+
+What the gates are for
+    They keep capture, input synthesis, and remote access **off until someone
+    deliberately turns them on**, make that state visible (the bar's
+    indicators and the ``automation_changed`` / ``screen_capture_changed`` /
+    ``remote_changed`` events), and let it be turned off again. They are not a
+    defence against hostile code running as you, which can already read your
+    files, ``ptrace`` your processes, and synthesize input through the ungated
+    virtual-pointer and virtual-keyboard protocols (see below).
+
+Opening the gates for automation
+    A harness that starts its own session opens them at launch with
+    ``--enable-automation`` or ``[general].automation_enabled = true``.
+    In a running session, ``set_automation`` (``shoestring-ctl automation
+    on``) does the same. Automation also opens screen capture.
+
+What each state allows
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
+
+   * - State
+     - Effect
+   * - Automation off (default)
+     - Refused with ``automation disabled:``: ``inject_key``,
+       ``inject_text``, ``inject_click``, ``inject_click_to_window``,
+       ``drag``, ``move_mouse``, ``inject_input``,
+       ``inject_input_to_window``, ``get_clipboard``, ``set_clipboard``,
+       ``paste``, ``dispatch_action``, ``shutdown``, ``screenshot``,
+       ``screenshot_window``, ``get_pixel``, ``hash_region``,
+       ``run_command``.
+   * - Screen capture off (default)
+     - The ``zwlr_screencopy_manager_v1`` and ``ext-image-copy-capture``
+       globals are withdrawn from new clients and live sessions are stopped.
+       ``capture_stream`` and ``capture_window`` are refused with
+       ``screen capture disabled:``, and open streams end.
+   * - Remote off (default)
+     - ``shoestring-remote-server`` closes its listener, so its socket does
+       not exist and nothing can connect from another machine. See
+       :doc:`remote`.
+   * - Session locked
+     - Whole-output capture sees only the lock screen, and global input
+       (``inject_input``, ``inject_key``, ...) goes to the lock surface like
+       real input. ``capture_window``, ``screenshot_window`` and
+       ``inject_input_to_window`` are refused with ``session locked:``, and
+       open ``capture_window`` streams pause until unlock (see
+       :ref:`ipc-session-lock`). ``get_clipboard`` and the window-list
+       queries keep working.
+   * - Always available on the socket
+     - Every read-only query (``workspaces``, ``windows``, ``get_tree``,
+       ``find_windows``, ``outputs``, ``inputs``, ``pointer_position``,
+       ``metrics``, ``media_status``, the status requests, ``event_stream``,
+       ``metrics_stream``), window management (focus, close, kill, raise,
+       lower, ``set_view``, ``pick_window``), ``lock``, ``reload_config``,
+       audio and mic mute, gamma, the remote registrations, and the gate
+       switches themselves. ``quit``, ``power_off``, ``reboot`` and
+       ``suspend`` are accepted but act only after the user confirms a
+       dialog.
+   * - Always available to every Wayland client
+     - ``zwlr_virtual_pointer_v1`` and ``zwp_virtual_keyboard_v1`` (pointer
+       and key synthesis, ungated so wlrctl, ydotool and input methods work),
+       the foreign-toplevel list (every window's title and app id), and
+       ``zwlr_foreign_toplevel_management_v1`` (activate, close, minimize or
+       maximize any window, as taskbars do). ``zwlr_data_control_manager_v1`` (reading the clipboard without focus)
+       is advertised only with ``[clipboard] data_control = true``.
+
 .. _ipc-client-libraries:
 
 Client libraries
@@ -667,12 +752,14 @@ Injected key and click events bypass the WM's binding table - a scripted
 Automation gate
 ~~~~~~~~~~~~~~~
 
-The following requests refuse with an ``error`` while
-``[general].automation_enabled`` is off (and the CLI flag
+The automation gate is a consent switch, not authorization: any socket
+client may turn it on (see :ref:`ipc-trust-model`). The following requests
+refuse with an ``error`` while ``[general].automation_enabled`` is off (and the CLI flag
 ``--enable-automation`` / the IPC ``set_automation`` have not flipped
 it): ``inject_key``, ``inject_text``, ``inject_click``,
 ``inject_click_to_window``, ``drag``, ``move_mouse``,
-``inject_input``, ``get_clipboard``, ``set_clipboard``, ``paste``,
+``inject_input``, ``inject_input_to_window``, ``get_clipboard``,
+``set_clipboard``, ``paste``,
 ``dispatch_action``, ``shutdown``,
 ``screenshot``, ``screenshot_window``, ``get_pixel``, ``hash_region``,
 ``run_command``. The error message

@@ -234,6 +234,13 @@ impl Server {
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)
             .with_context(|| format!("bind {}", socket_path.display()))?;
+        // Reaching this socket is full control of the session (docs/adr/0005),
+        // so only our uid may connect. The private runtime directory is the
+        // first barrier; the socket's own mode is the second.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict {}", socket_path.display()))?;
+        warn_if_shared_dir(&socket_path);
         listener.set_nonblocking(true)?;
 
         let source = Generic::new(listener, Interest::READ, Mode::Level);
@@ -382,6 +389,30 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
 /// connection that sends more without a newline is answered with an error and
 /// dropped, rather than buffered without end.
 const MAX_REQUEST_LEN: usize = 256 * 1024 * 1024;
+
+/// Warn when the socket's directory lets other users in: then the socket's
+/// 0600 mode is the only thing keeping them from controlling the session.
+/// `$XDG_RUNTIME_DIR` is normally 0700 and ours.
+fn warn_if_shared_dir(socket_path: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Some(dir) = socket_path.parent() else {
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(dir) else {
+        return;
+    };
+    // SAFETY: geteuid has no failure mode.
+    let ours = unsafe { libc::geteuid() };
+    if meta.uid() != ours || meta.mode() & 0o077 != 0 {
+        tracing::warn!(
+            dir = %dir.display(),
+            mode = format!("{:o}", meta.mode() & 0o7777),
+            owner = meta.uid(),
+            "IPC socket directory is not private to this user; anyone who can connect \
+             to the socket controls the session"
+        );
+    }
+}
 
 /// With no complete line buffered: if the partial one is already over
 /// [`MAX_REQUEST_LEN`], answer with an error and return `true` (drop the
@@ -1393,6 +1424,13 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     let _ = write_response(client, &automation_off_error());
                     return true;
                 }
+                // Targeting a window moves keyboard focus to it, which would
+                // take it off the lock surface. While locked, only the locker
+                // gets input; global `inject_input` still reaches it.
+                if state.is_locked() {
+                    let _ = write_response(client, &session_locked_error("inject_input_to_window"));
+                    return true;
+                }
                 let resp = match state.inject_input_to_window(&ft_id, event) {
                     Ok(()) => Response::Ok,
                     Err(message) => Response::Error { message },
@@ -1538,11 +1576,12 @@ fn capture_off_error() -> Response {
     }
 }
 
-/// Refusal for the per-window capture requests while a session lock is held.
-/// Whole-output capture needs no such check — it renders the locked scene — but
-/// `capture_window` / `screenshot_window` render the app's surface tree
-/// directly, which would show it through the lock. The `session locked:` prefix
-/// is stable for scripts, like the gate errors above.
+/// Refusal for the requests that would reach past a session lock to one
+/// window. Whole-output capture and global input need no such check, since
+/// they meet the locked scene and the lock surface's focus. But
+/// `capture_window` / `screenshot_window` render the app's own surface tree,
+/// and `inject_input_to_window` moves keyboard focus to the app. The
+/// `session locked:` prefix is stable for scripts, like the gate errors above.
 pub(crate) fn session_locked_error(request: &str) -> Response {
     Response::Error {
         message: format!("session locked: {request} is refused while the session is locked"),

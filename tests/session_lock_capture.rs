@@ -4,7 +4,9 @@
 //! and `screenshot_window` render an app's own surface tree offscreen. While an
 //! `ext-session-lock-v1` lock is held, the WM must therefore pause graft streams
 //! (no frames, subscription kept) and refuse new per-window captures with a
-//! `session locked:` error, then resume the stream on unlock.
+//! `session locked:` error, then resume the stream on unlock. Input aimed at
+//! one window is refused the same way, since it would move keyboard focus off
+//! the lock surface.
 //!
 //! The test maps a toplevel, opens a graft stream on it, takes the lock itself
 //! (lock surfaces on every output), checks the refusals and the pause, unlocks,
@@ -478,6 +480,11 @@ fn window_capture_pauses_and_refuses_while_locked() {
 
     let shot_locked = ipc(json!({"type": "screenshot_window", "id": id, "path": shot_path}));
     let graft_locked = ipc(json!({"type": "capture_window", "id": id}));
+    let input_locked = ipc(json!({
+        "type": "inject_input_to_window",
+        "id": id,
+        "event": {"kind": "motion", "x": 1.0, "y": 1.0},
+    }));
     let _ = std::fs::remove_file(&shot_path);
 
     // Unlock before asserting, so a failure doesn't leave the session locked.
@@ -494,6 +501,7 @@ fn window_capture_pauses_and_refuses_while_locked() {
     );
     assert_session_locked(&shot_locked, "screenshot_window");
     assert_session_locked(&graft_locked, "capture_window");
+    assert_session_locked(&input_locked, "inject_input_to_window");
 
     // The paused stream resumes with the change committed during the lock.
     assert!(

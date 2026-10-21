@@ -35,9 +35,11 @@ erodes one of these should be treated as a regression, not a feature:
    driven over a socket. This is what lets the WM (and the apps inside it)
    be tested and automated.
 4. **Opt-in for anything invasive.** Screen capture, input automation, and
-   idle tracking default *off* and are discoverable only when enabled, so a
-   normal session cannot be observed or poked by anything that reaches a
-   socket (§11).
+   idle tracking default *off* and are discoverable only when enabled, so
+   nothing is observed or driven until someone deliberately turns it on. The
+   gates are consent, not authorization: a process that can reach the IPC
+   socket is trusted with the whole session, including the gates (§11,
+   ADR 0005).
 5. **Portable & systemd-optional.** Linux is the primary target, but every
    OS touchpoint degrades to a no-op when its facility is absent, so
    non-systemd Linux and the BSDs stay first-class.
@@ -532,7 +534,7 @@ revisited deliberately rather than by accident:
 | **`serde`-only anchor crates** | Companions deserialize WM wire/config types without linking smithay. |
 | **Monorepo for siblings** | Bar/menu/notify build with `--workspace`; one version, one CI. They stay separate processes (the bar stays IPC-coupled on purpose). |
 | **Backend chosen at startup, no trait** | Only two backends (winit dev, udev session); a trait/enum on the hot path would be overhead for no reuse. |
-| **Capability gates default-off, runtime-only** | Capture/automation cannot be enabled by anything that merely reaches a socket; the config file remains the source of truth. |
+| **Capability gates default-off, runtime-only** | Capture/automation stay off until deliberately enabled, and a runtime flip doesn't survive a restart: the config file remains the source of truth. The gates are consent switches, not authorization; any IPC client may flip them (ADR 0005, `docs/ipc.rst` "Trust model"). |
 | **Compositor-initiated move/resize** | Openbox-style Super+drag, not client-initiated xdg-shell requests. |
 | **Click-to-focus default** | Focus model is configurable (focus-follows-mouse / sloppy opt-in); click-to-focus is the safe default. |
 | **Pinned smithay rev, never forked** | Smithay is pre-1.0 and churns; we bump intentionally. Spec-correct-but-failing conformance cases are upstream's, tracked as known-xfail (§13). |

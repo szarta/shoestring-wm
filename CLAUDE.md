@@ -36,8 +36,10 @@ shoestring-ctl event-stream        # tail events (blocks; one JSON/line)
 ## The automation gate
 
 Input synthesis and capture are gated behind a runtime **automation
-gate** so a normal desktop session can't be poked by anything that
-reaches the socket. These requests refuse with a stable
+gate**, so nothing is driven or captured until someone turns it on. The
+gate is consent, not authorization: any IPC client may flip it, and only
+the user's own processes can reach the socket (ADR 0005, and "Trust
+model" in `docs/ipc.rst`). These requests refuse with a stable
 `automation disabled: ...` error while the gate is off:
 `inject_key`/`type`/`click`, `move_mouse`, `dispatch_action`,
 `screenshot`, `run_command`.

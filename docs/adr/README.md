@@ -38,3 +38,5 @@ Each file has:
   version](0003-every-workspace-crate-shares-the-workspace-version.md)
 - [0004: Replace a small dependency instead of vendoring
   it](0004-replace-a-small-dependency-instead-of-vendoring.md)
+- [0005: Reaching the IPC socket is full trust; the gates are consent,
+  not authorization](0005-ipc-socket-access-is-full-trust.md)

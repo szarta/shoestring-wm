@@ -218,8 +218,10 @@ shoestring-ctl event-stream    # tail live events (one JSON object per line)
 Read-only queries are always available. Input synthesis and capture
 (`inject_key`/`type`/`click`, `move_mouse`, `screenshot`, `run_command`,
 `dispatch_action`) sit behind a runtime **automation gate** that is off by
-default, so a normal session cannot be poked by anything that reaches the
-socket. Flip it for the session when you need it:
+default, so nothing is driven or captured until you turn it on. The gate is
+consent, not authorization: any IPC client may flip it, and only your own
+processes can reach the socket (see the "Trust model" section of
+`docs/ipc.rst`). Flip it for the session when you need it:
 
 ```sh
 shoestring-ctl automation on
