@@ -12,6 +12,13 @@
 //! overlay it is a real scene element, so it composites identically into
 //! screenshots and screencasts.
 //!
+//! A background with no image (or one that failed to load) needs no element at
+//! all: the clear color already paints it. Drawing it anyway would re-texture
+//! and blend every damaged pixel a second time, which on the software
+//! renderer cost more than the windows above it. An image canvas whose fill
+//! color is opaque is marked opaque, so the renderer doesn't also clear under
+//! it.
+//!
 //! Each output resolves its own background (`[background]` with any
 //! `[outputs.<name>.background]` override laid over it), so monitors can show
 //! different wallpapers. The composited canvas is cached per output and only
@@ -57,7 +64,8 @@ struct CanvasKey {
 /// no-change frame reuses it instead of re-compositing.
 struct Canvas {
     key: CanvasKey,
-    buffer: MemoryRenderBuffer,
+    /// `None` when there is no image to show: the clear color covers it.
+    buffer: Option<MemoryRenderBuffer>,
 }
 
 /// Per-WM wallpaper state: one composited canvas per output (keyed by connector
@@ -115,15 +123,24 @@ impl Wallpaper {
             self.sources[path].as_ref()
         });
 
-        let canvas = compose(key.color, cfg.mode, source, phys);
-        let buffer = MemoryRenderBuffer::from_slice(
-            &canvas,
-            Fourcc::Argb8888,
-            phys,
-            1,
-            Transform::Normal,
-            None,
-        );
+        let buffer = source.map(|img| {
+            let canvas = compose(key.color, cfg.mode, Some(img), phys);
+            // The color fill covers the whole canvas, so an opaque color
+            // makes the whole canvas opaque.
+            let opaque = (key.color[3] == 255).then(|| {
+                vec![Rectangle::from_size(
+                    Size::<i32, smithay::utils::Buffer>::from(phys),
+                )]
+            });
+            MemoryRenderBuffer::from_slice(
+                &canvas,
+                Fourcc::Argb8888,
+                phys,
+                1,
+                Transform::Normal,
+                opaque,
+            )
+        });
         self.canvases
             .insert(output.to_owned(), Canvas { key, buffer });
     }
@@ -147,7 +164,7 @@ impl Wallpaper {
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             Point::<i32, Physical>::from((0, 0)).to_f64(),
-            &canvas.buffer,
+            canvas.buffer.as_ref()?,
             None,
             Some(whole_buffer_src(canvas.key.phys)),
             Some(logical),
@@ -432,6 +449,21 @@ mod tests {
         wp.ensure("DP-2", &bg("#0000ff"), (4, 4));
         assert_eq!(wp.canvases["DP-1"].key.color, [255, 0, 0, 255]);
         assert_eq!(wp.canvases["DP-2"].key.color, [0, 0, 255, 255]);
+    }
+
+    /// Without a usable image there is nothing to draw over the clear color:
+    /// no canvas buffer, so no element.
+    #[test]
+    fn colour_only_background_builds_no_buffer() {
+        let mut wp = Wallpaper::default();
+        wp.ensure("DP-1", &Background::default(), (4, 4));
+        assert!(wp.canvases["DP-1"].buffer.is_none());
+        let missing = Background {
+            image: Some("/nonexistent/shoestring-wallpaper.png".into()),
+            ..Background::default()
+        };
+        wp.ensure("DP-2", &missing, (4, 4));
+        assert!(wp.canvases["DP-2"].buffer.is_none());
     }
 
     #[test]
