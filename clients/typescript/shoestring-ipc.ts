@@ -238,6 +238,14 @@ export class Client {
     return this.request(req);
   }
 
+  /**
+   * Describe the WM: version, backend, lock state, gates, and the request
+   * types it understands (the `requests` list).
+   */
+  serverInfo(): Promise<Message> {
+    return this.request({ type: "server_info" });
+  }
+
   /** Read the automation-gate state without changing it. */
   automationStatus(): Promise<Message> {
     return this.request({ type: "automation_status" });

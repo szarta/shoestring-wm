@@ -230,6 +230,11 @@ fn main() -> Result<()> {
         }
     });
     tracing::info!(?backend, "starting backend");
+    state.backend_name = match backend {
+        BackendKind::Winit => "winit",
+        BackendKind::Tty => "tty",
+        BackendKind::Headless => "headless",
+    };
 
     // Only the real session compositor (TTY/udev) integrates with the
     // surrounding session. The nested winit backend runs inside another

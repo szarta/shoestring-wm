@@ -158,16 +158,21 @@ pre-1.0: no breaking change has been made since the protocol shipped in
 contractually frozen at 1.0. From 1.0 onward the wire format follows
 semver - breaking changes ride a major bump.
 
-There is **no in-band protocol version** field and no ``version``
-request. The single reference point is the WM/CLI version, which tracks
-the workspace ``Cargo.toml`` version::
+There is no separate protocol version number: the reference point is the
+WM's own version, which tracks the workspace ``Cargo.toml`` version. Ask the
+running WM with ``server_info``, which also lists every request ``type`` it
+understands, so a client can check for a request by name instead of guessing
+from versions. That works even when the client is older or newer than the WM,
+or talks to a WM on another machine::
 
-    $ shoestring-ctl --version
-    shoestring-ctl 0.4.0
+    $ shoestring-ctl server-info
+    {"type":"server_info","version":"0.8.0","backend":"headless","locked":false,
+     "gates":{"automation":false,"screen_capture":false,"remote":false,
+              "remote_server_available":false},"requests":["workspaces",...]}
 
-A client that needs to know whether a newer request or field exists
-should key off that version, or simply issue the request and handle a
-possible ``error`` reply.
+``shoestring-ctl --version`` reports only the CLI's own version. A WM older
+than ``server_info`` answers it with an ``error``; such a client can still just
+issue a request and handle a possible ``error`` reply.
 
 Compatibility rules
 ~~~~~~~~~~~~~~~~~~~~
@@ -613,6 +618,10 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "remote_status"}``
      - Read the remote-gate state without changing it. Reply is ``remote``
        (``enabled`` / ``server_available`` / ``viewers``). Read-only, not gated.
+   * - ``{"type": "server_info"}``
+     - Describe the running WM: version, active backend, lock state, every
+       gate, and the request types it understands. Reply is ``server_info``.
+       Read-only, not gated. See :ref:`ipc-stability`.
    * - ``{"type": "report_remote_viewers", "viewers": 2}``
      - Report the number of connected viewers/controllers. Sent by the
        ``shoestring-remote-server`` as clients connect and leave; the WM caches
@@ -846,6 +855,17 @@ The server replies with a single JSON object tagged by ``type``:
     <bool>, "camera_active": <bool>}}``. Returned for ``media_status``.
     ``state`` is omitted (``null``) when no ``shoestring-mediad`` monitor
     has reported yet — distinct from "reported, all false".
+
+``server_info``
+    ``{"type": "server_info", "version": <string>, "backend": <string>,
+    "locked": <bool>, "gates": {"automation": <bool>, "screen_capture":
+    <bool>, "remote": <bool>, "remote_server_available": <bool>},
+    "requests": [<string>, ...]}``. Returned for ``server_info``. ``version``
+    is the WM's version; ``backend`` is ``tty``, ``winit`` or ``headless``
+    (``wlcs`` inside the conformance harness); ``locked`` is whether an
+    ``ext-session-lock-v1`` lock is held; ``gates`` mirrors the three status
+    requests; ``requests`` lists every request ``type`` the WM understands, in
+    declaration order.
 
 ``remote``
     ``{"type": "remote", "enabled": <bool>, "server_available": <bool>,
@@ -1433,6 +1453,18 @@ version (``shoestring-ctl --version``). Per the :ref:`stability policy
 <ipc-stability>` every entry below is an *additive* change - nothing has
 been renamed, removed, or repurposed since 0.1.0 - so a client written
 against any prior version still works against a newer WM.
+
+Unreleased
+~~~~~~~~~~
+
+- ``server_info`` request + response: the running WM's version, backend,
+  lock state, gate states, and every request ``type`` it understands. The
+  in-band way to check what a WM supports.
+- Errors with a ``session locked:`` prefix from ``capture_window``,
+  ``screenshot_window`` and ``inject_input_to_window`` while the session is
+  locked; open ``capture_window`` streams pause until unlock.
+- An ``error`` starting ``request too large`` for a request line over
+  256 MiB.
 
 0.7.0
 ~~~~~

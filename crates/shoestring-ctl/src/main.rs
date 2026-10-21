@@ -37,6 +37,10 @@ struct Cli {
 enum Command {
     /// Print the active workspace and total workspace count.
     Workspaces,
+    /// Describe the running WM: version, backend, lock state, every gate's
+    /// state, and the request types it understands. Read-only and never
+    /// gated; use it to check what a (possibly older or newer) WM supports.
+    ServerInfo,
     /// List every mapped window with title, app_id, workspace, focused flag.
     Windows,
     /// List windows whose title and/or app_id match the given regexes.
@@ -712,6 +716,7 @@ fn main() -> Result<()> {
             Request::HashRegion { output, region }
         }
         Command::Lock => Request::Lock,
+        Command::ServerInfo => Request::ServerInfo,
         Command::Shutdown => Request::Shutdown,
         Command::Automation { action } => match action {
             AutomationAction::On => Request::SetAutomation { enabled: true },

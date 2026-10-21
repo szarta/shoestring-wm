@@ -332,6 +332,10 @@ pub struct ShoestringWm {
     /// enqueuing a request nothing will ever service. Set by the backend at
     /// init.
     pub window_capture_supported: bool,
+    /// The active backend's name as `server_info` reports it: `tty`, `winit`
+    /// or `headless`, set by `main` once it picks one. A WM built with
+    /// [`Self::new_headless`] for the WLCS harness reports `wlcs`.
+    pub backend_name: &'static str,
     /// Whether the active backend services the `get_pixel` / `hash_region`
     /// output probes — winit and headless only. udev can't: its probes would
     /// need the output's render elements, which are built from a renderer
@@ -892,6 +896,7 @@ impl ShoestringWm {
             last_pointer_focus: None,
             ipc: None,
             window_capture_supported: false,
+            backend_name: "wlcs",
             output_probe_supported: false,
             window_capture_pass_scheduled: false,
             pending_window_screenshots: Vec::new(),

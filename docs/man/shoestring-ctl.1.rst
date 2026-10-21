@@ -26,6 +26,13 @@ Toggle the gate with ``shoestring-ctl automation on``.
 Query subcommands
 -----------------
 
+**server-info**
+    Describe the running WM: ``version``, ``backend`` (``tty``,
+    ``winit`` or ``headless``), ``locked``, the ``gates`` (automation,
+    screen capture, remote, and whether a remote server has registered),
+    and ``requests``, every request type it understands. Use it to check
+    what a WM supports before relying on a request. Not gated.
+
 **workspaces**
     Print the active workspace, total workspace count, and per-slot
     names.

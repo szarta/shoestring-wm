@@ -203,6 +203,11 @@ class Client:
             req["app_id"] = app_id
         return self.request(req)
 
+    def server_info(self) -> dict[str, Any]:
+        """Describe the WM: version, backend, lock state, gates, and the
+        request types it understands (check ``"name" in info["requests"]``)."""
+        return self.request({"type": "server_info"})
+
     def automation_status(self) -> dict[str, Any]:
         """Read the automation-gate state without changing it."""
         return self.request({"type": "automation_status"})

@@ -204,6 +204,12 @@ func (c *Client) FindWindows(title, appID string) (map[string]any, error) {
 	return c.Request(req)
 }
 
+// ServerInfo describes the WM: version, backend, lock state, gates, and the
+// request types it understands (the "requests" list).
+func (c *Client) ServerInfo() (map[string]any, error) {
+	return c.Request(map[string]any{"type": "server_info"})
+}
+
 // AutomationStatus reads the automation-gate state without changing it.
 func (c *Client) AutomationStatus() (map[string]any, error) {
 	return c.Request(map[string]any{"type": "automation_status"})

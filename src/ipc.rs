@@ -641,6 +641,25 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                 }
                 return true;
             }
+            Request::ServerInfo => {
+                let resp = Response::ServerInfo {
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    backend: state.backend_name.into(),
+                    locked: state.is_locked(),
+                    gates: shoestring_ipc::GateStates {
+                        automation: state.automation_enabled,
+                        screen_capture: state.screen_capture_enabled,
+                        remote: state.remote_enabled,
+                        remote_server_available: state.remote_server.is_some(),
+                    },
+                    requests: shoestring_ipc::REQUEST_TYPES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                };
+                let _ = write_response(client, &resp);
+                return true;
+            }
             Request::AutomationStatus => {
                 let _ = write_response(
                     client,

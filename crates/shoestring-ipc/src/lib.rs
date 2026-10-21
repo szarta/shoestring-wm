@@ -311,6 +311,12 @@ pub enum Request {
     /// whether a server has registered, and the current viewer count. Reply is
     /// [`Response::Remote`].
     RemoteStatus,
+    /// Describe the running compositor: its version, active backend, whether
+    /// the session is locked, every gate's state, and the request types it
+    /// understands. The in-band answer to "what does this server support?",
+    /// for a client that may be newer or older than the WM, or on another
+    /// machine. Read-only and never gated. Reply is [`Response::ServerInfo`].
+    ServerInfo,
     /// Report the number of connected remote viewers/controllers. Sent by the
     /// registered `shoestring-remote-server` as clients connect and disconnect.
     /// The WM caches it and broadcasts [`Event::RemoteChanged`] so the bar can
@@ -876,6 +882,92 @@ pub struct MachineEntry {
     pub label: String,
 }
 
+/// Every [`Request`] `type`, in declaration order: what [`Response::ServerInfo`]
+/// reports as supported. A test checks it against the enum, so adding a
+/// request without listing it here fails the build's tests.
+pub const REQUEST_TYPES: &[&str] = &[
+    "workspaces",
+    "windows",
+    "outputs",
+    "inputs",
+    "get_tree",
+    "event_stream",
+    "inject_key",
+    "inject_text",
+    "inject_click",
+    "inject_click_to_window",
+    "drag",
+    "move_mouse",
+    "inject_input",
+    "get_clipboard",
+    "set_clipboard",
+    "paste",
+    "pointer_position",
+    "lock",
+    "quit",
+    "power_off",
+    "reboot",
+    "suspend",
+    "shutdown",
+    "set_automation",
+    "automation_status",
+    "set_screen_capture",
+    "screen_capture_status",
+    "register_remote_server",
+    "set_remote",
+    "remote_status",
+    "server_info",
+    "report_remote_viewers",
+    "register_remote_client",
+    "remote_client_status",
+    "set_view",
+    "screenshot",
+    "screenshot_window",
+    "run_command",
+    "reload_config",
+    "pick_window",
+    "close_window",
+    "kill_window",
+    "focus_window",
+    "raise_window",
+    "lower_window",
+    "set_window_sticky",
+    "set_window_always_on_top",
+    "set_window_name",
+    "move_window_to_workspace",
+    "set_window_minimized",
+    "set_window_maximized",
+    "dispatch_action",
+    "find_windows",
+    "metrics",
+    "metrics_stream",
+    "capture_stream",
+    "capture_window",
+    "inject_input_to_window",
+    "set_gamma",
+    "reset_gamma",
+    "media_status",
+    "set_audio_mute",
+    "set_mic_mute",
+    "report_media",
+    "wait_window",
+    "wait_ready",
+    "get_pixel",
+    "hash_region",
+];
+
+/// The runtime gates, as reported by [`Response::ServerInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateStates {
+    pub automation: bool,
+    pub screen_capture: bool,
+    /// The remote gate itself.
+    pub remote: bool,
+    /// Whether a `shoestring-remote-server` has registered, which the remote
+    /// gate needs before it can be turned on.
+    pub remote_server_available: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
@@ -940,6 +1032,22 @@ pub enum Response {
         enabled: bool,
         server_available: bool,
         viewers: u32,
+    },
+    /// Returned for [`Request::ServerInfo`].
+    ServerInfo {
+        /// The WM's version (its `Cargo.toml` version, e.g. `0.8.0`).
+        version: String,
+        /// The active backend: `tty`, `winit` or `headless` (`wlcs` inside
+        /// the conformance harness).
+        backend: String,
+        /// `true` while an `ext-session-lock-v1` lock is held.
+        locked: bool,
+        /// The runtime gates, as `automation_status` / `screen_capture_status`
+        /// / `remote_status` would report them.
+        gates: GateStates,
+        /// Every request `type` this server understands, in declaration order.
+        /// A client checks for a name here instead of guessing from versions.
+        requests: Vec<String>,
     },
     /// Machine-axis state. Returned for [`Request::RegisterRemoteClient`],
     /// [`Request::RemoteClientStatus`], and [`Request::SetView`]. `machines`
@@ -1443,6 +1551,52 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_types_lists_every_request_variant() {
+        // serde names every variant it accepts when the tag is unknown, so this
+        // is the enum's own list, in declaration order.
+        let err = serde_json::from_str::<Request>(r#"{"type":"__no_such_request__"}"#)
+            .unwrap_err()
+            .to_string();
+        let expected = err
+            .split_once("expected one of")
+            .expect("serde's unknown-variant message lists the variants")
+            .1;
+        let from_serde: Vec<&str> = expected.split('`').skip(1).step_by(2).collect();
+        assert_eq!(REQUEST_TYPES, from_serde.as_slice());
+    }
+
+    #[test]
+    fn server_info_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Request::ServerInfo).unwrap(),
+            r#"{"type":"server_info"}"#
+        );
+        let info = Response::ServerInfo {
+            version: "0.8.0".into(),
+            backend: "headless".into(),
+            locked: false,
+            gates: GateStates {
+                automation: true,
+                screen_capture: true,
+                remote: false,
+                remote_server_available: false,
+            },
+            requests: REQUEST_TYPES.iter().map(|s| s.to_string()).collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["type"], "server_info");
+        assert_eq!(v["backend"], "headless");
+        assert_eq!(v["gates"]["screen_capture"], true);
+        assert!(v["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "server_info"));
+        let back: Response = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, Response::ServerInfo { locked: false, .. }));
+    }
 
     #[test]
     fn request_roundtrips() {
