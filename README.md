@@ -141,6 +141,9 @@ make -C docs lint
 - [IPC](docs/ipc.rst) - protocol, types, and example clients.
 - [Portals](docs/portals.rst) - screen sharing (Zoom/browsers), the native
   ScreenCast/Screenshot backend, and backend-routing setup.
+- [Remote desktop](docs/remote.rst) - serve/graft/mirror modes, the
+  machine-axis UX, and the streaming design.
+- [Containers](docs/containers.rst) - the GPU-optional headless Docker image.
 - [Architecture](docs/architecture.md) - source-level design notes.
 - [Portability](docs/PORTABILITY.md) - Linux-ism audit + FreeBSD status.
 
@@ -176,6 +179,31 @@ Working today:
   `set_automation` gate, hot-reload trigger.
 - Modal confirm dialog primitive (`shoestring-confirm`); wraps `Quit` today.
 - Action helper scripts (volume, brightness, logout) wired to XF86 keys.
+
+## Headless, GPU-optional
+
+`shoestring-wm --backend headless` runs the full compositor with no
+physical display and, notably, **no GPU requirement**: with a render node
+(`/dev/dri/renderD*`) it uses GBM/EGL as normal; without one it falls back
+automatically to a surfaceless EGL platform backed by Mesa's **llvmpipe**
+software rasterizer, producing real, capturable frames either way (the
+compositing and capture/stream path is byte-identical between the two —
+see `docs/running.rst`). This is the foundation for remote-desktop *serve
+mode* (`docs/remote.rst`) and ships today as a 325 MB, GPU-optional Docker
+image — `docker run` with no `--device` needed (`docs/containers.rst`).
+
+Some context on where this sits relative to comparable projects: wlroots
+compositors (Sway, River, Hyprland) have had a mature no-GPU option for
+years via `WLR_RENDERER=pixman`, so "Wayland without a GPU" isn't new to
+the ecosystem at large. Among shoestring-wm's closer peers — other
+Rust/Smithay compositors — it's less settled: niri's headless-output
+support is still described by its own maintainers as under active
+development, and cosmic-comp ships no no-GPU fallback today (there's an
+open upstream issue asking for exactly this, since components like
+cosmic-panel currently fail hard without EGL/GBM). A shipped,
+container-verified, GPU-optional headless backend is a genuine
+differentiator in that narrower group, if not in the Wayland compositor
+landscape as a whole.
 
 ## Roadmap
 
