@@ -109,12 +109,20 @@ struct State {
 }
 
 impl State {
-    fn resize_fb(&mut self, w: u32, h: u32, scale: f64) {
+    /// (Re)allocate `fb` for the remote window's pixel size and scale. Both
+    /// come from the server, so they are checked against the protocol's limits
+    /// before anything is allocated.
+    fn resize_fb(&mut self, w: u32, h: u32, scale: f64) -> Result<()> {
+        let len = shoestring_remote::framebuffer_len(w, h)
+            .map_err(|e| anyhow::anyhow!("server sent {e}"))?;
+        let scale = shoestring_remote::check_scale(scale)
+            .map_err(|e| anyhow::anyhow!("server sent {e}"))?;
         self.fb_w = w;
         self.fb_h = h;
-        self.remote_scale = if scale > 0.0 { scale } else { 1.0 };
-        self.fb = vec![0u8; w as usize * h as usize * 4];
+        self.remote_scale = scale;
+        self.fb = vec![0u8; len];
         self.dirty = true;
+        Ok(())
     }
 
     /// Present the current frame scaled to the toplevel via the viewport.
@@ -280,7 +288,7 @@ pub fn run(cli: Cli, selector: String) -> Result<()> {
         }
     };
     tracing::info!(rw, rh, rscale, "remote window ready");
-    state.resize_fb(rw, rh, rscale);
+    state.resize_fb(rw, rh, rscale)?;
 
     // ---- Create the local toplevel now that we know the window ----
     let surface = state.compositor.create_surface(&qh, ());
@@ -428,7 +436,7 @@ fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
                 ..
             } => {
                 if (width, height) != (state.fb_w, state.fb_h) {
-                    state.resize_fb(width, height, scale);
+                    state.resize_fb(width, height, scale)?;
                 }
             }
             ServerMessage::Frame { seq, tiles } => {
@@ -458,7 +466,7 @@ fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
                 scale,
             } => {
                 tracing::info!(width, height, scale, "remote window resized");
-                state.resize_fb(width, height, scale);
+                state.resize_fb(width, height, scale)?;
             }
             // Graft draws the local cursor over the toplevel naturally; the
             // structural remote cursor is ignored (a v1 simplification).

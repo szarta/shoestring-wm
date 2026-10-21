@@ -76,6 +76,15 @@ impl Stream {
         }
     }
 
+    /// Bound how long a blocking read waits (`None`: forever). Applies to the
+    /// socket, so every clone of this stream shares it.
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        match self {
+            Stream::Unix(s) => s.set_read_timeout(timeout),
+            Stream::Tcp(s) => s.set_read_timeout(timeout),
+        }
+    }
+
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         match self {
             Stream::Unix(s) => s.set_nonblocking(nonblocking),

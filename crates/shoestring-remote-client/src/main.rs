@@ -240,12 +240,17 @@ struct State {
 }
 
 impl State {
-    /// (Re)allocate `fb` to the remote's pixel size from `Ready`/`Resize`.
-    fn resize_fb(&mut self, w: u32, h: u32) {
+    /// (Re)allocate `fb` to the remote's pixel size from `Ready`/`Resize`. The
+    /// size comes from the server, so it is checked against the protocol's
+    /// limits before anything is allocated.
+    fn resize_fb(&mut self, w: u32, h: u32) -> Result<()> {
+        let len = shoestring_remote::framebuffer_len(w, h)
+            .map_err(|e| anyhow::anyhow!("server sent {e}"))?;
         self.fb_w = w;
         self.fb_h = h;
-        self.fb = vec![0u8; w as usize * h as usize * 4];
+        self.fb = vec![0u8; len];
         self.dirty = true;
+        Ok(())
     }
 
     /// Present the current `fb` (with the cursor composited on top) to the
@@ -440,7 +445,7 @@ fn run(cli: Cli) -> Result<()> {
         }
     };
     tracing::info!(rw, rh, rscale, "remote ready");
-    state.resize_fb(rw, rh);
+    state.resize_fb(rw, rh)?;
 
     stream
         .set_nonblocking(true)
@@ -578,7 +583,7 @@ fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
             ServerMessage::Ready { width, height, .. } => {
                 // A late Ready (shouldn't happen post-handshake) just resizes.
                 if (width, height) != (state.fb_w, state.fb_h) {
-                    state.resize_fb(width, height);
+                    state.resize_fb(width, height)?;
                 }
             }
             ServerMessage::Frame { seq, tiles } => {
@@ -606,7 +611,7 @@ fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
                 scale,
             } => {
                 tracing::info!(width, height, scale, "remote resized");
-                state.resize_fb(width, height);
+                state.resize_fb(width, height)?;
             }
             ServerMessage::Clipboard {
                 primary,

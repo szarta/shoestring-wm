@@ -79,6 +79,10 @@ pub(crate) struct Client {
     stream: UnixStream,
     /// Buffered partial line(s) we haven't seen a `\n` for yet.
     read_buf: Vec<u8>,
+    /// How much of `read_buf` is already known to hold no `\n`, so the next
+    /// search starts after it and a large request is scanned once, not on
+    /// every read.
+    scanned: usize,
     /// `true` after the client sent [`Request::EventStream`]; events get
     /// pushed at it on every state change.
     subscriber: bool,
@@ -341,6 +345,7 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
     let client = Rc::new(RefCell::new(Client {
         stream,
         read_buf: Vec::new(),
+        scanned: 0,
         subscriber: false,
         spent: false,
         metrics_sub: None,
@@ -371,36 +376,64 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
+/// Longest request line accepted. The largest legitimate one is a
+/// `set_clipboard` carrying a 64 MiB selection (the clipboard bridge's own
+/// cap), whose bytes JSON spells as numbers, up to four characters each. A
+/// connection that sends more without a newline is answered with an error and
+/// dropped, rather than buffered without end.
+const MAX_REQUEST_LEN: usize = 256 * 1024 * 1024;
+
+/// With no complete line buffered: if the partial one is already over
+/// [`MAX_REQUEST_LEN`], answer with an error and return `true` (drop the
+/// client); otherwise `false` (keep reading).
+fn reject_if_oversized(id: ClientId, client: &Rc<RefCell<Client>>) -> bool {
+    if client.borrow().read_buf.len() <= MAX_REQUEST_LEN {
+        return false;
+    }
+    tracing::warn!(
+        ?id,
+        max = MAX_REQUEST_LEN,
+        "ipc request too large; dropping client"
+    );
+    let _ = write_response(
+        client,
+        &Response::Error {
+            message: format!("request too large: over {MAX_REQUEST_LEN} bytes"),
+        },
+    );
+    true
+}
+
 /// Returns `true` if the caller should drop this client (EOF, error, or
 /// one-shot reply already written).
 fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<Client>>) -> bool {
     let mut buf = [0u8; 1024];
-    let n = {
+    {
         let mut c = client.borrow_mut();
         match c.stream.read(&mut buf) {
             Ok(0) => return true,
-            Ok(n) => {
-                c.read_buf.extend_from_slice(&buf[..n]);
-                n
-            }
+            Ok(n) => c.read_buf.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == ErrorKind::WouldBlock => return false,
             Err(e) => {
                 tracing::debug!(?id, error = %e, "ipc client read failed");
                 return true;
             }
         }
-    };
-    let _ = n;
+    }
 
     // Pull off one line at a time. We only expect one request per connection,
     // but loop in case the client sent garbage after it.
     loop {
         let line = {
             let mut c = client.borrow_mut();
-            let Some(nl) = c.read_buf.iter().position(|&b| b == b'\n') else {
-                return false;
+            let from = c.scanned;
+            let Some(nl) = c.read_buf[from..].iter().position(|&b| b == b'\n') else {
+                c.scanned = c.read_buf.len();
+                drop(c);
+                return reject_if_oversized(id, client);
             };
-            let line: Vec<u8> = c.read_buf.drain(..=nl).collect();
+            let line: Vec<u8> = c.read_buf.drain(..=from + nl).collect();
+            c.scanned = 0;
             line
         };
         let line = match std::str::from_utf8(&line) {
@@ -2496,6 +2529,7 @@ mod tests {
         Client {
             stream,
             read_buf: Vec::new(),
+            scanned: 0,
             subscriber: false,
             spent: false,
             metrics_sub: None,

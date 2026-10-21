@@ -55,6 +55,42 @@ use std::io::{Read, Write};
 /// covers a full-screen 8K raw frame (≈132 MiB) with headroom.
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024 * 1024;
 
+/// Largest width or height a peer may announce for a frame (`Ready` /
+/// `Resize`): twice 8K, beyond any real output.
+pub const MAX_FRAME_DIMENSION: u32 = 16384;
+
+/// Largest pixel count a viewer will allocate a framebuffer for: 8192×8192,
+/// so a full 4-byte frame stays within [`MAX_MESSAGE_LEN`].
+pub const MAX_FRAME_PIXELS: u64 = 8192 * 8192;
+
+/// Largest output scale a peer may announce.
+pub const MAX_SCALE: f64 = 16.0;
+
+/// The byte length of a tightly packed `width`×`height` framebuffer, checked
+/// against [`MAX_FRAME_DIMENSION`] and [`MAX_FRAME_PIXELS`] before anyone
+/// allocates it. Both ends take these numbers from the other side.
+pub fn framebuffer_len(width: u32, height: u32) -> Result<usize> {
+    if width == 0 || height == 0 || width > MAX_FRAME_DIMENSION || height > MAX_FRAME_DIMENSION {
+        return Err(Error::BadFrame(format!("frame size {width}x{height}")));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_FRAME_PIXELS {
+        return Err(Error::BadFrame(format!(
+            "frame size {width}x{height} is over {MAX_FRAME_PIXELS} pixels"
+        )));
+    }
+    Ok(pixels as usize * BYTES_PER_PIXEL)
+}
+
+/// Check an announced output scale: finite, positive, at most [`MAX_SCALE`].
+pub fn check_scale(scale: f64) -> Result<f64> {
+    if scale.is_finite() && scale > 0.0 && scale <= MAX_SCALE {
+        Ok(scale)
+    } else {
+        Err(Error::BadFrame(format!("scale {scale}")))
+    }
+}
+
 /// Errors from encoding, decoding, or framing a message.
 #[derive(Debug)]
 pub enum Error {
@@ -71,6 +107,9 @@ pub enum Error {
     /// zlib (de)compression failed, or a decompressed tile didn't match the
     /// size its rectangle implies.
     Codec(String),
+    /// A peer announced a frame size or scale outside the protocol's limits
+    /// ([`framebuffer_len`], [`check_scale`]).
+    BadFrame(String),
     /// An I/O error from [`read_framed`]/[`write_framed`].
     Io(std::io::Error),
 }
@@ -84,6 +123,7 @@ impl std::fmt::Display for Error {
             Error::Utf8 => write!(f, "invalid UTF-8 in string field"),
             Error::TooLarge(n) => write!(f, "framed message too large: {n} bytes"),
             Error::Codec(m) => write!(f, "tile codec error: {m}"),
+            Error::BadFrame(m) => write!(f, "invalid frame: {m}"),
             Error::Io(e) => write!(f, "io error: {e}"),
         }
     }
@@ -225,6 +265,33 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framebuffer_len_bounds_what_a_peer_can_make_us_allocate() {
+        assert_eq!(framebuffer_len(1920, 1080).unwrap(), 1920 * 1080 * 4);
+        assert_eq!(framebuffer_len(8192, 8192).unwrap(), 8192 * 8192 * 4);
+        for (w, h) in [
+            (0, 1080),
+            (1920, 0),
+            (16385, 1),
+            (1, 16385),
+            (16384, 16384),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(
+                matches!(framebuffer_len(w, h), Err(Error::BadFrame(_))),
+                "{w}x{h} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn check_scale_refuses_nonsense() {
+        assert_eq!(check_scale(1.5).unwrap(), 1.5);
+        for s in [0.0, -1.0, f64::NAN, f64::INFINITY, 16.5] {
+            assert!(check_scale(s).is_err(), "{s} should be refused");
+        }
+    }
 
     #[test]
     fn primitive_roundtrips() {

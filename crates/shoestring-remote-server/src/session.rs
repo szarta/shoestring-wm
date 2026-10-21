@@ -28,6 +28,11 @@ use shoestring_remote::{read_framed, write_framed, ClientMessage, ServerMessage}
 use crate::viewers::Viewers;
 use crate::wm;
 
+/// How long a new connection has to send its first message (`Hello` or
+/// `Graft`) before the session gives up on it, so a client that connects and
+/// says nothing doesn't hold a session thread forever.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Shutdown handles + a one-shot flag so the first loop to finish can unblock
 /// the other by closing both sockets.
 struct Teardown {
@@ -66,7 +71,13 @@ pub fn serve(
     // - `Graft { selector }` → **graft mode**: stream the single window matching
     //   `selector`, resolved against the WM's window list.
     let mut net_in = BufReader::new(net.try_clone().context("clone net for read")?);
-    let (wm_capture, graft_id) = match read_framed::<_, ClientMessage>(&mut net_in) {
+    net.set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+        .context("set handshake timeout")?;
+    let first = read_framed::<_, ClientMessage>(&mut net_in);
+    // Once the session is up, reads block for as long as the viewer is idle.
+    net.set_read_timeout(None)
+        .context("clear handshake timeout")?;
+    let (wm_capture, graft_id) = match first {
         Ok(ClientMessage::Hello {
             width,
             height,
@@ -85,6 +96,14 @@ pub fn serve(
             (cap, Some(id))
         }
         Ok(other) => bail!("expected Hello or Graft first, got {other:?}"),
+        Err(shoestring_remote::Error::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            bail!("no Hello or Graft within {HANDSHAKE_TIMEOUT:?}")
+        }
         Err(e) => bail!("reading first message: {e}"),
     };
 

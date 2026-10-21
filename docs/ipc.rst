@@ -15,6 +15,11 @@ push). So a client issues each request on a fresh connection, exactly as
 ``shoestring-ctl`` opens one connection per invocation. This is intentional -
 it keeps the server's per-client state trivial and bounds it.
 
+A request line may be at most 256 MiB, enough for a ``set_clipboard`` carrying
+the clipboard bridge's 64 MiB maximum, since JSON writes each byte as a number.
+A connection that sends more without a ``\n`` gets an ``error`` reply starting
+``request too large`` and is closed.
+
 Socket location
 ---------------
 

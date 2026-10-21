@@ -25,6 +25,7 @@ mod session;
 mod viewers;
 mod wm;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -37,6 +38,34 @@ use tracing_subscriber::Layer as _;
 
 use listen::{Endpoint, Listener};
 use viewers::Viewers;
+
+/// Most sessions served at once. Each holds a thread, two WM connections and
+/// a capture stream; a real setup has one or two viewers, so this only stops
+/// a runaway client from exhausting the box.
+const MAX_SESSIONS: usize = 8;
+
+/// Counts a live session; the count drops when its thread ends.
+struct SessionSlot(Arc<AtomicUsize>);
+
+impl SessionSlot {
+    /// Take a slot, or `None` if [`MAX_SESSIONS`] are already in use.
+    fn take(active: &Arc<AtomicUsize>) -> Option<SessionSlot> {
+        let mut n = active.load(Ordering::SeqCst);
+        while n < MAX_SESSIONS {
+            match active.compare_exchange(n, n + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(SessionSlot(Arc::clone(active))),
+                Err(current) => n = current,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for SessionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Parsed configuration from CLI flags / env.
 struct Cfg {
@@ -168,6 +197,7 @@ fn read_wm_events(mut reader: std::io::BufReader<std::os::unix::net::UnixStream>
 /// Open the listener while the gate is on; close it when the gate goes off.
 /// Each accepted connection is handed to a session thread.
 fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result<()> {
+    let active = Arc::new(AtomicUsize::new(0));
     loop {
         if gate.wait_enabled() {
             tracing::info!("shutting down");
@@ -194,12 +224,17 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
             }
             match listener.accept() {
                 Ok(Some(accepted)) => {
+                    let Some(slot) = SessionSlot::take(&active) else {
+                        tracing::warn!(peer = %accepted.peer, max = MAX_SESSIONS, "refused a connection: too many sessions");
+                        continue;
+                    };
                     tracing::info!(peer = %accepted.peer, "client connected");
                     let viewers = Arc::clone(viewers);
                     let output = cfg.output.clone();
                     std::thread::Builder::new()
                         .name("session".into())
                         .spawn(move || {
+                            let _slot = slot;
                             if let Err(e) =
                                 session::serve(accepted.stream, accepted.peer, output, viewers)
                             {
@@ -340,4 +375,24 @@ fn init_tracing() {
         None => tracing_subscriber::fmt::layer().with_filter(env).boxed(),
     };
     tracing_subscriber::registry().with(fmt_layer).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_slots_cap_and_free() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let slots: Vec<_> = (0..MAX_SESSIONS)
+            .map(|_| SessionSlot::take(&active).expect("under the cap"))
+            .collect();
+        assert!(SessionSlot::take(&active).is_none(), "the cap must hold");
+        drop(slots);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(
+            SessionSlot::take(&active).is_some(),
+            "freed slots are reusable"
+        );
+    }
 }

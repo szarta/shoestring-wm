@@ -25,11 +25,20 @@ fn zlib_compress(data: &[u8]) -> Vec<u8> {
     enc.finish().expect("zlib finish to Vec")
 }
 
+/// Inflate `data`, which must decode to exactly `expected` bytes. Decoding
+/// stops one byte past `expected`, so a small tile that inflates to far more
+/// (a zlib bomb) costs at most `expected + 1` bytes before it's rejected.
 fn zlib_decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
-    let mut dec = ZlibDecoder::new(data);
     let mut out = Vec::with_capacity(expected);
-    dec.read_to_end(&mut out)
+    ZlibDecoder::new(data)
+        .take(expected as u64 + 1)
+        .read_to_end(&mut out)
         .map_err(|e| Error::Codec(format!("inflate: {e}")))?;
+    if out.len() > expected {
+        return Err(Error::Codec(format!(
+            "zlib tile inflates past the {expected} bytes its rect needs"
+        )));
+    }
     Ok(out)
 }
 
@@ -323,5 +332,36 @@ mod tests {
             apply_tile(&mut dst, w, h, &tile),
             Err(Error::Codec(_))
         ));
+    }
+
+    #[test]
+    fn zlib_bomb_is_rejected_without_inflating_it() {
+        // 16 MiB of zeros compresses to well under 1%; aimed at a 4x4 rect it must
+        // be refused, and inflation must stop just past the 64 bytes needed.
+        let bomb = zlib_compress(&vec![0u8; 16 * 1024 * 1024]);
+        assert!(bomb.len() < 16 * 1024 * 1024 / 100, "{} bytes", bomb.len());
+        let expected = 4 * 4 * BYTES_PER_PIXEL;
+        let err = zlib_decompress(&bomb, expected).unwrap_err();
+        assert!(matches!(err, Error::Codec(_)), "{err}");
+
+        let (w, h) = (16, 16);
+        let mut dst = vec![7u8; w as usize * h as usize * BYTES_PER_PIXEL];
+        let tile = Tile {
+            rect: Rect::new(0, 0, 4, 4),
+            encoding: TileEncoding::Zlib,
+            data: bomb,
+        };
+        assert!(apply_tile(&mut dst, w, h, &tile).is_err());
+        assert!(
+            dst.iter().all(|&b| b == 7),
+            "a rejected tile must not touch dst"
+        );
+    }
+
+    #[test]
+    fn zlib_tile_of_exactly_the_right_size_still_decodes() {
+        let raw = vec![3u8; 4 * 4 * BYTES_PER_PIXEL];
+        let out = zlib_decompress(&zlib_compress(&raw), raw.len()).unwrap();
+        assert_eq!(out, raw);
     }
 }
