@@ -247,8 +247,13 @@ fn solid_buffer(
     buffer
 }
 
+/// The IPC socket of the WM behind `$WAYLAND_DISPLAY`, the one this test's
+/// Wayland connection talks to. Deliberately not `$SHOESTRING_WM_SOCKET`: run
+/// from inside a session that names the live desktop, and the test would lock
+/// the nested WM but query and flip gates on the real one.
 fn ipc_socket() -> UnixStream {
-    let path = shoestring_ipc::client_socket_path().expect("no IPC socket path resolved");
+    let path =
+        shoestring_ipc::default_socket_path().expect("XDG_RUNTIME_DIR / WAYLAND_DISPLAY unset");
     UnixStream::connect(&path).unwrap_or_else(|e| panic!("connect {}: {e}", path.display()))
 }
 
