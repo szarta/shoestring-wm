@@ -31,6 +31,7 @@ mod inject;
 mod input;
 // libinput device tuning — only the udev/TTY backend has real input devices.
 #[cfg(feature = "tty")]
+mod idle_lock;
 mod input_config;
 mod ipc;
 mod layout;

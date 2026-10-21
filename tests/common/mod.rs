@@ -112,6 +112,10 @@ pub struct WmOptions {
     /// `[headless] idle_suspend`. Defaults to on when
     /// `SHOESTRING_E2E_IDLE_SUSPEND=1`, so the whole suite can run both ways.
     pub idle_suspend: bool,
+    /// `[general] idle_lock_secs`; 0 disables.
+    pub idle_lock_secs: u64,
+    /// `[general] lock_command`, if not the default.
+    pub lock_command: Option<String>,
 }
 
 impl Default for WmOptions {
@@ -120,6 +124,8 @@ impl Default for WmOptions {
             output: (OUTPUT_W, OUTPUT_H),
             software: true,
             idle_suspend: std::env::var("SHOESTRING_E2E_IDLE_SUSPEND").as_deref() == Ok("1"),
+            idle_lock_secs: 0,
+            lock_command: None,
         }
     }
 }
@@ -148,6 +154,12 @@ impl Wm {
         // Only keys that differ from the defaults, so the config also loads in
         // older builds (see `bin`), whose parser rejects unknown keys.
         let mut text = String::from("[general]\nautostart = []\n");
+        if options.idle_lock_secs > 0 {
+            text += &format!("idle_lock_secs = {}\n", options.idle_lock_secs);
+        }
+        if let Some(cmd) = &options.lock_command {
+            text += &format!("lock_command = {cmd:?}\n");
+        }
         if options.idle_suspend {
             text += "\n[headless]\nidle_suspend = true\n";
         }

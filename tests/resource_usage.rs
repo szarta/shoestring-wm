@@ -203,6 +203,7 @@ fn run_workloads(software: bool, idle_suspend: bool, window: Duration) -> Value 
         output: OUTPUT,
         software,
         idle_suspend,
+        ..WmOptions::default()
     };
     let mut results = Results(Vec::new());
     let animated = format!(

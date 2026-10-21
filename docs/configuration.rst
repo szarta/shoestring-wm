@@ -125,6 +125,15 @@ The ``[general]`` section
        ``shoestring-ctl screen-capture on``) override it without writing
        to disk. Independent of the ``screenshot`` IPC request, which is
        behind ``automation_enabled``.
+   * - ``idle_lock_secs``
+     - integer
+     - ``0``
+     - Run ``lock_command`` after this many seconds without input; ``0``
+       disables it. Local input and injected input both count, so a remote
+       viewer driving the box keeps it unlocked, while a viewer that only
+       watches does not. Skipped while a visible client inhibits idle (a
+       video player, say). Independent of ``idle_notifications_enabled``,
+       which serves external idle daemons such as ``swayidle`` instead.
    * - ``idle_notifications_enabled``
      - bool
      - ``false``
@@ -180,6 +189,7 @@ Example::
     automation_enabled = false
     screen_capture_enabled = false
     idle_notifications_enabled = false
+    idle_lock_secs = 0
     xkb_layout = "us,de"
     xkb_options = "grp:alt_shift_toggle"
 

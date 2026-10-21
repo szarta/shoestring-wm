@@ -106,6 +106,7 @@ impl ShoestringWm {
                 if xkb_changed {
                     self.reapply_xkb_config();
                 }
+                self.sync_idle_lock();
                 tracing::info!(path = %path.display(), "config reloaded");
                 self.emit_ipc(shoestring_ipc::Event::ConfigReloaded);
                 Ok(())

@@ -656,7 +656,7 @@ impl ShoestringWm {
     /// `ext_idle_notify_v1` is advertised (`general.idle_notifications_enabled`).
     /// The seat clone is `Arc`-cheap and sidesteps the simultaneous
     /// `&mut self` / `&self.seat` borrow.
-    fn notify_idle_activity(&mut self) {
+    pub(crate) fn notify_idle_activity(&mut self) {
         if self.idle_notifier.is_none() {
             return;
         }
@@ -673,7 +673,7 @@ impl ShoestringWm {
             event,
             InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
         ) {
-            self.notify_idle_activity();
+            self.note_user_activity();
         }
         match event {
             InputEvent::Keyboard { event, .. } => self.handle_keyboard_event::<I>(event),

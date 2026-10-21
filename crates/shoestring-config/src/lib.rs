@@ -914,6 +914,14 @@ pub struct General {
     /// to `true` on a laptop where you do want idle dimming/locking.
     #[serde(default)]
     pub idle_notifications_enabled: bool,
+    /// Run `lock_command` after this many seconds without input. `0` (the
+    /// default) disables it. Local input and injected input both count, so a
+    /// remote viewer driving the box keeps it unlocked; a viewer that only
+    /// watches does not. Skipped while a visible client inhibits idle (a video
+    /// player, say). Independent of `idle_notifications_enabled`, which serves
+    /// external idle daemons instead.
+    #[serde(default)]
+    pub idle_lock_secs: u64,
     /// XKB keyboard layout(s): a comma-separated list of layout codes — e.g.
     /// `"us"`, `"us,de"`, `"fr,ru"`. With more than one, `Action::CycleLayout`
     /// (bound to Super+Space by default) switches between them at runtime.
@@ -973,6 +981,7 @@ impl Default for General {
             automation_enabled: false,
             screen_capture_enabled: false,
             idle_notifications_enabled: false,
+            idle_lock_secs: 0,
             xkb_layout: String::new(),
             xkb_variant: String::new(),
             xkb_options: None,
@@ -1802,12 +1811,16 @@ actions = {}
     #[test]
     fn idle_timers_default_off() {
         let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.general.idle_lock_secs, 0);
         assert!(!cfg.headless.idle_suspend);
     }
 
     #[test]
     fn idle_timers_user_override() {
-        let cfg: Config = toml::from_str("[headless]\nidle_suspend = true\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[general]\nidle_lock_secs = 600\n\n[headless]\nidle_suspend = true\n")
+                .unwrap();
+        assert_eq!(cfg.general.idle_lock_secs, 600);
         assert!(cfg.headless.idle_suspend);
     }
 

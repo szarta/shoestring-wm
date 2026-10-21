@@ -504,6 +504,11 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
         // A request may change the scene or wait on a render (probes,
         // screenshots, a new capture subscriber).
         state.wake_render();
+        // Injected input is user input (a remote viewer drives the box this
+        // way), provided the automation gate lets it through.
+        if is_input_injection(&request) && state.automation_enabled {
+            state.note_user_activity();
+        }
 
         match request {
             Request::Workspaces => {
@@ -1857,6 +1862,21 @@ fn collect_tree(state: &ShoestringWm) -> (Vec<OutputNode>, Vec<WorkspaceNode>, V
         .collect();
 
     (outputs, workspaces, minimized)
+}
+
+/// Requests that inject input into the session.
+fn is_input_injection(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::InjectKey { .. }
+            | Request::InjectText { .. }
+            | Request::InjectClick { .. }
+            | Request::InjectClickToWindow { .. }
+            | Request::Drag { .. }
+            | Request::MoveMouse { .. }
+            | Request::InjectInput { .. }
+            | Request::InjectInputToWindow { .. }
+    )
 }
 
 /// `(effective_title, app_id)` for a window: the IPC-set name override

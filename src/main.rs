@@ -196,6 +196,8 @@ fn main() -> Result<()> {
     // Reap tracked helper children on the main thread when SIGCHLD wakes the
     // loop, and route their exit statuses to remote_command / remote_screenshot.
     child_reaper::register(&state.loop_handle, reap_read_fd)?;
+    // Opt-in auto-lock after inactivity (`[general] idle_lock_secs`).
+    state.sync_idle_lock();
 
     if cli.enable_automation && !state.automation_enabled {
         // Couples the screen-capture gate on too (automation is a superset),

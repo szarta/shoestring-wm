@@ -334,3 +334,45 @@ fn e2e_headless_idle_suspend_parks_and_wakes() {
         );
     }
 }
+
+/// `[general] idle_lock_secs` runs `lock_command` once nobody has given input
+/// for that long. A remote viewer's input counts; a viewer that only watches
+/// does not.
+#[test]
+#[ignore]
+fn e2e_idle_lock_after_inactivity() {
+    let marker = std::env::temp_dir().join(format!(
+        "sw-e2e-locked-{}-{}",
+        std::process::id(),
+        next_id()
+    ));
+    let mut wm = Wm::start_with(WmOptions {
+        idle_lock_secs: 2,
+        lock_command: Some(format!("touch {}", marker.display())),
+        ..WmOptions::default()
+    });
+    let _client = TestClient::map(&wm);
+    wm.mapped_window();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+
+    // Viewer input every half second for twice the idle period: no lock.
+    for i in 0..8 {
+        viewer.send(ClientMessage::PointerMotion {
+            x: 10.0 + i as f64,
+            y: 10.0,
+        });
+        viewer.frames_within(Duration::from_millis(500));
+    }
+    assert!(!marker.exists(), "locked while a viewer was giving input");
+
+    // The viewer stays attached but goes quiet: the lock follows.
+    let quiet = std::time::Instant::now();
+    wait_for("the idle lock", || marker.exists().then_some(()));
+    let after = quiet.elapsed();
+    let _ = std::fs::remove_file(&marker);
+    assert!(
+        after >= Duration::from_millis(1500),
+        "locked {after:?} after the last input, before the 2 s idle period"
+    );
+}

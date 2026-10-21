@@ -329,6 +329,11 @@ pub struct ShoestringWm {
     /// [`Self::refresh_pointer_focus`] leaves that focus alone until other
     /// pointer input moves it, so the graft's button press still lands there.
     pub graft_pointer_focus: Option<WlSurface>,
+    /// When input last arrived, local or injected (see
+    /// [`Self::note_user_activity`]); the idle-lock clock.
+    pub last_user_activity: std::time::Instant,
+    /// The idle-lock timer, while `[general] idle_lock_secs` is non-zero.
+    pub idle_lock_timer: Option<smithay::reexports::calloop::RegistrationToken>,
 
     pub ipc: Option<crate::ipc::Server>,
     /// Whether the active backend can render a single window to an offscreen
@@ -901,6 +906,8 @@ impl ShoestringWm {
             pointer_constraint_cursor_hint: None,
             last_pointer_focus: None,
             graft_pointer_focus: None,
+            last_user_activity: std::time::Instant::now(),
+            idle_lock_timer: None,
             ipc: None,
             window_capture_supported: false,
             backend_name: "wlcs",
