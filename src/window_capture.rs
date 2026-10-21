@@ -239,7 +239,7 @@ where
         let logical = window.geometry().size;
         let phys: Size<i32, Physical> = logical.to_f64().to_physical(scale).to_i32_round();
         let (pw, ph) = (phys.w.max(1), phys.h.max(1));
-        let (app_id, title) = crate::ipc::effective_title_app_id(state, &window);
+        let (title, app_id) = crate::ipc::effective_title_app_id(state, &window);
 
         // Skip idle windows: nothing committed since the last push and we've
         // already sent the initial frame.
