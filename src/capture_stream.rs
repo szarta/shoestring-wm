@@ -14,6 +14,12 @@
 //! no damage, so it produces no frames — the whole point of "both ends are
 //! shoestring-wm".
 //!
+//! While the session is locked, subscribers get one static [`LOCKED_FILL`]
+//! frame instead of the lock screen, and nothing more until unlock, when a
+//! full frame of the unlocked desktop follows. The lock client redraws
+//! constantly (shoestring-lock animates a maze), and streaming that would cost
+//! bandwidth and readback for a screen that only says "locked".
+//!
 //! Contrast `wlr-screencopy` (`src/screencopy.rs`), which re-renders a full
 //! offscreen copy per one-shot request: here we read the live scanout/offscreen
 //! framebuffer and send only what changed.
@@ -55,7 +61,14 @@ pub struct CaptureSub {
     /// A render's damage was skipped while an earlier frame was still
     /// draining, so the next push must be a full frame to cover it.
     pub resync: bool,
+    /// The static locked frame has gone out for the current lock; cleared
+    /// (forcing a full frame) once the session unlocks.
+    pub locked_frame_sent: bool,
 }
+
+/// What a capture subscriber sees while the session is locked: one solid
+/// frame of this colour, as Argb8888 (B, G, R, A in memory).
+pub const LOCKED_FILL: [u8; 4] = [0x10, 0x10, 0x10, 0xff];
 
 impl CaptureSub {
     pub fn new(output_name: String) -> Self {
@@ -65,6 +78,7 @@ impl CaptureSub {
             sent_ready: false,
             last_size: (0, 0),
             resync: false,
+            locked_frame_sent: false,
         }
     }
 }
@@ -147,6 +161,13 @@ where
     }
 }
 
+/// The static locked frame: the whole `w`×`h` output in [`LOCKED_FILL`].
+fn locked_tile(w: i32, h: i32) -> Tile {
+    let region = Rectangle::new(Point::from((0, 0)), Size::from((w, h)));
+    let raw = LOCKED_FILL.repeat((w * h) as usize);
+    encode_tile(to_remote_rect(region), raw, TileEncoding::Zlib)
+}
+
 /// Push a damage frame to every capture subscriber of `output`, reading back
 /// the changed regions from the just-rendered `framebuffer`. Call once per
 /// render, after `render_output`, while the framebuffer is still bound.
@@ -187,6 +208,7 @@ pub fn push_capture<R>(
 
     let mut to_drop: Vec<ClientId> = Vec::new();
     let mut any_pushed = false;
+    let locked = state.is_locked();
 
     for (id, client) in subs {
         {
@@ -206,15 +228,27 @@ pub fn push_capture<R>(
                 }
             }
         }
-        let (sent_ready, last_size, seq, resync) = {
+        let (sent_ready, last_size, seq, resync, locked_frame_sent) = {
             let c = client.borrow();
             match c.capture_sub.as_ref() {
-                Some(s) => (s.sent_ready, s.last_size, s.seq, s.resync),
+                Some(s) => (
+                    s.sent_ready,
+                    s.last_size,
+                    s.seq,
+                    s.resync,
+                    s.locked_frame_sent,
+                ),
                 None => continue,
             }
         };
         let size_changed = sent_ready && last_size != (w as u32, h as u32);
-        let need_full = !sent_ready || size_changed || resync;
+        // Locked: one static frame, then nothing until unlock or a resize.
+        if locked && locked_frame_sent && !size_changed {
+            continue;
+        }
+        // Locked, the static frame is due now. Just unlocked, the subscriber
+        // holds the static frame, so repaint it all.
+        let need_full = !sent_ready || size_changed || resync || locked || locked_frame_sent;
 
         // Decide which regions to read back.
         let regions: Vec<Rectangle<i32, BufferCoord>> = if need_full {
@@ -249,10 +283,14 @@ pub fn push_capture<R>(
                 scale,
             });
         }
-        let tiles: Vec<Tile> = regions
-            .into_iter()
-            .filter_map(|r| tile_for_region(renderer, framebuffer, r))
-            .collect();
+        let tiles: Vec<Tile> = if locked {
+            vec![locked_tile(w, h)]
+        } else {
+            regions
+                .into_iter()
+                .filter_map(|r| tile_for_region(renderer, framebuffer, r))
+                .collect()
+        };
         let next_seq = seq.wrapping_add(1);
         messages.push(ServerMessage::Frame {
             seq: next_seq,
@@ -270,6 +308,7 @@ pub fn push_capture<R>(
             s.last_size = (w as u32, h as u32);
             s.seq = next_seq;
             s.resync = false;
+            s.locked_frame_sent = locked;
         }
         any_pushed = true;
     }

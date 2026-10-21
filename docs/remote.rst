@@ -177,6 +177,12 @@ The remote gate reuses the existing capability-gate model end to end:
   of the forward is a 0600 socket too, so other users there can't ride the
   tunnel. No new keys or passwords, matching the named-node workflow. For a
   container see :doc:`containers`.
+- **A locked session streams nothing.** While the served box is locked, a
+  serve viewer sees one static dark frame, not the lock screen and not the
+  windows behind it, and a graft session pauses (a new one is refused). The
+  desktop comes back on unlock. Input still reaches the lock screen, so a
+  viewer can unlock by typing the password, though it does not see the
+  prompt. See :ref:`ipc-session-lock`.
 - **TCP is opt-in and unchecked.** ``--tcp ADDR:PORT`` (or
   ``SHOESTRING_REMOTE_TCP``) listens on TCP instead. Nothing checks who connects
   there: on loopback any local user, and on any other address any host that can

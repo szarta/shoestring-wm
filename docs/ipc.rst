@@ -96,7 +96,8 @@ What each state allows
        not exist and nothing can connect from another machine. See
        :doc:`remote`.
    * - Session locked
-     - Whole-output capture sees only the lock screen, and global input
+     - Whole-output capture sees only the lock screen (a ``capture_stream``
+       subscriber gets one static locked frame instead), and global input
        (``inject_input``, ``inject_key``, ...) goes to the lock surface like
        real input. ``capture_window``, ``screenshot_window`` and
        ``inject_input_to_window`` are refused with ``session locked:``, and
@@ -579,7 +580,9 @@ Each request is a JSON object with a ``type`` discriminator:
        frames — a ``Ready`` (served size/scale/format) and full-output
        first frame, then one ``Frame`` of only the *damaged tiles* per
        render (zlib-compressed), plus ``Resize`` on output change. An idle
-       desktop produces no frames. Consumed by ``shoestring-remote-server``,
+       desktop produces no frames. While the session is locked the
+       subscriber gets one static frame instead of the lock screen, and
+       nothing more until unlock (see :ref:`ipc-session-lock`). Consumed by ``shoestring-remote-server``,
        which relays the frames over an ssh tunnel; see the
        ``shoestring-remote`` crate for the wire format.
    * - ``{"type": "capture_window", "id": "<ft-id>"}``
@@ -787,8 +790,12 @@ Session lock
 ~~~~~~~~~~~~
 
 While an ``ext-session-lock-v1`` lock is held, whole-output capture
-(``screenshot``, ``capture_stream``, screencopy clients) keeps working
-but sees only the lock screen, because it reads the rendered scene.
+(``screenshot``, screencopy clients) keeps working but sees only the lock
+screen, because it reads the rendered scene. A ``capture_stream``
+subscriber (a remote viewer) gets one static frame, a solid dark fill, and
+then nothing until unlock, when a full frame of the desktop follows. The
+lock screen often animates (``shoestring-lock`` runs a maze), and
+streaming it would cost bandwidth for a screen that only says "locked".
 The per-window requests render a window's own surface tree instead, so
 they are held back:
 

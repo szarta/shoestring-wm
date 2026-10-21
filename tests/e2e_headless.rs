@@ -145,8 +145,15 @@ fn e2e_remote_reconnect_and_gate_revocation() {
     wm.wait_viewers(1);
 }
 
-/// While the session is locked, a serve viewer sees the lock surface rather
-/// than the windows, and a new graft session is refused.
+/// [`shoestring_wm::capture_stream::LOCKED_FILL`] as RGB.
+fn locked_fill() -> [u8; 3] {
+    let [b, g, r, _] = shoestring_wm::capture_stream::LOCKED_FILL;
+    [r, g, b]
+}
+
+/// While the session is locked, a serve viewer sees one static locked frame
+/// (not the lock screen, and not the windows), even as the lock screen
+/// animates, and a new graft session is refused.
 #[test]
 #[ignore]
 fn e2e_remote_respects_the_session_lock() {
@@ -161,8 +168,30 @@ fn e2e_remote_respects_the_session_lock() {
     let mut graft = Viewer::graft(&wm, &id);
 
     client.lock();
-    viewer.wait_pixel(centre, rgb(LOCK), "lock surface");
-    viewer.wait_pixel((5, 5), rgb(LOCK), "lock surface over the background");
+    viewer.wait_pixel(centre, locked_fill(), "static locked frame");
+    viewer.wait_pixel((5, 5), locked_fill(), "static locked frame, corner");
+    // The output itself shows the lock screen.
+    wm.wait_pixel(centre, rgb(LOCK), "lock surface on the output");
+
+    // The lock screen animates; the viewer gets nothing more.
+    viewer.frames_within(Duration::from_millis(300));
+    client.paint_lock(CLICKED);
+    wm.wait_pixel(centre, rgb(CLICKED), "repainted lock surface on the output");
+    assert_eq!(
+        viewer.frames_within(Duration::from_secs(1)),
+        0,
+        "lock screen streamed"
+    );
+    client.paint_lock(LOCK);
+
+    // A viewer that connects while locked gets the static frame too.
+    let late = Viewer::serve(&wm);
+    assert_eq!(
+        late.pixel(centre),
+        locked_fill(),
+        "late viewer while locked"
+    );
+    drop(late);
 
     // Content changes behind the lock reach neither stream.
     graft.frames_within(Duration::from_millis(300));
@@ -175,7 +204,7 @@ fn e2e_remote_respects_the_session_lock() {
     viewer.frames_within(Duration::from_millis(500));
     assert_eq!(
         viewer.pixel(centre),
-        rgb(LOCK),
+        locked_fill(),
         "window leaked through the lock"
     );
 

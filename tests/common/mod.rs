@@ -657,6 +657,9 @@ pub enum Cmd {
     /// Take an `ext-session-lock-v1` lock, with a lock surface per output.
     Lock,
     Unlock,
+    /// Repaint every lock surface in this colour, as an animating lock
+    /// screen would.
+    PaintLock(u32),
 }
 
 /// A Wayland client on its own thread: one solid-colour toplevel that turns
@@ -706,6 +709,11 @@ impl TestClient {
         self.request(Cmd::Paint(argb), "a repaint");
     }
 
+    /// Repaint the lock surfaces in `argb`; returns once the commit is flushed.
+    pub fn paint_lock(&self, argb: u32) {
+        self.request(Cmd::PaintLock(argb), "a lock-surface repaint");
+    }
+
     pub fn lock(&self) {
         self.request(Cmd::Lock, "the session lock");
     }
@@ -744,6 +752,8 @@ pub struct ClientState {
     lock_configures: Vec<(usize, u32, u32, u32)>,
     locked: bool,
     lock_finished: bool,
+    /// Each lock surface's configured size, by index.
+    lock_sizes: Vec<(u32, u32)>,
 }
 
 pub fn client_main(
@@ -814,6 +824,16 @@ pub fn client_main(
                 eq.roundtrip(&mut state).expect("unlock roundtrip");
                 acks.send(()).unwrap();
             }
+            Ok(Cmd::PaintLock(argb)) => {
+                let (_, surfaces) = lock.as_ref().expect("paint_lock without a lock");
+                for ((s, _), &(w, h)) in surfaces.iter().zip(&state.lock_sizes) {
+                    s.attach(Some(&solid_buffer(&state, &qh, w, h, argb)), 0, 0);
+                    s.damage_buffer(0, 0, w as i32, h as i32);
+                    s.commit();
+                }
+                conn.flush().unwrap();
+                acks.send(()).unwrap();
+            }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => return,
         }
@@ -851,10 +871,12 @@ pub fn take_lock(
         s.lock_configures.len() >= outputs || s.lock_finished
     });
     assert!(!state.lock_finished, "the WM refused the session lock");
+    state.lock_sizes = vec![(1, 1); surfaces.len()];
     for (index, serial, width, height) in std::mem::take(&mut state.lock_configures) {
         let (s, ls) = &surfaces[index];
         ls.ack_configure(serial);
         let (w, h) = (width.max(1), height.max(1));
+        state.lock_sizes[index] = (w, h);
         s.attach(Some(&solid_buffer(state, &qh, w, h, LOCK)), 0, 0);
         s.damage_buffer(0, 0, w as i32, h as i32);
         s.commit();
