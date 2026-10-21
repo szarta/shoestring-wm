@@ -125,7 +125,23 @@ pub struct Config {
     #[serde(default)]
     pub clipboard: Clipboard,
     #[serde(default)]
+    pub headless: Headless,
+    #[serde(default)]
     pub debug: Debug,
+}
+
+/// `[headless]` — the native headless backend (`--backend headless`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Headless {
+    /// Stop the render tick while nothing changes. The headless backend has no
+    /// vblank, so it renders on a ~60 Hz timer; with this on, a tick that finds
+    /// no damage parks the timer, and the next client commit, input, or IPC
+    /// request (or a 1 s heartbeat) starts it again. An idle box then wakes
+    /// about twice a second instead of 62 times. Off by default: an animated
+    /// cursor theme only advances on the heartbeat while parked.
+    #[serde(default)]
+    pub idle_suspend: bool,
 }
 
 /// `[clipboard]` — clipboard-manager interop.
@@ -1489,6 +1505,7 @@ impl Config {
             decorations: Decorations::default(),
             background: Background::default(),
             clipboard: Clipboard::default(),
+            headless: Headless::default(),
             debug: Debug::default(),
         }
     }
@@ -1780,6 +1797,18 @@ actions = {}
     fn screen_capture_enabled_user_override() {
         let cfg: Config = toml::from_str("[general]\nscreen_capture_enabled = true\n").unwrap();
         assert!(cfg.general.screen_capture_enabled);
+    }
+
+    #[test]
+    fn idle_timers_default_off() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.headless.idle_suspend);
+    }
+
+    #[test]
+    fn idle_timers_user_override() {
+        let cfg: Config = toml::from_str("[headless]\nidle_suspend = true\n").unwrap();
+        assert!(cfg.headless.idle_suspend);
     }
 
     #[test]

@@ -192,6 +192,12 @@ binaries and runs them. No X server, GPU, or running session is needed:
 scripts/headless-e2e-tests.sh
 ```
 
+The harness runs the suite twice, the second time with `[headless]
+idle_suspend` on. `scripts/measure-headless.sh` uses the same harness to
+measure the headless backend's CPU, wakeups, memory, stream bandwidth, and
+latency under fixed workloads (Linux only); see "Resource use" in
+`docs/running.rst`.
+
 ### WLCS conformance
 
 [WLCS](https://github.com/canonical/wlcs) (the Wayland Conformance Test

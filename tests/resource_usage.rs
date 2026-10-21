@@ -18,6 +18,8 @@
 //! - `SHOESTRING_MEASURE_SECS`: seconds per measurement window (default 10).
 //! - `SHOESTRING_MEASURE_RENDERER`: `software`, `gpu`, or `both` (default:
 //!   `both` when a render node exists, else `software`).
+//! - `SHOESTRING_MEASURE_IDLE_SUSPEND`: `off` (default), `on`, or `both`, for
+//!   `[headless] idle_suspend`.
 //! - `SHOESTRING_MEASURE_JSON`: also write the results to this file.
 //! - `SHOESTRING_E2E_BIN_DIR`: measure the `shoestring-wm`,
 //!   `shoestring-remote-server`, and `shoestring-lock` in this directory
@@ -196,10 +198,11 @@ impl Results {
 }
 
 /// Run every workload on one renderer.
-fn run_workloads(software: bool, window: Duration) -> Value {
+fn run_workloads(software: bool, idle_suspend: bool, window: Duration) -> Value {
     let options = WmOptions {
         output: OUTPUT,
         software,
+        idle_suspend,
     };
     let mut results = Results(Vec::new());
     let animated = format!(
@@ -393,11 +396,25 @@ fn measure_headless_resource_use() {
         Err(_) => vec![("software", true)],
     };
 
+    let suspend: Vec<bool> = match std::env::var("SHOESTRING_MEASURE_IDLE_SUSPEND").as_deref() {
+        Ok("off") | Err(_) => vec![false],
+        Ok("on") => vec![true],
+        Ok("both") => vec![false, true],
+        Ok(other) => panic!("SHOESTRING_MEASURE_IDLE_SUSPEND={other}: use off, on, or both"),
+    };
+
     let mut all = serde_json::Map::new();
     for (renderer, software) in renderers {
-        let results = run_workloads(software, window);
-        print_table(renderer, &results);
-        all.insert(renderer.to_string(), results);
+        for &idle_suspend in &suspend {
+            let name = if idle_suspend {
+                format!("{renderer}, idle_suspend on")
+            } else {
+                renderer.to_string()
+            };
+            let results = run_workloads(software, idle_suspend, window);
+            print_table(&name, &results);
+            all.insert(name, results);
+        }
     }
     let report = json!({
         "output": format!("{}x{}", OUTPUT.0, OUTPUT.1),

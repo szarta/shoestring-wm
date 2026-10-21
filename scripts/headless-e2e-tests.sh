@@ -24,3 +24,8 @@ export TMPDIR=/tmp
 
 echo "==> running e2e tests"
 cargo test -p shoestring-wm --test e2e_headless -- --ignored "$@"
+
+# Again with `[headless] idle_suspend` on in every test, so a parked render
+# loop is held to the same behaviour as a ticking one.
+echo "==> running e2e tests with idle_suspend"
+SHOESTRING_E2E_IDLE_SUSPEND=1 cargo test -p shoestring-wm --test e2e_headless -- --ignored "$@"

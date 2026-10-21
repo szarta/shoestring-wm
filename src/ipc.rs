@@ -501,6 +501,9 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             return true;
         }
         state.metrics.record_ipc_request();
+        // A request may change the scene or wait on a render (probes,
+        // screenshots, a new capture subscriber).
+        state.wake_render();
 
         match request {
             Request::Workspaces => {

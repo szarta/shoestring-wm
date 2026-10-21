@@ -59,9 +59,9 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::{
         timer::{TimeoutAction, Timer},
-        EventLoop,
+        EventLoop, LoopHandle, RegistrationToken,
     },
-    utils::Transform,
+    utils::{Buffer, Size, Transform},
 };
 
 use crate::{backend::scale_from_config, state::ShoestringWm};
@@ -83,6 +83,31 @@ pub struct HeadlessData {
     /// ext-image-copy-capture clients as where to allocate dmabuf buffers.
     /// `None` if the node couldn't be derived from the device path.
     pub render_node: Option<DrmNode>,
+    /// What every render tick works on, shared by each (re-)armed timer.
+    render_loop: Rc<RefCell<RenderLoop>>,
+    /// The render timer currently in the event loop.
+    timer: Option<RegistrationToken>,
+    /// A tick found no damage with `[headless] idle_suspend` on, so the timer
+    /// only ticks every [`PARKED_HEARTBEAT`] until [`wake`] re-arms it.
+    parked: bool,
+    /// Parked during the current loop iteration; see [`after_dispatch`].
+    parked_this_iteration: bool,
+}
+
+/// The render loop's own state.
+struct RenderLoop {
+    output: Output,
+    damage_tracker: OutputDamageTracker,
+    /// The offscreen target: the texture, its size, and its buffer *age*.
+    /// Lazily (re)created to the output's current pixel size; nothing scans it
+    /// out — it exists so the scene is composited with real damage tracking and
+    /// so the capture path has a consistent renderer. The age is what makes
+    /// damage tracking incremental: a freshly created buffer has unknown
+    /// contents (age 0 → full damage), but since we reuse the *same* texture
+    /// every frame it is exactly one frame old thereafter (age 1 → only the
+    /// regions that actually changed). Without this the tracker would report
+    /// full-output damage every frame and the capture stream would never idle.
+    target: Option<(GlesTexture, Size<i32, Buffer>, usize)>,
 }
 
 #[cfg(feature = "headless")]
@@ -105,10 +130,14 @@ const DEFAULT_SIZE: (i32, i32) = (1920, 1080);
 
 /// Frame cadence for the render loop. No vblank exists to pace us, so we tick a
 /// timer at ~60 Hz. `render_output` early-outs when there is no damage, so an
-/// idle desktop costs only the per-frame element build and produces no capture
-/// traffic ("idle ⇒ 0 frames" on the stream). Idling the *timer* itself when
-/// nothing's pending is a later optimization.
+/// idle desktop costs only the per-frame element build (about 0.3 ms of CPU)
+/// and produces no capture traffic ("idle ⇒ 0 frames" on the stream). With
+/// `[headless] idle_suspend`, the timer itself parks while idle.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How often a parked render loop still ticks, so a missed wake can only leave
+/// the output stale for this long.
+const PARKED_HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// Resolve the render node path: `$SHOESTRING_WM_RENDER_NODE`, else the first of
 /// `/dev/dri/renderD128..130` that exists, else the canonical default (so the
@@ -320,65 +349,109 @@ pub fn init_headless(
     crate::output_management::broadcast_head_added(state, &output);
     crate::ext_workspace::broadcast_output_enter(state, &output);
 
-    let mut damage_tracker = OutputDamageTracker::from_output(&output);
+    let damage_tracker = OutputDamageTracker::from_output(&output);
     // Share the renderer between the render loop (below) and the dmabuf import
     // test ([`HeadlessData::import_dmabuf_test`]). Single-threaded calloop, so
     // the `RefCell` is never borrowed re-entrantly: import runs during client
     // dispatch, the loop runs in its own timer callback.
     let renderer = Rc::new(RefCell::new(renderer));
     state.headless = Some(HeadlessData {
-        renderer: renderer.clone(),
+        renderer,
         render_node,
+        render_loop: Rc::new(RefCell::new(RenderLoop {
+            output,
+            damage_tracker,
+            target: None,
+        })),
+        timer: None,
+        parked: false,
+        parked_this_iteration: false,
     });
-    // The offscreen target: the texture, its size, and its buffer *age*.
-    // Lazily (re)created to the output's current pixel size; nothing scans it
-    // out — it exists so the scene is composited with real damage tracking and
-    // so the capture path has a consistent renderer. The age is what makes
-    // damage tracking incremental: a freshly created buffer has unknown
-    // contents (age 0 → full damage), but since we reuse the *same* texture
-    // every frame it is exactly one frame old thereafter (age 1 → only the
-    // regions that actually changed). Without this the tracker would report
-    // full-output damage every frame and the capture stream would never idle.
-    let mut target: Option<(
-        GlesTexture,
-        smithay::utils::Size<i32, smithay::utils::Buffer>,
-        usize,
-    )> = None;
-
-    let timer = Timer::immediate();
-    event_loop
-        .handle()
-        .insert_source(timer, move |_instant, _meta, state| {
-            render_once(
-                state,
-                &output,
-                &mut renderer.borrow_mut(),
-                &mut damage_tracker,
-                &mut target,
-            );
-            TimeoutAction::ToDuration(FRAME_INTERVAL)
-        })
-        .map_err(|e| anyhow::anyhow!("failed to insert headless render timer: {e}"))?;
+    arm(state, &event_loop.handle());
+    if state.headless.as_ref().is_some_and(|h| h.timer.is_none()) {
+        anyhow::bail!("failed to insert headless render timer");
+    }
 
     Ok(())
 }
 
+/// (Re-)insert the render timer, due now, replacing any current one.
+fn arm(state: &mut ShoestringWm, handle: &LoopHandle<'static, ShoestringWm>) {
+    let Some(headless) = state.headless.as_mut() else {
+        return;
+    };
+    if let Some(token) = headless.timer.take() {
+        handle.remove(token);
+    }
+    headless.parked = false;
+    let render_loop = headless.render_loop.clone();
+    let renderer = headless.renderer.clone();
+    let inserted = handle.insert_source(Timer::immediate(), move |_, _, state| {
+        let damaged = {
+            let RenderLoop {
+                output,
+                damage_tracker,
+                target,
+            } = &mut *render_loop.borrow_mut();
+            render_once(
+                state,
+                output,
+                &mut renderer.borrow_mut(),
+                damage_tracker,
+                target,
+            )
+        };
+        let park = state.config.headless.idle_suspend && !damaged;
+        if let Some(headless) = state.headless.as_mut() {
+            headless.parked = park;
+            headless.parked_this_iteration = park;
+        }
+        TimeoutAction::ToDuration(if park {
+            PARKED_HEARTBEAT
+        } else {
+            FRAME_INTERVAL
+        })
+    });
+    match inserted {
+        Ok(token) => headless.timer = Some(token),
+        Err(e) => tracing::error!(error = %e, "headless: render timer insert failed"),
+    }
+}
+
+/// Resume full-rate rendering if the loop is parked. Call where something may
+/// have changed the scene: a client commit, input, an IPC request.
+pub fn wake(state: &mut ShoestringWm) {
+    if state.headless.as_ref().is_some_and(|h| h.parked) {
+        let handle = state.loop_handle.clone();
+        arm(state, &handle);
+    }
+}
+
+/// After each event-loop iteration: whatever ran may have changed the scene,
+/// so wake a parked loop, unless parking was all that happened.
+pub fn after_dispatch(state: &mut ShoestringWm) {
+    let Some(headless) = state.headless.as_mut() else {
+        return;
+    };
+    if std::mem::take(&mut headless.parked_this_iteration) {
+        return;
+    }
+    wake(state);
+}
+
 /// One render tick: compose the scene, fulfil pending captures, paint into the
 /// offscreen target, then send frame callbacks and flush. Mirrors the winit
-/// `Redraw` handler, minus the window submit/vsync.
+/// `Redraw` handler, minus the window submit/vsync. Returns whether the output
+/// changed (any damage), or `true` when the tick couldn't tell.
 fn render_once(
     state: &mut ShoestringWm,
     output: &Output,
     renderer: &mut GlesRenderer,
     damage_tracker: &mut OutputDamageTracker,
-    target: &mut Option<(
-        GlesTexture,
-        smithay::utils::Size<i32, smithay::utils::Buffer>,
-        usize,
-    )>,
-) {
+    target: &mut Option<(GlesTexture, Size<i32, Buffer>, usize)>,
+) -> bool {
     let Some(mode) = output.current_mode() else {
-        return;
+        return true;
     };
     let size: smithay::utils::Size<i32, smithay::utils::Buffer> = (mode.size.w, mode.size.h).into();
 
@@ -389,12 +462,12 @@ fn render_once(
             Ok(tex) => *target = Some((tex, size, 0)),
             Err(e) => {
                 tracing::warn!(error = %e, "headless: offscreen create_buffer failed");
-                return;
+                return true;
             }
         }
     }
     let Some((texture, _, age)) = target.as_mut() else {
-        return;
+        return true;
     };
     let buffer_age = *age;
 
@@ -442,12 +515,12 @@ fn render_once(
     }
 
     // Paint the scene into the offscreen texture with real damage tracking.
-    let render_states = {
+    let (render_states, damaged) = {
         let mut framebuffer = match renderer.bind(texture) {
             Ok(fb) => fb,
             Err(e) => {
                 tracing::warn!(error = %e, "headless: bind offscreen failed");
-                return;
+                return true;
             }
         };
         let render_start = std::time::Instant::now();
@@ -461,7 +534,7 @@ fn render_once(
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = ?e, "headless: render_output failed");
-                return;
+                return true;
             }
         };
         state
@@ -470,6 +543,7 @@ fn render_once(
         // Stream the damaged tiles to any capture subscribers (serve mode),
         // reading them back from the framebuffer we just rendered. No-op when
         // the gate is off or nobody's subscribed.
+        let damaged = result.damage.is_some_and(|d| !d.is_empty());
         crate::capture_stream::push_capture(
             state,
             output,
@@ -477,7 +551,7 @@ fn render_once(
             &framebuffer,
             result.damage.map(|v| v.as_slice()),
         );
-        result.states
+        (result.states, damaged)
     };
     // The texture now holds this frame; next time it is exactly one frame old.
     *age = 1;
@@ -505,4 +579,5 @@ fn render_once(
     state.space.refresh();
     state.popups.cleanup();
     let _ = state.display_handle.flush_clients();
+    damaged
 }

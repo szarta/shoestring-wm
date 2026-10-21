@@ -133,6 +133,7 @@ mod tests {
             decorations: Default::default(),
             background: Default::default(),
             clipboard: Default::default(),
+            headless: Default::default(),
             debug: Default::default(),
         }
     }

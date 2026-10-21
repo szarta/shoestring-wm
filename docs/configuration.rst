@@ -911,6 +911,26 @@ screen-capture and automation gates.
     rides the remote-sharing gate and is brokered natively by the WM, never
     through this global.
 
+The ``[headless]`` section
+--------------------------
+
+``[headless]`` tunes the native headless backend (``--backend headless``; see
+:doc:`running`).
+
+::
+
+    [headless]
+    idle_suspend = true
+
+``idle_suspend``
+    Stop the render tick while nothing changes. The headless backend has no
+    vblank to pace it, so it renders on a ~60 Hz timer, which on an idle box
+    costs about 2% of one core and 62 wakeups a second. With this on, a tick
+    that finds no damage parks the timer; the next client commit, input, or IPC
+    request starts it again, and a 1 s heartbeat covers anything else. An idle
+    box then wakes about twice a second. Defaults to ``false``. While parked,
+    an animated cursor theme advances only on the heartbeat.
+
 The ``[debug]`` section
 -----------------------
 

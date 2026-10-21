@@ -329,8 +329,9 @@ fn main() -> Result<()> {
     // Surfaces that mapped/unmapped/moved without a real pointer motion still
     // owe the client enter/leave/motion; the input handlers only refocus on
     // actual motion, so this is the catch-all. Cheap when nothing changed.
+    // The same hook wakes a parked headless render loop.
     event_loop.run(None, &mut state, |state| {
-        state.refresh_pointer_focus();
+        state.after_dispatch();
     })?;
 
     // The event loop stopped (Quit keybind or IPC `shutdown`). smithay's Wayland

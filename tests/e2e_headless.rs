@@ -279,3 +279,58 @@ fn e2e_remote_graft_hidden_windows() {
     drop(client);
     assert_eq!(graft.wait_end(), End::Bye);
 }
+
+/// Context switches per second across all of `pid`'s threads, over `window`.
+fn wakeups_per_sec(pid: u32, window: Duration) -> f64 {
+    let switches = || -> u64 {
+        std::fs::read_dir(format!("/proc/{pid}/task"))
+            .expect("read tasks")
+            .flatten()
+            .filter_map(|t| std::fs::read_to_string(t.path().join("status")).ok())
+            .flat_map(|s| {
+                s.lines()
+                    .filter(|l| l.contains("ctxt_switches:"))
+                    .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .sum()
+    };
+    let before = switches();
+    std::thread::sleep(window);
+    (switches() - before) as f64 / window.as_secs_f64()
+}
+
+/// With `[headless] idle_suspend`, an idle WM stops ticking, and a client
+/// commit still reaches a viewer well inside the parked heartbeat.
+#[test]
+#[ignore]
+fn e2e_headless_idle_suspend_parks_and_wakes() {
+    let mut wm = Wm::start_with(WmOptions {
+        idle_suspend: true,
+        ..WmOptions::default()
+    });
+    let client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+    viewer.wait_pixel(centre, rgb(IDLE), "window");
+
+    // Idle: the 16 ms tick would be ~62 wakeups a second.
+    std::thread::sleep(Duration::from_secs(1));
+    let rate = wakeups_per_sec(wm.pid(), Duration::from_secs(3));
+    assert!(rate < 15.0, "idle WM still wakes {rate:.0} times a second");
+
+    // Woken by the commit itself (the viewer sends no IPC to the WM).
+    for colour in [CLICKED, KEYED] {
+        std::thread::sleep(Duration::from_millis(500));
+        let start = std::time::Instant::now();
+        client.paint(colour);
+        viewer.wait_pixel(centre, rgb(colour), "repaint while parked");
+        let latency = start.elapsed();
+        assert!(
+            latency < Duration::from_millis(300),
+            "repaint took {latency:?} to reach the viewer"
+        );
+    }
+}

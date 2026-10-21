@@ -109,6 +109,9 @@ pub struct WmOptions {
     pub output: (u32, u32),
     /// Force Mesa's software renderer, even when a GPU render node exists.
     pub software: bool,
+    /// `[headless] idle_suspend`. Defaults to on when
+    /// `SHOESTRING_E2E_IDLE_SUSPEND=1`, so the whole suite can run both ways.
+    pub idle_suspend: bool,
 }
 
 impl Default for WmOptions {
@@ -116,6 +119,7 @@ impl Default for WmOptions {
         WmOptions {
             output: (OUTPUT_W, OUTPUT_H),
             software: true,
+            idle_suspend: std::env::var("SHOESTRING_E2E_IDLE_SUSPEND").as_deref() == Ok("1"),
         }
     }
 }
@@ -144,6 +148,9 @@ impl Wm {
         // Only keys that differ from the defaults, so the config also loads in
         // older builds (see `bin`), whose parser rejects unknown keys.
         let mut text = String::from("[general]\nautostart = []\n");
+        if options.idle_suspend {
+            text += "\n[headless]\nidle_suspend = true\n";
+        }
         let [r, g, b] = BACKGROUND;
         text += &format!("\n[background]\ncolor = \"#{r:02x}{g:02x}{b:02x}\"\n");
         std::fs::write(&config, text).expect("write config");

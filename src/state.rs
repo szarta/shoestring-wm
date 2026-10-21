@@ -1147,6 +1147,21 @@ impl ShoestringWm {
         false
     }
 
+    /// Something may have changed the scene: make sure a render follows soon.
+    /// Only the headless backend's render loop can be parked
+    /// (`[headless] idle_suspend`); elsewhere this is a no-op.
+    pub fn wake_render(&mut self) {
+        #[cfg(feature = "headless")]
+        crate::backend::headless::wake(self);
+    }
+
+    /// Run after each event-loop iteration (see `main`).
+    pub fn after_dispatch(&mut self) {
+        self.refresh_pointer_focus();
+        #[cfg(feature = "headless")]
+        crate::backend::headless::after_dispatch(self);
+    }
+
     /// Re-evaluate the surface under the pointer at its *current* location and,
     /// if it changed, deliver pointer enter/leave/motion.
     ///

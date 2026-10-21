@@ -58,6 +58,34 @@ Because the headless backend needs only an unprivileged render node - no seat,
 master, or input devices - it is a natural fit for running the whole session in
 a container and viewing it over serve mode. See :doc:`containers`.
 
+Resource use
+~~~~~~~~~~~~
+
+With nothing to pace it, the headless backend renders on a ~60 Hz timer. An
+idle tick finds no damage and sends no frames to remote viewers, but it still
+wakes the WM about 60 times a second. ``[headless] idle_suspend`` (off by
+default; see :doc:`configuration`) parks the timer while nothing changes. The
+next client commit, input, or IPC request restarts it, so it also renders a
+commit sooner than the next tick would.
+
+The heavy workloads are repainting and the lock screen. Mesa's software
+renderer costs CPU in proportion to the repainted area, far more than a GPU
+render node. While the session is locked, remote viewers get a static frame
+rather than the animated lock screen (see :doc:`remote`), but the WM still
+composites the lock screen locally.
+
+To measure on your own machine, run::
+
+    scripts/measure-headless.sh
+
+It starts a fresh headless WM for each fixed workload: idle, a window
+repainting at 30 fps, a remote viewer attached, commit-to-viewer latency, and
+the lock screen. It reports CPU, wakeups, memory, stream bandwidth, and latency
+for the WM and each helper process. ``SHOESTRING_MEASURE_IDLE_SUSPEND=both``
+compares ``idle_suspend`` off and on, and ``SHOESTRING_E2E_BIN_DIR`` measures
+another build's binaries, such as a release tag's. Numbers depend on the
+machine and the renderer, so compare runs on the same host.
+
 Command-line flags
 ------------------
 
