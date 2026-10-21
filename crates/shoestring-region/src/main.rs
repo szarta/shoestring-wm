@@ -8,12 +8,18 @@
 //! ```
 //!
 //! to stdout (one line, space-separated, integers, logical coords on
-//! the output the drag started on). Escape cancels with exit code 1.
+//! the output the drag started on). A plain click (press+release with no
+//! drag) reports the clicked point with a zero size (`OUTPUT X Y 0 0`)
+//! rather than cancelling — callers that want a point or an output, not a
+//! rectangle, depend on a bare click working. Escape cancels with exit
+//! code 1.
 //!
-//! Intended consumer: `shoestring-screenshot --region`, which pipes the
-//! coords to `zwlr_screencopy_v1::capture_output_region`. Roughly the
+//! Intended consumers: `shoestring-screenshot --region`, which pipes the
+//! coords to `zwlr_screencopy_v1::capture_output_region` (roughly the
 //! `slurp` equivalent — keyboard-only cancel, no fancy formats, just
-//! "give me a rectangle on an output."
+//! "give me a rectangle on an output"); the ScreenCast portal's output
+//! chooser, which only reads the output name; and the Screenshot portal's
+//! `PickColor`, which only reads the point.
 
 use std::{
     io::Write,
@@ -340,11 +346,24 @@ fn commit_selection(state: &mut State) {
     let y = y.clamp(0, sh as i32);
     let w = w.min(sw as i32 - x).max(0);
     let h = h.min(sh as i32 - y).max(0);
-    if w < 1 || h < 1 {
+    // A plain click (press+release with no meaningful drag) has no rectangle
+    // to report — emit the clicked point with a zero size rather than a
+    // cancel. The ScreenCast chooser reads only the output ("click the
+    // monitor to share") and PickColor reads only the point, so both rely on
+    // a bare click. Only an empty output (no configure received yet) still
+    // falls through to cancel.
+    if sw < 1 || sh < 1 {
         state.exit_code = 1;
         state.finished = true;
         return;
     }
+    let (x, y, w, h) = if w < 1 || h < 1 {
+        let px = (ax.round() as i32).clamp(0, sw as i32 - 1);
+        let py = (ay.round() as i32).clamp(0, sh as i32 - 1);
+        (px, py, 0, 0)
+    } else {
+        (x, y, w, h)
+    };
     let name = state.outputs[idx]
         .name
         .clone()
