@@ -97,7 +97,8 @@ What each state allows
        :doc:`remote`.
    * - Session locked
      - Whole-output capture sees only the lock screen (a ``capture_stream``
-       subscriber gets one static locked frame instead), and global input
+       subscriber gets one static locked frame instead, except briefly after
+       input), and global input
        (``inject_input``, ``inject_key``, ...) goes to the lock surface like
        real input. ``capture_window``, ``screenshot_window`` and
        ``inject_input_to_window`` are refused with ``session locked:``, and
@@ -581,8 +582,9 @@ Each request is a JSON object with a ``type`` discriminator:
        first frame, then one ``Frame`` of only the *damaged tiles* per
        render (zlib-compressed), plus ``Resize`` on output change. An idle
        desktop produces no frames. While the session is locked the
-       subscriber gets one static frame instead of the lock screen, and
-       nothing more until unlock (see :ref:`ipc-session-lock`). Consumed by ``shoestring-remote-server``,
+       subscriber gets one static frame instead of the lock screen, apart
+       from a short live preview after input (see :ref:`ipc-session-lock`).
+       Consumed by ``shoestring-remote-server``,
        which relays the frames over an ssh tunnel; see the
        ``shoestring-remote`` crate for the wire format.
    * - ``{"type": "capture_window", "id": "<ft-id>"}``
@@ -796,6 +798,11 @@ subscriber (a remote viewer) gets one static frame, a solid dark fill, and
 then nothing until unlock, when a full frame of the desktop follows. The
 lock screen often animates (``shoestring-lock`` runs a maze), and
 streaming it would cost bandwidth for a screen that only says "locked".
+The exception is the **lock preview**: after input while locked (local, or
+a viewer's injected input), subscribers get the live lock screen for
+``[general] lock_preview_secs`` (default 8), so a remote viewer can see
+the password prompt it is typing into; then the static frame returns.
+Input from before the lock doesn't open it.
 The per-window requests render a window's own surface tree instead, so
 they are held back:
 

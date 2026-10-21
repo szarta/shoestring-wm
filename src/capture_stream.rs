@@ -16,9 +16,12 @@
 //!
 //! While the session is locked, subscribers get one static [`LOCKED_FILL`]
 //! frame instead of the lock screen, and nothing more until unlock, when a
-//! full frame of the unlocked desktop follows. The lock client redraws
+//! full frame of the unlocked desktop follows. The lock client may redraw
 //! constantly (shoestring-lock animates a maze), and streaming that would cost
-//! bandwidth and readback for a screen that only says "locked".
+//! bandwidth and readback for a screen that only says "locked". The exception
+//! is the lock preview: for `[general] lock_preview_secs` after input while
+//! locked, subscribers get the live lock screen, so a remote viewer can see the
+//! password prompt; then the static frame returns.
 //!
 //! Contrast `wlr-screencopy` (`src/screencopy.rs`), which re-renders a full
 //! offscreen copy per one-shot request: here we read the live scanout/offscreen
@@ -208,7 +211,8 @@ pub fn push_capture<R>(
 
     let mut to_drop: Vec<ClientId> = Vec::new();
     let mut any_pushed = false;
-    let locked = state.is_locked();
+    // Static frame while locked, unless the lock preview is open.
+    let locked = state.is_locked() && !state.lock_preview_active();
 
     for (id, client) in subs {
         {

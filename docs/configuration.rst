@@ -88,6 +88,15 @@ The ``[general]`` section
        args). The binary itself drives ``ext-session-lock-v1`` and
        reports unlock; if it's missing or fails to spawn the session
        just stays unlocked (logged).
+   * - ``lock_preview_secs``
+     - integer
+     - ``8``
+     - While the session is locked, remote viewers see a static frame
+       rather than the lock screen. After input while locked (local or a
+       viewer's), they see the live lock screen for this many seconds, so
+       a viewer can watch the password prompt it types into. The default
+       matches how long ``shoestring-lock`` keeps its prompt up; match
+       your locker's. ``0`` always sends the static frame.
    * - ``autostart``
      - array of strings
      - ``["shoestring-bar", "shoestring-mediad"]``
@@ -185,6 +194,7 @@ Example::
     repeat_rate = 40
     output_scale = 1.5
     lock_command = "shoestring-lock"
+    lock_preview_secs = 8
     autostart = ["shoestring-bar", "swww init"]
     automation_enabled = false
     screen_capture_enabled = false

@@ -116,6 +116,8 @@ pub struct WmOptions {
     pub idle_lock_secs: u64,
     /// `[general] lock_command`, if not the default.
     pub lock_command: Option<String>,
+    /// `[general] lock_preview_secs`, if not the default.
+    pub lock_preview_secs: Option<u64>,
 }
 
 impl Default for WmOptions {
@@ -126,6 +128,7 @@ impl Default for WmOptions {
             idle_suspend: std::env::var("SHOESTRING_E2E_IDLE_SUSPEND").as_deref() == Ok("1"),
             idle_lock_secs: 0,
             lock_command: None,
+            lock_preview_secs: None,
         }
     }
 }
@@ -159,6 +162,9 @@ impl Wm {
         }
         if let Some(cmd) = &options.lock_command {
             text += &format!("lock_command = {cmd:?}\n");
+        }
+        if let Some(secs) = options.lock_preview_secs {
+            text += &format!("lock_preview_secs = {secs}\n");
         }
         if options.idle_suspend {
             text += "\n[headless]\nidle_suspend = true\n";

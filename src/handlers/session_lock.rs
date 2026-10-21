@@ -30,6 +30,9 @@ use crate::state::ShoestringWm;
 /// Live lock-session state. Present iff a client has called
 /// `ext_session_lock_manager_v1.lock`.
 pub struct LockState {
+    /// When the lock began; input after this opens the lock preview (see
+    /// [`ShoestringWm::lock_preview_active`]).
+    pub since: std::time::Instant,
     /// `Some` until we've acknowledged the lock to the client via
     /// [`SessionLocker::lock`]; taken on the first lock-surface commit so
     /// the client only sees `locked` after we've actually composited the
@@ -69,6 +72,7 @@ impl SessionLockHandler for ShoestringWm {
         // the lock; resolve it as cancelled so the client can move on.
         self.finish_picker(None);
         self.lock_session = Some(LockState {
+            since: std::time::Instant::now(),
             pending: Some(confirmation),
             surfaces: HashMap::new(),
             saved_focus,
@@ -128,6 +132,21 @@ impl ShoestringWm {
     /// True if a session lock is currently active.
     pub fn is_locked(&self) -> bool {
         self.lock_session.is_some()
+    }
+
+    /// Whether remote viewers should see the live lock screen rather than the
+    /// static locked frame: there has been input since the lock began, within
+    /// the last `[general] lock_preview_secs`. Lets a viewer see the password
+    /// prompt it types into. Input from before the lock (the lock keybind
+    /// itself) doesn't count.
+    pub fn lock_preview_active(&self) -> bool {
+        let Some(lock) = self.lock_session.as_ref() else {
+            return false;
+        };
+        let secs = self.config.general.lock_preview_secs;
+        secs > 0
+            && self.last_user_activity > lock.since
+            && self.last_user_activity.elapsed() < std::time::Duration::from_secs(secs)
     }
 
     /// Find the lock surface for the output containing the pointer (or the

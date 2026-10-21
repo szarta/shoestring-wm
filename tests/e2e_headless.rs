@@ -376,3 +376,43 @@ fn e2e_idle_lock_after_inactivity() {
         "locked {after:?} after the last input, before the 2 s idle period"
     );
 }
+
+/// After input while locked, a viewer sees the live lock screen (so it can
+/// watch the password prompt) for `[general] lock_preview_secs`, then the
+/// static frame again.
+#[test]
+#[ignore]
+fn e2e_remote_lock_preview_after_input() {
+    let mut wm = Wm::start_with(WmOptions {
+        lock_preview_secs: Some(1),
+        ..WmOptions::default()
+    });
+    let client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+
+    // Locking alone (the input before it doesn't count) shows the static frame.
+    client.lock();
+    viewer.wait_pixel(centre, locked_fill(), "static frame after locking");
+
+    // A viewer keypress opens the preview: the live lock screen, repaints included.
+    let input = std::time::Instant::now();
+    viewer.key(KEY_A);
+    viewer.wait_pixel(centre, rgb(LOCK), "live lock screen after input");
+    client.paint_lock(CLICKED);
+    viewer.wait_pixel(
+        centre,
+        rgb(CLICKED),
+        "lock screen repaint during the preview",
+    );
+
+    // A second without input closes it again.
+    viewer.wait_pixel(centre, locked_fill(), "static frame after the preview");
+    assert!(
+        input.elapsed() >= Duration::from_secs(1),
+        "preview closed {:?} after the input, before its 1 s",
+        input.elapsed()
+    );
+}

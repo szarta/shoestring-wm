@@ -873,6 +873,14 @@ pub struct General {
     /// to substitute e.g. `swaylock` or a custom locker.
     #[serde(default = "default_lock_command")]
     pub lock_command: String,
+    /// While the session is locked, remote viewers see a static frame rather
+    /// than the lock screen. After input while locked (yours or a viewer's),
+    /// they see the live lock screen for this many seconds, so a viewer can
+    /// watch the password prompt it is typing into. Default `8`, how long
+    /// `shoestring-lock` keeps its prompt up; match your locker's. `0` always
+    /// sends the static frame.
+    #[serde(default = "default_lock_preview_secs")]
+    pub lock_preview_secs: u64,
     /// Commands spawned once at WM startup, after the wayland socket is
     /// listening but before user interaction. Each entry is split on
     /// whitespace (first token = executable, rest = args), same as
@@ -964,6 +972,9 @@ fn default_output_scale() -> f64 {
 fn default_lock_command() -> String {
     "shoestring-lock".into()
 }
+fn default_lock_preview_secs() -> u64 {
+    8
+}
 fn default_autostart() -> Vec<String> {
     vec!["shoestring-bar".into(), "shoestring-mediad".into()]
 }
@@ -977,6 +988,7 @@ impl Default for General {
             desktop_scroll_notches: default_desktop_scroll_notches(),
             output_scale: default_output_scale(),
             lock_command: default_lock_command(),
+            lock_preview_secs: default_lock_preview_secs(),
             autostart: default_autostart(),
             automation_enabled: false,
             screen_capture_enabled: false,
@@ -1806,6 +1818,14 @@ actions = {}
     fn screen_capture_enabled_user_override() {
         let cfg: Config = toml::from_str("[general]\nscreen_capture_enabled = true\n").unwrap();
         assert!(cfg.general.screen_capture_enabled);
+    }
+
+    #[test]
+    fn lock_preview_defaults_to_eight_seconds() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.general.lock_preview_secs, 8);
+        let cfg: Config = toml::from_str("[general]\nlock_preview_secs = 0\n").unwrap();
+        assert_eq!(cfg.general.lock_preview_secs, 0);
     }
 
     #[test]
