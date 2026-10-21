@@ -196,9 +196,9 @@ Some context on where this sits relative to comparable projects: wlroots
 compositors (Sway, River, Hyprland) have had a mature no-GPU option for
 years via `WLR_RENDERER=pixman`, so "Wayland without a GPU" isn't new to
 the ecosystem at large. Among shoestring-wm's closer peers — other
-Rust/Smithay compositors — it's less settled: niri's headless-output
-support is still described by its own maintainers as under active
-development, and cosmic-comp ships no no-GPU fallback today (there's an
+Rust/Smithay compositors — it's less settled: niri's headless/virtual-output
+support is still an open, unmerged PR (not yet in a release), and
+cosmic-comp ships no no-GPU fallback today (there's an
 open upstream issue asking for exactly this, since components like
 cosmic-panel currently fail hard without EGL/GBM). A shipped,
 container-verified, GPU-optional headless backend is a genuine
