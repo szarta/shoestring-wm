@@ -186,16 +186,17 @@ impl CursorUpdate {
 /// own keymap and keybindings apply natively.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
-    /// First message after connect: the client's output pixel size and scale.
-    /// The server sizes its virtual output to match exactly (no rescale blur).
+    /// First message of a **serve-mode** session: the client's output pixel
+    /// size and scale. Advisory for now: the server streams its virtual output
+    /// at the size it was started with, and the viewer scales it.
     Hello { width: u32, height: u32, scale: f64 },
-    /// Sent immediately after [`ClientMessage::Hello`] by a **graft-mode**
-    /// client: rather than serving the whole output, stream the single remote
-    /// window matching `selector` (an app_id / title regex, or an exact
-    /// foreign-toplevel identifier). The server resolves it (via the WM's
-    /// `find_windows`) and, on a match, streams that window as if it were the
-    /// output — `Ready`/`Frame`/`Resize` carry window-local pixels. A serve-mode
-    /// client never sends this.
+    /// First message of a **graft-mode** session, sent instead of
+    /// [`ClientMessage::Hello`]: rather than serving the whole output, stream
+    /// the single remote window matching `selector` (an exact foreign-toplevel
+    /// id or app_id, or a substring of an app_id or title). The server resolves
+    /// it against the WM's `windows` list and, on a match, streams that window
+    /// as if it were the output — `Ready`/`Frame`/`Resize` carry window-local
+    /// pixels. A `Graft` after `Hello` is ignored.
     Graft { selector: String },
     /// A key transition. `keycode` is a Linux/evdev keycode (the value before
     /// XKB's `+8` offset); `pressed` is down vs up.

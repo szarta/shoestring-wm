@@ -58,14 +58,14 @@ jobs:
       - name: cargo build (release)
         run: cargo build --workspace --release
 
-  # The default build is `winit + tty`; `cargo build --workspace` above only
-  # ever exercises that combo. This matrix compiles shoestring-wm with each
+  # The default build is `winit + tty + headless`; `cargo build --workspace`
+  # above only ever exercises that combo. This matrix compiles shoestring-wm with each
   # non-default backend feature set on its own so they don't silently rot —
   # e.g. a function gated `#[cfg(feature = "tty")]` but called from the winit
   # backend compiles fine by default yet breaks the winit-only build.
   #
   # Combos:
-  #   - winit / tty: each real backend, built in isolation.
+  #   - winit / tty / headless: each real backend, built in isolation.
   #   - gl: backend-less, renderer only — the shape the WLCS headless harness
   #     consumes. (A pure `--no-default-features` build does NOT compile by
   #     design: the screencopy capture path needs `renderer_gl`, which is
@@ -83,6 +83,7 @@ jobs:
           - { name: backend-less (gl only), features: gl }
           - { name: winit only, features: winit }
           - { name: tty only, features: tty }
+          - { name: headless only, features: headless }
     name: build (${{ matrix.name }})
 
     steps:
@@ -148,6 +149,42 @@ jobs:
 
       - name: Integration tests (headless WM)
         run: xvfb-run -a -s "-screen 0 1280x800x24" scripts/headless-integration-tests.sh
+
+  # End-to-end tests for the native headless backend and remote sessions: each
+  # test starts `shoestring-wm --backend headless` on Mesa's software renderer,
+  # maps a test client, drives it with injected input and checks pixels, then
+  # runs the real shoestring-remote-server and checks what a viewer sees (gate
+  # revocation, reconnect, the session lock, graft of hidden windows). No X
+  # server needed. See scripts/headless-e2e-tests.sh.
+  e2e:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same build deps as `check`, plus Mesa's surfaceless EGL and the DRI
+      # drivers (llvmpipe), which the headless backend renders with.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev \
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev \
+            libegl-mesa0 libgl1-mesa-dri
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: End-to-end tests (headless backend + remote)
+        run: scripts/headless-e2e-tests.sh
 
   # The same fmt/clippy/test/build sequence on FreeBSD, inside a VM action
   # (GitHub has no native FreeBSD runner). Catches OpenPAM/libudev-devd

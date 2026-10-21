@@ -177,6 +177,21 @@ xvfb-run -a -s "-screen 0 1280x800x24" scripts/headless-integration-tests.sh
 # session's sockets.
 ```
 
+### End-to-end tests (headless backend and remote sessions)
+
+`tests/e2e_headless.rs` drives the native headless backend and a full remote
+session. Each test starts its own `shoestring-wm --backend headless` on Mesa's
+software renderer in a private runtime dir, maps a test client that changes
+colour on input, and checks pixels on the output and as a remote viewer sees
+them through a real `shoestring-remote-server`: input from the viewer, gate
+revocation, reconnect, the session lock, and graft of minimized and
+off-workspace windows. They are `#[ignore]`d too; the harness builds both
+binaries and runs them. No X server, GPU, or running session is needed:
+
+```sh
+scripts/headless-e2e-tests.sh
+```
+
 ### WLCS conformance
 
 [WLCS](https://github.com/canonical/wlcs) (the Wayland Conformance Test
@@ -296,11 +311,11 @@ discuss the approach.
    commit rules in [AGENTS.md](AGENTS.md), which apply to agents and people
    alike.
 3. Run the full local check sequence (fmt, clippy, test, release build) -
-   and the relevant integration/WLCS suites if you touched input, output,
+   and the relevant integration/e2e/WLCS suites if you touched input, output,
    or protocol code.
 4. Open a pull request describing the change and how you verified it. CI
    runs fmt/clippy/test/release, the per-backend feature matrix, the
-   headless integration suite, the WLCS gate, the FreeBSD build, and the
+   headless integration suite, the end-to-end suite, the WLCS gate, the FreeBSD build, and the
    docs build - the same checks listed above.
 
 By contributing, you agree that your contributions are licensed under the

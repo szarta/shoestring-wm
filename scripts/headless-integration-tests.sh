@@ -110,10 +110,11 @@ echo "==> WM up on $wayland_display; running ignored integration tests"
 
 # `--ignored` runs only the #[ignore]'d tests; `-p shoestring-wm` scopes to the
 # WM's test binaries (the integration suites). Picks up any future ignored
-# integration test automatically.
+# integration test automatically. The `e2e_` tests start their own headless
+# WM rather than using this one; scripts/headless-e2e-tests.sh runs them.
 status=0
 XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_display" \
-    cargo test -p shoestring-wm -- --ignored || status=$?
+    cargo test -p shoestring-wm -- --ignored --skip e2e_ || status=$?
 
 if [ "$status" -ne 0 ]; then
     echo "==> integration tests failed; WM log tail:" >&2
