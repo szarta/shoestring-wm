@@ -14,7 +14,7 @@ produces the desktop tools below, the portal, and the remote-desktop tools.
 
 | Binary | Purpose |
 |---|---|
-| `shoestring-wm` | The window manager itself (winit + TTY backends). |
+| `shoestring-wm` | The window manager itself (TTY session, nested winit, and native headless backends). |
 | `shoestring-bar` | Status bar (workspaces, focused window, clock, battery; consumes WM IPC). |
 | `shoestring-menu` | dmenu-style launcher for commands and bookmarks. |
 | `shoestring-notify` | `org.freedesktop.Notifications` daemon (layer-shell pop-ups). |
@@ -28,6 +28,8 @@ produces the desktop tools below, the portal, and the remote-desktop tools.
 | `shoestring-region` | Slurp-equivalent rectangle picker. |
 | `shoestring-kill` | xkill-equivalent click-to-close picker. |
 | `shoestring-confirm` | Modal yes/no helper (used by `Quit`, reusable for other destructive actions). |
+| `shoestring-remote-server` | Remote-desktop server: serves this session to a viewer over a forwarded Unix socket (see `docs/remote.rst`). |
+| `shoestring-remote-client` | Remote-desktop viewer: shows a remote session, or grafts one remote window, on the local machine axis. |
 
 ## Quick start
 
@@ -59,7 +61,7 @@ cargo build --release --workspace
 # launched on demand by keybinds and IPC).
 install -Dm755 -t ~/.local/bin/ \
   target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm,mediad} \
-  target/release/shoestring-{tasks,clipboard} \
+  target/release/shoestring-{tasks,clipboard,remote-server,remote-client} \
   target/release/xdg-desktop-portal-shoestring
 
 # Screen sharing (Zoom, browsers): the portal *binary* above is not enough on

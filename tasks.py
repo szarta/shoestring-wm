@@ -143,6 +143,12 @@ BINARIES = [
     "shoestring-confirm",
     "shoestring-remote-server",
     "shoestring-remote-client",
+    # The WM autostarts these two by bare name from $PATH, so a deploy that
+    # skipped them would leave the session running stale builds.
+    "shoestring-mediad",
+    "xdg-desktop-portal-shoestring",
+    "shoestring-tasks",
+    "shoestring-clipboard",
 ]
 
 # Where the live session looks for the binaries. The display manager would use

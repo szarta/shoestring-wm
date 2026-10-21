@@ -19,11 +19,12 @@ regression, not a feature (see the architecture doc for the full list):
 
 - **Low-dependency.** New dependencies are resisted; the handful of
   exceptions are deliberate and documented. Justify any addition.
-- **Spec-correct over bespoke; we do not fork Smithay.** Smithay is pre-1.0
+- **Spec-correct over bespoke; Smithay stays upstream.** Smithay is pre-1.0
   and pinned to a specific git revision. When a conformance test fails
   because of spec-correct Smithay-core behavior (anvil fails it identically),
   it is tracked as a known xfail, *not* patched around. Genuine bugs go
-  upstream.
+  upstream. The pin points at a fork only to carry a fix that must live in
+  Smithay until upstream has it; see `docs/adr/0002-patch-a-crate-instead-of-forking-smithay.md`.
 - **Invasive features are opt-in.** Screen capture, input automation, and
   idle tracking default off and are absent (not merely inert) until enabled.
 - **systemd-optional and portable.** Linux is primary, but every OS

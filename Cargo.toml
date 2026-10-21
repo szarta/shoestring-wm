@@ -201,6 +201,9 @@ assets = [
     ["target/release/shoestring-menu",       "usr/bin/", "755"],
     ["target/release/shoestring-region",     "usr/bin/", "755"],
     ["target/release/shoestring-mediad",     "usr/bin/", "755"],
+    ["target/release/shoestring-clipboard",  "usr/bin/", "755"],
+    ["target/release/shoestring-remote-server", "usr/bin/", "755"],
+    ["target/release/shoestring-remote-client", "usr/bin/", "755"],
     # Screencast portal backend. The helper goes in libexec (a backend, not a
     # user command). Its *.portal descriptor MUST live in a system data dir:
     # xdg-desktop-portal scans XDG_DATA_DIRS (/usr/share, ...), NOT
@@ -261,6 +264,9 @@ assets = [
     { source = "target/release/shoestring-menu",       dest = "/usr/bin/shoestring-menu",       mode = "0755" },
     { source = "target/release/shoestring-region",     dest = "/usr/bin/shoestring-region",     mode = "0755" },
     { source = "target/release/shoestring-mediad",     dest = "/usr/bin/shoestring-mediad",     mode = "0755" },
+    { source = "target/release/shoestring-clipboard",  dest = "/usr/bin/shoestring-clipboard",  mode = "0755" },
+    { source = "target/release/shoestring-remote-server", dest = "/usr/bin/shoestring-remote-server", mode = "0755" },
+    { source = "target/release/shoestring-remote-client", dest = "/usr/bin/shoestring-remote-client", mode = "0755" },
     # Screencast portal backend. The *.portal descriptor MUST go in a system
     # data dir (/usr/share/...): xdg-desktop-portal scans XDG_DATA_DIRS, not
     # XDG_DATA_HOME, so a per-user copy is never found. See the deb block.

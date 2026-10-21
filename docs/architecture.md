@@ -45,7 +45,8 @@ erodes one of these should be treated as a regression, not a feature:
    non-systemd Linux and the BSDs stay first-class.
 6. **Spec-correct over bespoke.** Lean on smithay and standard protocols
    rather than hand-rolling. Where smithay is spec-correct but a conformance
-   test disagrees, that is upstream's to fix - we do not fork (§13).
+   test disagrees, that is upstream's to fix - we don't patch around it
+   (§13).
 
 ---
 
@@ -198,7 +199,11 @@ own Cargo features rather than always-on:
 - `tty` → `backend_libinput`, `backend_udev`, `backend_drm`, `backend_gbm`,
   `backend_egl`, `backend_session_libseat`, `renderer_gl`, `renderer_multi`,
   plus `smithay-drm-extras`: the real session backend.
-- `default = ["winit", "tty"]`. `gl` is a marker feature so the headless
+- `headless` → `backend_egl`, `backend_gbm`, `renderer_gl`: the native
+  headless backend (surfaceless EGL on a render node, one virtual output, no
+  display), for remote-desktop serve mode, CI and automation. It adds no
+  dependencies beyond what `tty` already pulls in.
+- `default = ["winit", "tty", "headless"]`. `gl` is a marker feature so the
   WLCS harness (which renders with smithay's dummy renderer) can still
   compile the GL-only capture helpers.
 - `profile-with-tracy` (optional) compiles in a `tracing-tracy` layer; it is
@@ -240,7 +245,7 @@ shoestring-wm/                  (workspace root + the WM binary)
 ├── src/                        (the compositor)
 │   ├── main.rs                 (CLI, backend selection, event loop)
 │   ├── state.rs                (ShoestringWm — the whole compositor state)
-│   ├── backend/                (winit.rs, udev.rs, shared output helpers)
+│   ├── backend/                (winit.rs, udev.rs, headless.rs, shared output helpers)
 │   ├── handlers/               (one file per Smithay protocol handler)
 │   ├── input.rs, binds.rs      (input pipeline + keybind table)
 │   ├── grabs/                  (move / resize / popup-touch grabs)
@@ -444,10 +449,13 @@ spanning outputs.
 
 The backend is chosen once at startup by `BackendKind` in `main.rs`: `winit`
 when `WAYLAND_DISPLAY`/`DISPLAY` is set (nested dev), otherwise `tty`
-(udev/DRM, the real session). Each backend wires its own calloop sources;
-there is **no `Backend` trait or dispatch enum on the hot path** - two
-backends do not justify the abstraction, so the divergence is confined to
-startup and the per-frame submit. Only the `tty` backend integrates with the
+(udev/DRM, the real session). The third, `headless` (surfaceless EGL, one
+virtual output, a timer-driven render loop), is never auto-detected: request
+it with `--backend headless`. Each backend wires its own calloop sources;
+there is **no `Backend` trait or dispatch enum on the hot path** - three
+backends that share little beyond the scene composition don't justify the
+abstraction, so the divergence is confined to startup and the per-frame
+submit. Only the `tty` backend integrates with the
 surrounding session (pushing `WAYLAND_DISPLAY`/`DISPLAY` into the systemd
 user manager); the nested winit backend must not clobber the session it runs
 inside.
@@ -533,11 +541,11 @@ revisited deliberately rather than by accident:
 | **Unix-socket + line-JSON IPC** | Trivial to script from any language; the EventStream upgrade carries live events. The surface is a first-class goal, not a debug aid. |
 | **`serde`-only anchor crates** | Companions deserialize WM wire/config types without linking smithay. |
 | **Monorepo for siblings** | Bar/menu/notify build with `--workspace`; one version, one CI. They stay separate processes (the bar stays IPC-coupled on purpose). |
-| **Backend chosen at startup, no trait** | Only two backends (winit dev, udev session); a trait/enum on the hot path would be overhead for no reuse. |
+| **Backend chosen at startup, no trait** | Three backends (winit dev, udev session, native headless); a trait/enum on the hot path would be overhead for little reuse. |
 | **Capability gates default-off, runtime-only** | Capture/automation stay off until deliberately enabled, and a runtime flip doesn't survive a restart: the config file remains the source of truth. The gates are consent switches, not authorization; any IPC client may flip them (ADR 0005, `docs/ipc.rst` "Trust model"). |
 | **Compositor-initiated move/resize** | Openbox-style Super+drag, not client-initiated xdg-shell requests. |
 | **Click-to-focus default** | Focus model is configurable (focus-follows-mouse / sloppy opt-in); click-to-focus is the safe default. |
-| **Pinned smithay rev, never forked** | Smithay is pre-1.0 and churns; we bump intentionally. Spec-correct-but-failing conformance cases are upstream's, tracked as known-xfail (§13). |
+| **Pinned smithay rev; fork only by exception** | Smithay is pre-1.0 and churns; every Smithay dependency names one rev, bumped intentionally. The pin may point at a fork only to carry a fix that must live in Smithay itself until upstream has it (ADR 0002). Spec-correct-but-failing conformance cases are upstream's, tracked as known-xfail (§13). |
 | **New windows centered on the active monitor** | With a per-window stacking offset, matching Openbox placement. |
 
 ---
@@ -547,11 +555,14 @@ revisited deliberately rather than by accident:
 - **Smithay API churn.** Smithay is pre-1.0. We pin a single git rev (shared
   by the WM and `smithay-drm-extras`) and bump deliberately, reading the diff
   rather than tracking `main`.
-- **No forking smithay.** When a WLCS conformance test fails because of
-  smithay-core behavior that is itself spec-correct (anvil fails the same
-  test identically), we record it as known-xfail and do **not** patch or
-  fork. Forking would forfeit upstream fixes for marginal gain. Genuine bugs
-  go upstream as PRs.
+- **No patching around spec-correct smithay.** When a WLCS conformance test
+  fails because of smithay-core behavior that is itself spec-correct (anvil
+  fails the same test identically), we record it as known-xfail and do
+  **not** patch or fork for it. Genuine bugs go upstream as PRs. A fork is
+  the exception ADR 0002 allows: only for a fix that must live in Smithay and
+  that upstream can't take in time, rebased on the upstream pin and dropped
+  once upstream has the fix. Anything else (a dependency in Smithay's tree)
+  is patched as a vendored crate, or replaced (ADR 0004).
 - **DRM/udev complexity.** This is where compositors break; the udev backend
   is the most intricate code and leans directly on anvil's patterns.
 - **Low-dependency pressure.** Every protocol and every crate is tempting.

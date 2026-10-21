@@ -90,7 +90,9 @@ you want on ``$PATH``:
 ::
 
     install -Dm755 -t ~/.local/bin/ \
-        target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
+        target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm} \
+        target/release/shoestring-{mediad,tasks,clipboard,remote-server,remote-client} \
+        target/release/xdg-desktop-portal-shoestring
     shoestring-wm --write-default-config
 
 To get a source build into your login screen's session menu, install the
@@ -99,7 +101,9 @@ minimal ``$PATH`` that will not include ``~/.local/bin``, and the WM spawns
 its helpers by bare name), then add the session file and its wrapper::
 
     sudo install -Dm755 -t /usr/local/bin/ \
-        target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm}
+        target/release/shoestring-{wm,bar,menu,notify,ctl,lock,screenshot,region,kill,confirm} \
+        target/release/shoestring-{mediad,tasks,clipboard,remote-server,remote-client} \
+        target/release/xdg-desktop-portal-shoestring
     sudo install -Dm755 resources/shoestring-wm-session \
         /usr/local/bin/shoestring-wm-session
     sudo install -Dm644 resources/shoestring-wm.desktop \

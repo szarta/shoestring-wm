@@ -32,9 +32,10 @@
 //! **damaged tiles** each frame, zlib-compressed, and an idle desktop produces
 //! zero tiles. The cursor is **structural**: the server sends its position and
 //! `CursorIcon` name and the client renders it with the *local* theme (crisp,
-//! no cursor-in-stream lag). The client tells the server its exact output pixel
-//! size + scale, and the server serves a virtual output at exactly that size —
-//! no rescale blur.
+//! no cursor-in-stream lag). The client tells the server its output's pixel
+//! size and scale in `Hello`; the server treats them as advisory today and
+//! serves the virtual output it already has (sizing it to the client is
+//! planned).
 //!
 //! [`shoestring-ipc`]: ../shoestring_ipc/index.html
 

@@ -85,7 +85,7 @@ Two standalone binaries plus WM-side plumbing. For the serve / headless case::
      shoestring-wm                              shoestring-wm
       ├─ headless backend                        └─ shoestring-remote-client
       │    surfaceless EGL (GPU or llvmpipe)          ssh socket forward ↔ server
-      │    one virtual output, sized by client        decode tiles → fullscreen
+      │    one virtual output                         decode tiles → fullscreen
       │    timer-driven render loop                   render remote cursor locally
       ├─ damage-capture subscription ─ tiles ─>       forward input while active
       ├─ remote gate + registration + chip       local WM: Super+J/K machine axis
@@ -132,9 +132,12 @@ static:
 - **Structural cursor.** The cursor is sent as *position + which* ``CursorIcon``
   and rendered with the **local** theme - crisp, instant, no cursor-in-stream
   lag. Both ends share the cursor vocabulary.
-- **Exact resolution / scale negotiation.** The client sends its output's pixel
-  size + scale; the server sizes the virtual output to exactly that, so there is
-  no rescale blur. The :doc:`headless backend <running>` mints the virtual head.
+- **Resolution and scale.** The client already sends its output's pixel size
+  and scale in ``Hello``, but today the server treats them as advisory: the
+  :doc:`headless backend <running>` serves its virtual output at the size it was
+  started with (``--output-size`` / ``$SHOESTRING_WM_HEADLESS_SIZE``), and the
+  viewer scales the stream to its surface. *Planned:* size the virtual output
+  to exactly the client's ``Hello``, so there is no rescale blur.
 - **Structural window awareness (free).** The served box already exposes
   ``windows`` (geometry, ``app_id``, title, pid, z-order) and an
   ``event-stream``, so a local bar can show the remote's window/workspace list,
@@ -197,7 +200,8 @@ share whole-output capture and global input injection, while graft scopes both
 to a single window (see its entry).
 
 - **Serve / headless mode** *(shipped).* The served box has no display; the
-  remote view **is** the only output - a virtual head sized to the connecting
+  remote view **is** the only output - a virtual head (sized at WM startup for
+  now; sizing it to the connecting client is planned) for the connecting
   client. The compute-offload case.
 - **Mirror mode** *(planned).* The served box has a real display; the server
   streams an existing physical output's scene. The "drive an existing desktop"
@@ -237,7 +241,7 @@ The key fork is **pixel-streaming** (VNC-like) vs **Wayland-protocol-forwarding*
 
 shoestring-specific wins (all from "both ends are shoestring-wm"): damage-push
 straight off the damage tracker (idle ⇒ 0 frames); a structural cursor rendered
-locally; exact resolution/scale via a virtual output; input as an existing gated
+locally; a virtual output (sized to the client, once that lands); input as an existing gated
 IPC primitive; structural window/workspace awareness over the query + event
 stream; and reuse of the existing consent gates as the entire security model.
 
