@@ -299,9 +299,10 @@ fn run_region_picker() -> Result<Region> {
         .output()
         .with_context(|| format!("spawning region picker {:?}", bin))?;
     if !out.status.success() {
-        // Code 1 from the picker == Escape or degenerate drag. Surface
-        // as a tidy error message rather than a confusing nonzero status
-        // with no stdout to parse.
+        // Code 1 from the picker == Escape. Surface as a tidy error
+        // message rather than a confusing nonzero status with no stdout
+        // to parse. (A plain click exits 0 with a zero-size point, which
+        // parse_region_line rejects below.)
         anyhow::bail!("region selection cancelled");
     }
     let line = String::from_utf8(out.stdout)
