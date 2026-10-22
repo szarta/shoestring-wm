@@ -126,6 +126,9 @@ pub struct WmOptions {
     pub lock_preview_secs: Option<u64>,
     /// `[general] output_scale`, if not 1.
     pub output_scale: Option<f64>,
+    /// `[[bindings]]` tables, as TOML. A config file without any has no
+    /// bindings at all (the defaults apply only when there is no file).
+    pub bindings: &'static str,
 }
 
 impl Default for WmOptions {
@@ -141,6 +144,7 @@ impl Default for WmOptions {
             lock_command: None,
             lock_preview_secs: None,
             output_scale: None,
+            bindings: "",
         }
     }
 }
@@ -193,6 +197,7 @@ impl Wm {
         }
         let [r, g, b] = BACKGROUND;
         text += &format!("\n[background]\ncolor = \"#{r:02x}{g:02x}{b:02x}\"\n");
+        text += options.bindings;
         std::fs::write(&config, text).expect("write config");
 
         let stderr = std::fs::File::create(runtime_dir.join("wm.stderr")).expect("wm.stderr");

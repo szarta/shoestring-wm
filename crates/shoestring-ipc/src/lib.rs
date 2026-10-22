@@ -163,10 +163,22 @@ pub enum Request {
     /// (atomic press+release), each [`RawInput`] is one low-level event — a key
     /// or button *down or up*, an absolute motion, or a scroll — so a held key,
     /// a drag, or a chord can be reproduced exactly as the remote client sent
-    /// it. Keys carry an evdev keycode and are forwarded past the WM's binding
-    /// table (the *served* machine's own keymap/binds apply natively). Gated by
-    /// `set_automation`. Reply is [`Response::Ok`].
-    InjectInput { event: RawInput },
+    /// it. Keys carry an evdev keycode.
+    ///
+    /// `bindings` decides whether a key may trigger this WM's keybindings. Off
+    /// (the default), keys go straight to the focused client, past the binding
+    /// table, so a scripted `Super+q` can't quit the WM. On, a key takes the
+    /// same path as a physical keystroke, bindings included: remote serve mode
+    /// sets it, because the viewer is driving this whole desktop and its
+    /// workspace and window keys are meant for this machine. Graft mode uses
+    /// [`Request::InjectInputToWindow`], which never applies bindings. Only
+    /// key events read the flag. Gated by `set_automation`. Reply is
+    /// [`Response::Ok`].
+    InjectInput {
+        event: RawInput,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        bindings: bool,
+    },
     /// Read the WM's current selection (clipboard, or primary with
     /// `primary: true`). The WM picks the best text mime the owner offers, reads
     /// the bytes out of band, and replies with [`Response::Clipboard`] (a
@@ -811,9 +823,9 @@ pub enum Request {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum RawInput {
     /// A key transition. `keycode` is a Linux/evdev keycode (the value *before*
-    /// XKB's `+8` offset, as libinput reports it); the WM adds the offset. The
-    /// key is forwarded past the binding table — the served machine's own keymap
-    /// and keybinds apply.
+    /// XKB's `+8` offset, as libinput reports it); the WM adds the offset.
+    /// Whether it can trigger keybindings is up to the request carrying it
+    /// (see [`Request::InjectInput`]).
     Key { keycode: u32, pressed: bool },
     /// A pointer button transition. `button` is an evdev button code
     /// (`BTN_LEFT` = `0x110`, `BTN_RIGHT` = `0x111`, `BTN_MIDDLE` = `0x112`).
@@ -1870,10 +1882,23 @@ mod tests {
                 keycode: 30,
                 pressed: true,
             },
+            bindings: false,
         };
         assert_eq!(
             serde_json::to_string(&key).unwrap(),
             r#"{"type":"inject_input","event":{"kind":"key","keycode":30,"pressed":true}}"#
+        );
+        // `bindings` is omitted when false and read back as false when absent.
+        let bound = Request::InjectInput {
+            event: RawInput::Key {
+                keycode: 35,
+                pressed: true,
+            },
+            bindings: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&bound).unwrap(),
+            r#"{"type":"inject_input","event":{"kind":"key","keycode":35,"pressed":true},"bindings":true}"#
         );
 
         // Each variant round-trips through the tagged enum.
@@ -1892,9 +1917,16 @@ mod tests {
                 vertical: 15.0,
             },
         ] {
-            let s = serde_json::to_string(&Request::InjectInput { event: ev }).unwrap();
+            let s = serde_json::to_string(&Request::InjectInput {
+                event: ev,
+                bindings: false,
+            })
+            .unwrap();
             let back: Request = serde_json::from_str(&s).unwrap();
-            assert!(matches!(back, Request::InjectInput { event } if event == ev));
+            assert!(matches!(
+                back,
+                Request::InjectInput { event, bindings: false } if event == ev
+            ));
         }
     }
 

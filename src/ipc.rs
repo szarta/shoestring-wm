@@ -1103,14 +1103,14 @@ fn dispatch_input(
             let _ = write_response(client, &Response::Ok);
             true
         }
-        Request::InjectInput { event } => {
+        Request::InjectInput { event, bindings } => {
             if !state.automation_enabled {
                 let _ = write_response(client, &automation_off_error());
                 return true;
             }
             match event {
                 shoestring_ipc::RawInput::Key { keycode, pressed } => {
-                    state.inject_raw_keycode(keycode, pressed)
+                    state.inject_raw_keycode(keycode, pressed, bindings)
                 }
                 shoestring_ipc::RawInput::Button { button, pressed } => {
                     state.inject_raw_button(button, pressed)

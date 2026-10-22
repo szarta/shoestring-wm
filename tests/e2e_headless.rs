@@ -626,3 +626,94 @@ fn e2e_run_command_chatty_child_shares_the_loop() {
     assert_eq!(reply["exit_code"], -1, "{reply}");
     assert_eq!(reply["truncated"], true, "{reply}");
 }
+
+/// evdev `KEY_LEFTMETA` (Super) and `KEY_L`.
+const KEY_LEFTMETA: u32 = 125;
+const KEY_L: u32 = 38;
+
+/// Super+L to the next workspace, as in the default bindings. The test config
+/// has to say so: a config file without bindings has none.
+const SUPER_L_BINDING: &str = r#"
+[[bindings]]
+mods = ["Super"]
+key = "l"
+action = { type = "focus-workspace-relative", delta = 1 }
+"#;
+
+fn start_with_super_l() -> Wm {
+    Wm::start_with(WmOptions {
+        bindings: SUPER_L_BINDING,
+        ..WmOptions::default()
+    })
+}
+
+/// Super+L as raw transitions: Super down, L down and up, Super up.
+fn super_l() -> [(u32, bool); 4] {
+    [
+        (KEY_LEFTMETA, true),
+        (KEY_L, true),
+        (KEY_L, false),
+        (KEY_LEFTMETA, false),
+    ]
+}
+
+fn active_workspace(wm: &Wm) -> u64 {
+    let reply = wm.ipc_ok(json!({"type": "workspaces"}));
+    reply["active"].as_u64().expect("active workspace")
+}
+
+/// Keys from a serve-mode viewer meet the served WM's own bindings: the
+/// viewer is driving this whole desktop, so Super+L switches its workspace.
+/// Automation's raw keys, without `bindings`, still go past the binding table.
+#[test]
+#[ignore]
+fn e2e_remote_serve_keys_reach_bindings() {
+    let mut wm = start_with_super_l();
+    let _client = TestClient::map(&wm);
+    wm.mapped_window();
+    wm.start_remote_server();
+    assert_eq!(active_workspace(&wm), 1);
+
+    // Automation: the reply comes after the key is handled, so the workspace
+    // would already have changed.
+    for (keycode, pressed) in super_l() {
+        wm.ipc_ok(json!({"type": "inject_input",
+                         "event": {"kind": "key", "keycode": keycode, "pressed": pressed}}));
+    }
+    assert_eq!(active_workspace(&wm), 1, "automation keys ran a binding");
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    for (keycode, pressed) in super_l() {
+        viewer.send(ClientMessage::Key { keycode, pressed });
+    }
+    wait_for("the viewer's Super+L to switch workspace", || {
+        (active_workspace(&wm) == 2).then_some(())
+    });
+    viewer.bye();
+}
+
+/// A graft viewer's keys go to the grafted window and never run the served
+/// WM's bindings: that window is one among the viewer's local windows, and
+/// the viewer's own WM owns the keys.
+#[test]
+#[ignore]
+fn e2e_remote_graft_keys_skip_bindings() {
+    let mut wm = start_with_super_l();
+    let _client = TestClient::map(&wm);
+    let (id, _) = wm.mapped_window();
+    wm.start_remote_server();
+    let inside = ((WINDOW_W / 2) as i32, (WINDOW_H / 2) as i32);
+
+    let mut graft = Viewer::graft(&wm, &id);
+    graft.wait_pixel(inside, rgb(IDLE), "grafted window");
+    for (keycode, pressed) in super_l() {
+        graft.send(ClientMessage::Key { keycode, pressed });
+    }
+    // The server forwards in order, so once this key has landed the chord
+    // before it has been handled too.
+    graft.key(KEY_A);
+    graft.wait_pixel(inside, rgb(KEYED), "graft key after the chord");
+    assert_eq!(active_workspace(&wm), 1, "a graft key ran a binding");
+    graft.bye();
+}

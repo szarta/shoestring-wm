@@ -328,14 +328,19 @@ Each request is a JSON object with a ``type`` discriminator:
      - Inject one **raw input transition** straight into the seat — the
        KVM-passthrough primitive behind remote-desktop serve mode. ``event``
        is a tagged object selected by ``"kind"``: ``key`` (``keycode`` is an
-       evdev keycode *before* XKB's ``+8``; forwarded past the binding table so
-       the served machine's own keymap/binds apply), ``button``
+       evdev keycode *before* XKB's ``+8``), ``button``
        (``button`` is an evdev code, ``BTN_LEFT`` = ``272``), ``motion``
        (``x`` / ``y`` compositor-space), and ``axis`` (``horizontal`` /
        ``vertical`` scroll deltas). Each carries ``"pressed"`` for the
        down/up variants. Unlike ``inject_key`` / ``inject_click`` (atomic
        tap / press+release) each is a single event, so a held key, a chord,
-       or a drag reproduces exactly. Gated by the automation gate.
+       or a drag reproduces exactly. Optional ``"bindings": true`` lets a key
+       trigger this WM's keybindings, taking the same path as a physical
+       keystroke (window picker, lock screen and shortcut inhibitors
+       included); remote serve mode sets it, because the viewer is driving
+       this whole desktop. Without it (the default) keys go to the focused
+       client past the binding table, so a scripted ``Super+q`` can't quit the
+       WM. Only ``key`` events read it. Gated by the automation gate.
    * - ``{"type": "inject_input_to_window", "id": "<ft-id>", "event": {…}}``
      - Like ``inject_input`` but delivered to the **single window** named by
        ``id`` (a foreign-toplevel identifier from ``windows``) rather than the
@@ -344,7 +349,9 @@ Each request is a JSON object with a ``type`` discriminator:
        ``y`` are interpreted as **window-local** logical pixels, so input lands
        correctly even when the window is occluded or on a non-active workspace.
        ``event`` is the same tagged ``key`` / ``button`` / ``motion`` / ``axis``
-       currency as ``inject_input``. Gated by the automation gate. Because it
+       currency as ``inject_input``. Keys never trigger this WM's keybindings:
+       a grafted window lives among the viewer's local windows, and the
+       viewer's WM owns the keys. Gated by the automation gate. Because it
        drives the single global seat, it moves the served box's own focus to the
        target window (one graft at a time).
    * - ``{"type": "get_clipboard"}`` (optional ``"primary": true``)

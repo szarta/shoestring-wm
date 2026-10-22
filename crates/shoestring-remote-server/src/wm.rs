@@ -71,8 +71,16 @@ pub fn report_viewers(viewers: u32) -> Result<()> {
 /// socket, and the same pattern the bar uses. The automation gate is coupled
 /// on while the remote gate is enabled, so this only fails if the gate flipped
 /// off mid-session (in which case the session is ending anyway).
+///
+/// Keys go in with `bindings` on: a serve-mode viewer is driving this whole
+/// desktop, so this machine's own keybindings (workspaces, window moves, ...)
+/// answer them, as they would a local keyboard. Graft mode uses
+/// [`inject_to_window`], which never applies bindings.
 pub fn inject(event: RawInput) -> Result<()> {
-    request_ok(&Request::InjectInput { event })
+    request_ok(&Request::InjectInput {
+        event,
+        bindings: true,
+    })
 }
 
 /// Read the served WM's selection (clipboard, or primary). Returns the mime the

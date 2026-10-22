@@ -6,7 +6,9 @@
 //! focused client sees them as ordinary key/pointer events. The injection
 //! path does NOT consult the WM's binding table — we don't want a
 //! scripted `Super+q` to quit the WM. Callers wanting WM actions should
-//! use the typed IPC requests directly.
+//! use the typed IPC requests directly. The one exception is a remote
+//! serve-mode viewer's keys (`inject_input` with `bindings`), which are a
+//! person at a keyboard driving this desktop; see [`inject_raw_keycode`].
 //!
 //! Scope (v1):
 //! - `inject_key`: any keysym understood by `xkb_keysym_from_name`
@@ -369,20 +371,32 @@ impl ShoestringWm {
     }
 
     /// Inject one raw key transition by **evdev keycode** (the value libinput
-    /// reports, before XKB's `+8`). Forwarded past the binding table like every
-    /// injected key — the served machine's own keymap and keybinds apply. The
-    /// KVM-passthrough primitive for remote serve mode; unlike [`inject_key`]
-    /// it is a single down/up, so held keys and chords reproduce exactly.
-    pub fn inject_raw_keycode(&mut self, evdev_keycode: u32, pressed: bool) {
+    /// reports, before XKB's `+8`). The KVM-passthrough primitive for remote
+    /// serve mode; unlike [`inject_key`] it is a single down/up, so held keys
+    /// and chords reproduce exactly.
+    ///
+    /// With `bindings`, the key takes the physical-keyboard path
+    /// ([`ShoestringWm::process_key`]): this WM's keybindings, the window
+    /// picker, the session-lock and shortcuts-inhibitor rules all apply, as
+    /// they would to a local keystroke. Remote serve mode asks for this — the
+    /// viewer is driving this whole desktop, and the viewing WM has already
+    /// kept its own machine-axis and break-out keys. Without it, the key is
+    /// forwarded past the binding table like every other injected key.
+    pub fn inject_raw_keycode(&mut self, evdev_keycode: u32, pressed: bool, bindings: bool) {
         let state = if pressed {
             KeyState::Pressed
         } else {
             KeyState::Released
         };
-        // dispatch_key speaks X-style keycodes (evdev + 8); the wire carries the
+        // Both paths speak X-style keycodes (evdev + 8); the wire carries the
         // raw evdev code, matching what smithay's libinput backend adds before
         // calling KeyboardHandle::input.
-        self.dispatch_key(evdev_keycode + 8, state);
+        let keycode = evdev_keycode + 8;
+        if bindings {
+            self.process_key(keycode.into(), state, monotonic_msec());
+        } else {
+            self.dispatch_key(keycode, state);
+        }
     }
 
     /// Inject one raw pointer button transition by evdev button code
@@ -449,7 +463,9 @@ impl ShoestringWm {
         match event {
             shoestring_ipc::RawInput::Key { keycode, pressed } => {
                 // Pin keyboard focus to the target, then inject past the binding
-                // table (the grafted app's own keymap applies). set_focus is a
+                // table: a grafted window is one window among the viewer's local
+                // ones, so the viewer's WM owns the bindings and this machine's
+                // must not act on a desktop nobody is looking at. set_focus is a
                 // no-op when focus is already there, so repeated keys don't churn.
                 if let Some(kb) = self.seat.get_keyboard() {
                     if let Some(target) = crate::window_ext::keyboard_focus(&window) {
@@ -457,7 +473,7 @@ impl ShoestringWm {
                         kb.set_focus(self, Some(target), serial);
                     }
                 }
-                self.inject_raw_keycode(keycode, pressed);
+                self.inject_raw_keycode(keycode, pressed, false);
             }
             shoestring_ipc::RawInput::Motion { x, y } => {
                 self.inject_window_motion(&window, x, y);

@@ -72,9 +72,11 @@ The UX model is a second navigation axis. You are always at
   Index 0 is ``local``; each connected remote is the next index.
 
 When the active view is a remote machine, your input drives that machine, so its
-*own* keymap and keybinds apply natively - only ``Super+J/K`` and a single
-break-out hotkey (``Super+Escape``) are intercepted locally. The keys and the
-clipboard-bridge binds are documented in :doc:`bindings`.
+*own* keymap and keybinds apply natively: ``Super+H/L`` walks the remote's
+workspaces, and its window keys act on its windows. Only the machine-axis keys
+(``Super+J/K``), the break-out hotkey (``Super+Escape``), the clipboard bridge
+and the screenshot key stay with your local WM. The keys are documented in
+:doc:`bindings`.
 
 Architecture
 ------------
@@ -148,11 +150,31 @@ Input model
 
 **Raw KVM-passthrough.** While a remote is the active view the local WM captures
 all input and forwards it to the remote, which injects it - so the *remote's own
-keybinds Just Work*. Only ``Super+J/K`` (switch machine) and the break-out
-hotkey are intercepted locally. The grab reuses the precedent set by the window
-picker and the keyboard-shortcuts-inhibit paths. (The alternative - resolving
-binds locally and forwarding *actions* via ``dispatch_action`` - is more
-structured but less seamless, and was rejected for v1.)
+keybinds Just Work*. Only ``Super+J/K`` (switch machine), the break-out hotkey,
+the clipboard bridge and the screenshot key are intercepted locally. The grab
+reuses the precedent set by the window picker and the keyboard-shortcuts-inhibit
+paths. (The alternative - resolving binds locally and forwarding *actions* via
+``dispatch_action`` - is more structured but less seamless, and was rejected
+for v1.)
+
+**Whose keybinds answer a key** depends on the mode, and the rule is that
+exactly one WM does:
+
+- **Serve mode:** the remote's. The viewer is a fullscreen overlay standing in
+  for that machine's whole desktop, so a forwarded key takes the same path a
+  key on the remote's own keyboard would: its bindings, its window picker, its
+  lock screen. The local WM has already kept the few keys above, so the two
+  never compete, and no remote window can be maximized over your local
+  workspace keys.
+- **Graft mode:** yours. A grafted window is one window among your local ones,
+  so your WM's bindings apply first, and only the keys it lets through reach
+  the grafted app - past the remote WM's binding table, which never acts on
+  them. Otherwise a key your local WM doesn't bind could switch workspaces or
+  close windows on a remote desktop nobody is looking at.
+
+Over IPC this is ``inject_input``'s ``bindings`` flag, which the server sets
+for serve sessions; graft uses ``inject_input_to_window``, which never applies
+bindings, and automation's raw keys skip them too (see :doc:`ipc`).
 
 Consent and security
 --------------------
@@ -222,7 +244,8 @@ to a single window (see its entry).
   workspace. The viewer presents it as an ordinary ``xdg_toplevel`` the local WM
   tiles/moves/closes like any app, and forwards the natural keyboard/pointer
   input the window receives back to the served window (keyboard focus pinned to
-  it, pointer coordinates window-local). Run it with
+  it, pointer coordinates window-local). Your local keybinds apply to it; the
+  remote WM's don't (see *Input model*). Run it with
   ``shoestring-remote-client --graft <selector>`` where ``selector`` matches a
   remote window's ``app_id`` / ``title`` / foreign-toplevel id; the server
   resolves it against the served WM's window list. *v1 limitations:* one graft

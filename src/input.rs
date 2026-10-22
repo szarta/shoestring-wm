@@ -12,7 +12,7 @@ use smithay::{
     },
     desktop::Window,
     input::{
-        keyboard::FilterResult,
+        keyboard::{FilterResult, Keycode},
         pointer::{
             AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
             GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -724,14 +724,20 @@ impl ShoestringWm {
         }
     }
 
-    /// A key transition. Resolves the repeat-stop, then routes to one of three
-    /// modes — window picker, machine-axis capture, or normal keybinding — each
-    /// of which runs the key through xkb to keep modifier state consistent.
+    /// A key transition from a physical keyboard.
     fn handle_keyboard_event<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
+        self.process_key(event.key_code(), event.state(), Event::time_msec(&event));
+    }
+
+    /// One key transition, as from a keyboard: resolves the repeat-stop, then
+    /// routes to one of three modes — window picker, machine-axis capture, or
+    /// normal keybinding — each of which runs the key through xkb to keep
+    /// modifier state consistent. Physical keys come here, and so do a remote
+    /// serve-mode viewer's (see `inject_raw_keycode`), so both meet the same
+    /// binding policy. `key` is the X-style keycode (evdev + 8).
+    pub(crate) fn process_key(&mut self, key: Keycode, key_state: KeyState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
-        let time = Event::time_msec(&event);
-        let key_state = event.state();
-        let keycode: u32 = event.key_code().into();
+        let keycode: u32 = key.into();
         // Releasing the held repeat keycode stops the repeat.
         // Done before the bind lookup so a chord that resolves
         // to the same key (unusual but possible) still ends
@@ -748,7 +754,7 @@ impl ShoestringWm {
         // swallowed so the user can't accidentally type into the
         // window they're about to kill.
         if self.pending_picker.is_some() {
-            self.handle_picker_key::<I>(&event, serial, time, key_state);
+            self.handle_picker_key(key, serial, time, key_state);
             return;
         }
         // Machine-axis capture mode: a remote is the active view, so the
@@ -757,10 +763,10 @@ impl ShoestringWm {
         // and the break-out, which stay local so the user can always switch
         // back.
         if let Some(target) = self.captured_client() {
-            self.handle_captured_key::<I>(&event, target, serial, time, key_state, keycode);
+            self.handle_captured_key(key, target, serial, time, key_state);
             return;
         }
-        self.handle_keybinding::<I>(&event, serial, time, key_state, keycode);
+        self.handle_keybinding(key, serial, time, key_state);
     }
 
     /// Window-picker key handling: run the key through xkb so modifier state
@@ -768,16 +774,10 @@ impl ShoestringWm {
     /// surface. Pull the resolved keysym out and hand it to the shared resolver
     /// (Escape cancels), which the injected-key path also uses so the two can't
     /// drift.
-    fn handle_picker_key<I: InputBackend>(
-        &mut self,
-        event: &I::KeyboardKeyEvent,
-        serial: Serial,
-        time: u32,
-        key_state: KeyState,
-    ) {
+    fn handle_picker_key(&mut self, key: Keycode, serial: Serial, time: u32, key_state: KeyState) {
         let sym = self.seat.get_keyboard().unwrap().input::<u32, _>(
             self,
-            event.key_code(),
+            key,
             key_state,
             serial,
             time,
@@ -798,14 +798,13 @@ impl ShoestringWm {
     /// modifier state consistent) and intercept it; the resolved sym/mods only
     /// decide local-vs-forward. The axis/break-out/screenshot/clipboard binds
     /// stay local; everything else is forwarded raw to the active remote.
-    fn handle_captured_key<I: InputBackend>(
+    fn handle_captured_key(
         &mut self,
-        event: &I::KeyboardKeyEvent,
+        key: Keycode,
         target: ClientId,
         serial: Serial,
         time: u32,
         key_state: KeyState,
-        keycode: u32,
     ) {
         enum CapKey {
             Local(Action),
@@ -813,7 +812,7 @@ impl ShoestringWm {
         }
         let decision = self.seat.get_keyboard().unwrap().input::<CapKey, _>(
             self,
-            event.key_code(),
+            key,
             key_state,
             serial,
             time,
@@ -849,7 +848,7 @@ impl ShoestringWm {
                 self.forward_captured(
                     target,
                     shoestring_ipc::RawInput::Key {
-                        keycode: keycode.saturating_sub(8),
+                        keycode: u32::from(key).saturating_sub(8),
                         pressed: key_state == KeyState::Pressed,
                     },
                 );
@@ -862,17 +861,10 @@ impl ShoestringWm {
     /// configured binds and dispatch the matched action, honouring the session
     /// lock and keyboard-shortcuts-inhibitor escape hatches. A matched
     /// repeatable bind arms auto-repeat; any other bind cancels a prior repeat.
-    fn handle_keybinding<I: InputBackend>(
-        &mut self,
-        event: &I::KeyboardKeyEvent,
-        serial: Serial,
-        time: u32,
-        key_state: KeyState,
-        keycode: u32,
-    ) {
+    fn handle_keybinding(&mut self, key: Keycode, serial: Serial, time: u32, key_state: KeyState) {
         let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
             self,
-            event.key_code(),
+            key,
             key_state,
             serial,
             time,
@@ -944,7 +936,7 @@ impl ShoestringWm {
             let repeatable = is_repeatable(&a);
             self.dispatch_action(a.clone());
             if repeatable {
-                self.start_key_repeat(keycode, a);
+                self.start_key_repeat(key.into(), a);
             } else {
                 // A non-repeatable bind cancels any prior
                 // held repeat — e.g. Super+H is repeating, the
