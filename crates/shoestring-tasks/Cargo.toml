@@ -2,6 +2,7 @@
 name = "shoestring-tasks"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Console (TUI) mission-control for shoestring-wm windows and workspaces."

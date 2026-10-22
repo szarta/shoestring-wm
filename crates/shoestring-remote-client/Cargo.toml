@@ -2,6 +2,7 @@
 name = "shoestring-remote-client"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Remote-desktop viewer for shoestring-wm: presents a remote shoestring-wm desktop fullscreen and forwards local input over an ssh tunnel."

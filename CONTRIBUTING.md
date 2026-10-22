@@ -33,9 +33,9 @@ regression, not a feature (see the architecture doc for the full list):
 
 ## Prerequisites
 
-You need a stable Rust toolchain (via [rustup](https://rustup.rs/)) and the
-system development libraries. On Debian/Ubuntu (24.04+, which is what CI
-uses):
+You need a stable Rust toolchain, 1.88 or newer (via
+[rustup](https://rustup.rs/)), and the system development libraries. On
+Debian/Ubuntu (24.04+, which is what CI uses):
 
 ```sh
 sudo apt-get install -y \
@@ -306,6 +306,12 @@ keybindings → `docs/bindings.rst`; architecture/decisions →
 - **Respect the gates.** Anything that can observe or drive the session
   without the user's active participation must stay opt-in and default-off.
 - **Keep docs in sync** with the surface you touched (see above).
+- **Mind the minimum Rust version.** `rust-version` in the workspace
+  `Cargo.toml` (and spelled out in `crates/wlcs-shoestring/Cargo.toml`) is
+  the oldest Rust the project builds with, and the `msrv` CI job checks the
+  workspace with exactly that toolchain. If a change needs a newer Rust,
+  raise it in both manifests, the `msrv` job, and `docs/install.rst` in the
+  same commit.
 - **Mind dependency licenses.** CI runs `cargo about generate about.hbs`,
   which fails if a shipped dependency's license isn't in `about.toml`'s
   `accepted` list. If a new dependency brings a new license, check it is

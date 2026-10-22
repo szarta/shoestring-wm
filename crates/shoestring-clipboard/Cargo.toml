@@ -2,6 +2,7 @@
 name = "shoestring-clipboard"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Observe and set the shoestring-wm clipboard from out of focus over wlr-data-control; the unix-pipe half of the cross-machine clipboard bridge (watch | ssh host set)."

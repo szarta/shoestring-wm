@@ -2,6 +2,7 @@
 name = "shoestring-remote-server"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Remote-desktop serve-mode bridge for shoestring-wm: streams the WM's output and replays client input over an ssh tunnel."

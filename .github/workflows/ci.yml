@@ -83,6 +83,38 @@ jobs:
   # Plain `cargo build`, not `clippy -D warnings`: the backend-less config
   # legitimately leaves a lot of backend plumbing as dead code, so the goal
   # here is compile-rot detection, not a warning gate.
+  # Minimum supported Rust version: check the workspace (all targets, all
+  # features) with the toolchain named by `rust-version` in Cargo.toml, so a
+  # change that needs a newer compiler or bumps a dependency past it fails
+  # here instead of on a distribution's older rustc. Keep the version below in
+  # step with Cargo.toml.
+  msrv:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl-dev \
+            libudev-dev libinput-dev \
+            libseat-dev libdisplay-info-dev libpixman-1-dev \
+            libpam0g-dev \
+            libpipewire-0.3-dev libclang-dev
+
+      - name: Toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (MSRV)
+        run: cargo check --workspace --all-targets --all-features --locked
+
   feature-matrix:
     runs-on: ubuntu-24.04
     strategy:

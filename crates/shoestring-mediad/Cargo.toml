@@ -2,6 +2,7 @@
 name = "shoestring-mediad"
 version.workspace = true
 edition = "2021"
+rust-version.workspace = true
 license = "MIT"
 description = "PipeWire-linked media-privacy monitor + mute control for shoestring-wm: reports default sink/source mute + camera-in-use to the WM over IPC, and applies mute on request."
 repository = "https://github.com/szarta/shoestring-wm"

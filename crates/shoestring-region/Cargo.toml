@@ -2,6 +2,7 @@
 name = "shoestring-region"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Interactive region picker for shoestring-wm. Slurp-equivalent: drag a rectangle, print 'OUTPUT X Y W H'."

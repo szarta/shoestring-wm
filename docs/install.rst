@@ -20,7 +20,7 @@ and xkbcommon. pixman is the headless backend's CPU renderer (see
 
 You also need:
 
-- Rust 1.76+ (stable). ``rustup`` is the recommended installer.
+- Rust 1.88 or newer (stable). ``rustup`` is the recommended installer.
 - A working DRM/KMS-capable GPU driver if you want to run on a TTY
   (open-source ``amdgpu`` / ``i915`` / ``nouveau`` work out of the box;
   proprietary nvidia is untested and not a v1 target).

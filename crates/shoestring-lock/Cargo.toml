@@ -2,6 +2,7 @@
 name = "shoestring-lock"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Screen locker for shoestring-wm. Implements ext-session-lock-v1; verifies via PAM."

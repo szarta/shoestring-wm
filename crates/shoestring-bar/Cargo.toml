@@ -2,6 +2,7 @@
 name = "shoestring-bar"
 version.workspace = true
 edition = "2021"
+rust-version.workspace = true
 license = "MIT"
 description = "A lightweight Wayland status bar for shoestring-wm."
 repository = "https://github.com/szarta/shoestring-bar"

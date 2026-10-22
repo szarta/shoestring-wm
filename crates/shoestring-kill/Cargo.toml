@@ -2,6 +2,7 @@
 name = "shoestring-kill"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Click-to-close window picker for shoestring-wm (xkill equivalent)."

@@ -2,6 +2,7 @@
 name = "shoestring-confirm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Modal yes/no confirm dialog for shoestring-wm (Enter = confirm, Esc = cancel)."

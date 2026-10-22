@@ -2,6 +2,7 @@
 name = "shoestring-screenshot"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Screenshot client for shoestring-wm. Captures via wlr-screencopy and writes PNGs."
