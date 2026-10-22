@@ -81,11 +81,65 @@ default; see :doc:`configuration`) parks the timer while nothing changes. The
 next client commit, input, or IPC request restarts it, so it also renders a
 commit sooner than the next tick would.
 
-The heavy workloads are repainting and the lock screen. Mesa's software
-renderer costs CPU in proportion to the repainted area, far more than a GPU
-render node. While the session is locked, remote viewers get a static frame
-rather than the animated lock screen (see :doc:`remote`), but the WM still
-composites the lock screen locally.
+Repainting is the heavy workload, and the renderer decides its cost: pixman
+and a GPU render node cost about the same, while Mesa's llvmpipe costs roughly
+ten times as much CPU. While the session is locked, remote viewers get a static
+frame rather than the animated lock screen (see :doc:`remote`), and the WM
+composites only what the lock screen redraws.
+
+Measured at v0.9.0 with ``scripts/measure-headless.sh``, on a 1920x1080
+headless output, on a laptop with a 4-core, 8-thread Intel Core i7-10610U and
+its integrated UHD Graphics (Mesa 25.2), 10 seconds per workload. CPU is a
+percentage of one core; RSS is the WM's.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Workload
+     - pixman
+     - llvmpipe
+     - gles (GPU)
+   * - Idle, one window: WM CPU, wakeups/s
+     - 1.6%, 60
+     - 2.0%, 59
+     - 1.9%, 59
+   * - Idle, one window, ``idle_suspend`` on
+     - 0.1%, 1
+     - 0.0%, 1
+     - 0.0%, 1
+   * - 800x600 window repainting at 30 fps: WM CPU
+     - 7.9%
+     - 92%
+     - 11%
+   * - The same, viewer attached: WM CPU
+     - 16%
+     - 101%
+     - 21%
+   * - Locked (maze screensaver), viewer attached: WM CPU
+     - 2.1%
+     - 9.8%
+     - 6.9%
+   * - Commit-to-viewer latency, median / p95
+     - 23 / 40 ms
+     - 27 / 45 ms
+     - 40 / 42 ms
+   * - The same, ``idle_suspend`` on
+     - 19 / 21 ms
+     - 23 / 25 ms
+     - 22 / 23 ms
+   * - WM RSS
+     - 26-56 MiB
+     - 119-159 MiB
+     - 91-118 MiB
+   * - WM threads
+     - 4
+     - 21
+     - 8
+
+On every renderer the stream for the repainting window ran at about 280 KiB/s
+and 29.5 frames/s; an idle or locked desktop streamed nothing. The remote
+server stayed under 0.5% CPU and 4 MiB, and slept entirely while idle;
+``shoestring-lock`` used about 1% CPU and 47 MiB.
 
 To measure on your own machine, run::
 
