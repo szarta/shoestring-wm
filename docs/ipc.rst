@@ -169,7 +169,7 @@ from versions. That works even when the client is older or newer than the WM,
 or talks to a WM on another machine::
 
     $ shoestring-ctl server-info
-    {"type":"server_info","version":"0.8.0","backend":"headless","locked":false,
+    {"type":"server_info","version":"0.9.0","backend":"headless","locked":false,
      "gates":{"automation":false,"screen_capture":false,"remote":false,
               "remote_server_available":false},"requests":["workspaces",...]}
 
