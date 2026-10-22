@@ -47,7 +47,16 @@ Fedora::
 
 The leading ``./`` matters: it tells the package manager to treat the file
 as a local package and resolve the runtime library dependencies recorded
-inside it. Then generate a starter config::
+inside it.
+
+Each package also carries the license notices of every bundled third-party
+crate (``THIRD_PARTY_LICENSES.txt``, under ``/usr/share/doc/shoestring-wm/``
+in the ``.deb`` and ``/usr/share/licenses/shoestring-wm/`` in the ``.rpm``)
+and a CycloneDX software bill of materials for each binary, under
+``/usr/share/doc/shoestring-wm/sbom/``. The release page carries both too, as
+``THIRD_PARTY_LICENSES.txt`` and ``shoestring-wm-<version>-sbom.tar.gz``.
+
+Then generate a starter config::
 
     shoestring-wm --write-default-config
 

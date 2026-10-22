@@ -1,0 +1,27 @@
+# cargo-about configuration — https://embarkstudios.github.io/cargo-about/
+#
+# SPDX license expressions that are acceptable for dependencies of this project.
+# New deps with licenses not on this list will fail the CI license check, so a
+# new license is added here deliberately, after review. The list is exactly the
+# set the dependency tree uses today.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+
+# The notices cover what ships: dependencies of the binaries on the platforms
+# the project packages for, not test-only crates or other platforms' crates.
+ignore-dev-dependencies = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-freebsd",
+]

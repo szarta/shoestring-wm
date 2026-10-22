@@ -58,6 +58,15 @@ jobs:
       - name: cargo build (release)
         run: cargo build --workspace --release
 
+      # License gate: cargo-about refuses any shipped dependency whose license
+      # isn't in about.toml's accepted list, so a new license is reviewed on
+      # the commit that brings it in, not at release time.
+      - name: Install cargo-about
+        run: cargo install cargo-about --version 0.9.2 --features cli --locked
+
+      - name: Check dependency licenses
+        run: cargo about generate about.hbs -o /dev/null
+
   # The default build is `winit + tty + headless`; `cargo build --workspace`
   # above only ever exercises that combo. This matrix compiles shoestring-wm with each
   # non-default backend feature set on its own so they don't silently rot —

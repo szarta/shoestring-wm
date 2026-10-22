@@ -306,6 +306,13 @@ keybindings → `docs/bindings.rst`; architecture/decisions →
 - **Respect the gates.** Anything that can observe or drive the session
   without the user's active participation must stay opt-in and default-off.
 - **Keep docs in sync** with the surface you touched (see above).
+- **Mind dependency licenses.** CI runs `cargo about generate about.hbs`,
+  which fails if a shipped dependency's license isn't in `about.toml`'s
+  `accepted` list. If a new dependency brings a new license, check it is
+  compatible with the MIT-licensed release before adding it there.
+  `scripts/generate-sbom.sh` builds the release's license notices and
+  CycloneDX SBOMs into `target/sbom/` (it needs `cargo-about` and
+  `cargo-cyclonedx`).
 
 ## Submitting changes
 

@@ -92,6 +92,17 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release
 
+      # Third-party license notices and CycloneDX SBOMs, installed into the
+      # package and attached to the release (scripts/generate-sbom.sh).
+      # Tool versions pinned so a release's SBOM format doesn't drift.
+      - name: Install SBOM tools
+        run: |
+          cargo install cargo-about --version 0.9.2 --features cli --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Generate SBOM and license notices
+        run: scripts/generate-sbom.sh
+
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
 
@@ -107,13 +118,24 @@ jobs:
           name: shoestring-wm-deb
           path: target/debian/*.deb
 
+      - name: Upload SBOM as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shoestring-wm-sbom
+          path: |
+            target/sbom/*-sbom.tar.gz
+            target/sbom/THIRD_PARTY_LICENSES.txt
+
       # Only publish to a Release on an actual tag push, not on a manual
       # workflow_dispatch dry-run.
       - name: Attach .deb to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/debian/*.deb
+          files: |
+            target/debian/*.deb
+            target/sbom/*-sbom.tar.gz
+            target/sbom/THIRD_PARTY_LICENSES.txt
 
   rpm:
     runs-on: ubuntu-24.04
@@ -128,8 +150,8 @@ jobs:
     # — notably libdisplay-info (.so.2 on F41 -> .so.3 on F44), via
     # smithay-drm-extras' EDID parsing — so an rpm built on an old Fedora hard-
     # requires an soname that newer Fedora no longer ships and fails to install
-    # (found install-testing v0.4.0, built on fedora:41, on a real F44 box;
-    # todo #145). Building against the current stable keeps the single rpm
+    # (found install-testing v0.4.0, built on fedora:41, on a real F44 box).
+    # Building against the current stable keeps the single rpm
     # installable on what people actually run; the supported floor follows
     # upstream as a deliberate trade for zero per-release maintenance.
     container:
@@ -163,6 +185,17 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --workspace --release
+
+      # Third-party license notices and CycloneDX SBOMs, installed into the
+      # package and attached to the release (scripts/generate-sbom.sh).
+      # Tool versions pinned so a release's SBOM format doesn't drift.
+      - name: Install SBOM tools
+        run: |
+          cargo install cargo-about --version 0.9.2 --features cli --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Generate SBOM and license notices
+        run: scripts/generate-sbom.sh
 
       - name: Install cargo-generate-rpm
         run: cargo install cargo-generate-rpm --locked

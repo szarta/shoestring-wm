@@ -230,6 +230,10 @@ assets = [
     ["docs/_build/man/shoestring-screenshot.1", "usr/share/man/man1/", "644"],
     ["README.md",                            "usr/share/doc/shoestring-wm/README.md", "644"],
     ["LICENSE",                              "usr/share/doc/shoestring-wm/", "644"],
+    # Third-party license notices and CycloneDX SBOMs, from
+    # scripts/generate-sbom.sh (run it before `cargo deb`).
+    ["target/sbom/THIRD_PARTY_LICENSES.txt", "usr/share/doc/shoestring-wm/", "644"],
+    ["target/sbom/*.cdx.json",               "usr/share/doc/shoestring-wm/sbom/", "644"],
     # Dedicated PAM policy for the screen locker. Installed under /etc so
     # cargo-deb treats it as a conffile (preserved across upgrades). Without
     # it shoestring-lock fails closed (PAM `other` = deny).
@@ -290,6 +294,10 @@ assets = [
     { source = "docs/_build/man/shoestring-screenshot.1", dest = "/usr/share/man/man1/shoestring-screenshot.1", mode = "0644", doc = true },
     { source = "README.md",                            dest = "/usr/share/doc/shoestring-wm/README.md", mode = "0644", doc = true },
     { source = "LICENSE",                              dest = "/usr/share/licenses/shoestring-wm/LICENSE", mode = "0644", doc = true },
+    # Third-party license notices and CycloneDX SBOMs, from
+    # scripts/generate-sbom.sh (run it before `cargo generate-rpm`).
+    { source = "target/sbom/THIRD_PARTY_LICENSES.txt", dest = "/usr/share/licenses/shoestring-wm/THIRD_PARTY_LICENSES.txt", mode = "0644", doc = true },
+    { source = "target/sbom/*.cdx.json",               dest = "/usr/share/doc/shoestring-wm/sbom/", mode = "0644", doc = true },
     # Dedicated PAM policy for the screen locker; config so rpm preserves
     # local edits across upgrades. Without it shoestring-lock fails closed.
     { source = "resources/pam/shoestring-lock.linux",  dest = "/etc/pam.d/shoestring-lock", mode = "0644", config = true },
