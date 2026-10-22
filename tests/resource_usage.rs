@@ -16,8 +16,9 @@
 //! Linux only (it reads `/proc`). Knobs:
 //!
 //! - `SHOESTRING_MEASURE_SECS`: seconds per measurement window (default 10).
-//! - `SHOESTRING_MEASURE_RENDERER`: `software`, `gpu`, or `both` (default:
-//!   `both` when a render node exists, else `software`).
+//! - `SHOESTRING_MEASURE_RENDERER`: a comma-separated list of `[headless]
+//!   renderer`s to measure, from `pixman`, `llvmpipe`, and `gles` (default: all
+//!   three when a render node exists, else `pixman,llvmpipe`).
 //! - `SHOESTRING_MEASURE_IDLE_SUSPEND`: `off` (default), `on`, or `both`, for
 //!   `[headless] idle_suspend`.
 //! - `SHOESTRING_MEASURE_JSON`: also write the results to this file.
@@ -198,10 +199,13 @@ impl Results {
 }
 
 /// Run every workload on one renderer.
-fn run_workloads(software: bool, idle_suspend: bool, window: Duration) -> Value {
+fn run_workloads(renderer: &str, idle_suspend: bool, window: Duration) -> Value {
     let options = WmOptions {
         output: OUTPUT,
-        software,
+        // The software renderers must not touch the GPU (llvmpipe would
+        // otherwise pick it up through Mesa).
+        software: renderer != "gles",
+        renderer: Some(renderer.to_string()),
         idle_suspend,
         ..WmOptions::default()
     };
@@ -387,15 +391,17 @@ fn measure_headless_resource_use() {
     let window = Duration::from_secs(secs);
     let has_gpu =
         (128..=130).any(|n| std::path::Path::new(&format!("/dev/dri/renderD{n}")).exists());
-    let renderers: Vec<(&str, bool)> = match std::env::var("SHOESTRING_MEASURE_RENDERER").as_deref()
-    {
-        Ok("software") => vec![("software", true)],
-        Ok("gpu") => vec![("gpu", false)],
-        Ok("both") => vec![("software", true), ("gpu", false)],
-        Ok(other) => panic!("SHOESTRING_MEASURE_RENDERER={other}: use software, gpu, or both"),
-        Err(_) if has_gpu => vec![("software", true), ("gpu", false)],
-        Err(_) => vec![("software", true)],
+    let renderers: Vec<String> = match std::env::var("SHOESTRING_MEASURE_RENDERER") {
+        Ok(list) => list.split(',').map(|r| r.trim().to_string()).collect(),
+        Err(_) if has_gpu => vec!["pixman".into(), "llvmpipe".into(), "gles".into()],
+        Err(_) => vec!["pixman".into(), "llvmpipe".into()],
     };
+    for r in &renderers {
+        assert!(
+            ["pixman", "llvmpipe", "gles"].contains(&r.as_str()),
+            "SHOESTRING_MEASURE_RENDERER: unknown renderer {r:?}"
+        );
+    }
 
     let suspend: Vec<bool> = match std::env::var("SHOESTRING_MEASURE_IDLE_SUSPEND").as_deref() {
         Ok("off") | Err(_) => vec![false],
@@ -405,14 +411,14 @@ fn measure_headless_resource_use() {
     };
 
     let mut all = serde_json::Map::new();
-    for (renderer, software) in renderers {
+    for renderer in &renderers {
         for &idle_suspend in &suspend {
             let name = if idle_suspend {
                 format!("{renderer}, idle_suspend on")
             } else {
                 renderer.to_string()
             };
-            let results = run_workloads(software, idle_suspend, window);
+            let results = run_workloads(renderer, idle_suspend, window);
             print_table(&name, &results);
             all.insert(name, results);
         }

@@ -193,7 +193,10 @@ scripts/headless-e2e-tests.sh
 ```
 
 The harness runs the suite twice, the second time with `[headless]
-idle_suspend` on. `scripts/measure-headless.sh` uses the same harness to
+idle_suspend` on. It renders with pixman, the default without a GPU; set
+`SHOESTRING_E2E_RENDERER=llvmpipe` or `=gles` (on a machine with a GPU render
+node) to run it against another renderer. One test renders the same scene on
+every available renderer and compares the pixels. `scripts/measure-headless.sh` uses the same harness to
 measure the headless backend's CPU, wakeups, memory, stream bandwidth, and
 latency under fixed workloads (Linux only); see "Resource use" in
 `docs/running.rst`.

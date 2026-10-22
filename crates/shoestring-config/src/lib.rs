@@ -142,6 +142,41 @@ pub struct Headless {
     /// cursor theme only advances on the heartbeat while parked.
     #[serde(default)]
     pub idle_suspend: bool,
+    /// What composites the output. Read at startup only.
+    #[serde(default)]
+    pub renderer: HeadlessRenderer,
+}
+
+/// The headless backend's renderer (`[headless] renderer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeadlessRenderer {
+    /// The GPU render node if one opens, else `pixman`.
+    #[default]
+    Auto,
+    /// GLES on a GPU render node; fail to start without one.
+    Gles,
+    /// GLES on Mesa's software rasterizer (surfaceless EGL).
+    Llvmpipe,
+    /// The pixman CPU compositor: no GPU or EGL needed, and far cheaper than
+    /// llvmpipe for desktop content.
+    Pixman,
+}
+
+impl std::str::FromStr for HeadlessRenderer {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "gles" => Ok(Self::Gles),
+            "llvmpipe" => Ok(Self::Llvmpipe),
+            "pixman" => Ok(Self::Pixman),
+            other => Err(format!(
+                "unknown renderer {other:?}: use auto, gles, llvmpipe, or pixman"
+            )),
+        }
+    }
 }
 
 /// `[clipboard]` — clipboard-manager interop.
@@ -1826,6 +1861,24 @@ actions = {}
         assert_eq!(cfg.general.lock_preview_secs, 8);
         let cfg: Config = toml::from_str("[general]\nlock_preview_secs = 0\n").unwrap();
         assert_eq!(cfg.general.lock_preview_secs, 0);
+    }
+
+    #[test]
+    fn headless_renderer_parses() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.headless.renderer, HeadlessRenderer::Auto);
+        for (name, want) in [
+            ("gles", HeadlessRenderer::Gles),
+            ("llvmpipe", HeadlessRenderer::Llvmpipe),
+            ("pixman", HeadlessRenderer::Pixman),
+        ] {
+            let cfg: Config =
+                toml::from_str(&format!("[headless]\nrenderer = {name:?}\n")).unwrap();
+            assert_eq!(cfg.headless.renderer, want);
+            assert_eq!(name.parse::<HeadlessRenderer>(), Ok(want));
+        }
+        assert!(toml::from_str::<Config>("[headless]\nrenderer = \"vulkan\"\n").is_err());
+        assert!("vulkan".parse::<HeadlessRenderer>().is_err());
     }
 
     #[test]

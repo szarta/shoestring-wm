@@ -69,7 +69,7 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
-            libseat-dev libdisplay-info-dev \
+            libseat-dev libdisplay-info-dev libpixman-1-dev \
             libpam0g-dev \
             libpipewire-0.3-dev libclang-dev
 
@@ -151,7 +151,7 @@ jobs:
             wayland-devel libxkbcommon-devel \
             libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
             systemd-devel libinput-devel \
-            libseat-devel libdisplay-info-devel \
+            libseat-devel libdisplay-info-devel pixman-devel \
             pam-devel \
             pipewire-devel clang clang-libs
 

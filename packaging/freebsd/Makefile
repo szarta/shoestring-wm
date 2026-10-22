@@ -21,6 +21,7 @@ LIB_DEPENDS=	libudev.so:devel/libudev-devd \
 		libdisplay-info.so:sysutils/libdisplay-info \
 		libseat.so:sysutils/seatd \
 		libinput.so:x11/libinput \
+		libpixman-1.so:x11/pixman \
 		libxkbcommon.so:x11/libxkbcommon
 # mesa-dri: the GLES driver the TTY backend renders through at runtime.
 # unix-selfauth-helper: the setuid helper shoestring-lock's PAM policy

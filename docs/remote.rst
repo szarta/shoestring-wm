@@ -84,7 +84,7 @@ Two standalone binaries plus WM-side plumbing. For the serve / headless case::
    beefy box (no physical display)            thin client (e.g. a Surface)
      shoestring-wm                              shoestring-wm
       ├─ headless backend                        └─ shoestring-remote-client
-      │    surfaceless EGL (GPU or llvmpipe)          ssh socket forward ↔ server
+      │    GPU (GLES) or CPU (pixman)                 ssh socket forward ↔ server
       │    one virtual output                         decode tiles → fullscreen
       │    timer-driven render loop                   render remote cursor locally
       ├─ damage-capture subscription ─ tiles ─>       forward input while active

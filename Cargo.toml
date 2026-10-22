@@ -73,7 +73,7 @@ winit = ["smithay/backend_winit"]
 # output, no physical display. Foundation for remote-desktop serve mode, and
 # independently useful for CI / WLCS / automation. Pulls just the EGL + gbm +
 # GLES bits (no DRM scanout, no libseat).
-headless = ["smithay/backend_egl", "smithay/backend_gbm", "smithay/renderer_gl"]
+headless = ["smithay/backend_egl", "smithay/backend_gbm", "smithay/renderer_gl", "smithay/renderer_pixman"]
 tty = [
     "smithay/backend_libinput",
     "smithay/backend_udev",

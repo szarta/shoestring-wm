@@ -205,6 +205,8 @@ CARGO_CRATES=	adler2-2.0.1 \
 		pin-utils-0.1.0 \
 		pipewire-0.10.0 \
 		pipewire-sys-0.10.0 \
+		pixman-0.2.1 \
+		pixman-sys-0.1.0 \
 		pkg-config-0.3.33 \
 		plain-0.2.3 \
 		png-0.17.16 \

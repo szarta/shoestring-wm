@@ -64,6 +64,9 @@ pub const IDLE: u32 = 0xff20_60c0;
 pub const CLICKED: u32 = 0xffc0_4020;
 pub const KEYED: u32 = 0xff20_c060;
 pub const LOCK: u32 = 0xff60_2080;
+/// Not a colour: [`TestClient::paint`] with this draws [`pattern_pixels`]
+/// instead, a translucent gradient that exercises blending.
+pub const PATTERN: u32 = 0;
 
 pub const BTN_LEFT: u32 = 0x110;
 /// evdev `KEY_A`.
@@ -107,8 +110,11 @@ pub struct Wm {
 pub struct WmOptions {
     /// The virtual output's size in pixels.
     pub output: (u32, u32),
-    /// Force Mesa's software renderer, even when a GPU render node exists.
+    /// Keep off the GPU even when a render node exists
+    /// (`$SHOESTRING_WM_HEADLESS_SOFTWARE`), so `auto` picks pixman.
     pub software: bool,
+    /// `[headless] renderer`; defaults to `$SHOESTRING_E2E_RENDERER`, if set.
+    pub renderer: Option<String>,
     /// `[headless] idle_suspend`. Defaults to on when
     /// `SHOESTRING_E2E_IDLE_SUSPEND=1`, so the whole suite can run both ways.
     pub idle_suspend: bool,
@@ -118,6 +124,8 @@ pub struct WmOptions {
     pub lock_command: Option<String>,
     /// `[general] lock_preview_secs`, if not the default.
     pub lock_preview_secs: Option<u64>,
+    /// `[general] output_scale`, if not 1.
+    pub output_scale: Option<f64>,
 }
 
 impl Default for WmOptions {
@@ -125,10 +133,14 @@ impl Default for WmOptions {
         WmOptions {
             output: (OUTPUT_W, OUTPUT_H),
             software: true,
+            renderer: std::env::var("SHOESTRING_E2E_RENDERER")
+                .ok()
+                .filter(|r| !r.is_empty()),
             idle_suspend: std::env::var("SHOESTRING_E2E_IDLE_SUSPEND").as_deref() == Ok("1"),
             idle_lock_secs: 0,
             lock_command: None,
             lock_preview_secs: None,
+            output_scale: None,
         }
     }
 }
@@ -166,8 +178,18 @@ impl Wm {
         if let Some(secs) = options.lock_preview_secs {
             text += &format!("lock_preview_secs = {secs}\n");
         }
+        if let Some(scale) = options.output_scale {
+            text += &format!("output_scale = {scale:?}\n");
+        }
+        let renderer = options.renderer.as_ref();
+        if options.idle_suspend || renderer.is_some() {
+            text += "\n[headless]\n";
+        }
         if options.idle_suspend {
-            text += "\n[headless]\nidle_suspend = true\n";
+            text += "idle_suspend = true\n";
+        }
+        if let Some(renderer) = renderer {
+            text += &format!("renderer = {renderer:?}\n");
         }
         let [r, g, b] = BACKGROUND;
         text += &format!("\n[background]\ncolor = \"#{r:02x}{g:02x}{b:02x}\"\n");
@@ -187,7 +209,9 @@ impl Wm {
             .env_remove("SHOESTRING_WM_SOCKET")
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env("SHOESTRING_WM_LOG", runtime_dir.join("wm.log"));
-        if options.software {
+        // An explicit `gles` means the GPU; Mesa's software switches would
+        // quietly turn it into llvmpipe.
+        if options.software && options.renderer.as_deref() != Some("gles") {
             command
                 .env("SHOESTRING_WM_HEADLESS_SOFTWARE", "1")
                 .env("LIBGL_ALWAYS_SOFTWARE", "1");
@@ -610,6 +634,11 @@ impl Viewer {
         }
     }
 
+    /// The streamed output as received: Argb8888, B, G, R, A in memory.
+    pub fn framebuffer(&self) -> &[u8] {
+        &self.framebuffer
+    }
+
     /// Count frames that arrive within `window`.
     pub fn frames_within(&mut self, window: Duration) -> usize {
         let deadline = Instant::now() + window;
@@ -957,6 +986,24 @@ pub fn pump_until(
 
 /// A solid-colour ARGB8888 shm buffer, backed by an unlinked file in
 /// `$XDG_RUNTIME_DIR` (the pool keeps its own reference to the fd).
+/// A `width`×`height` gradient, premultiplied ARGB8888 in memory order: red
+/// across, green down, blue fixed, alpha falling from opaque at the top-left to
+/// about a quarter at the bottom-right.
+pub fn pattern_pixels(width: u32, height: u32) -> Vec<u8> {
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let a = 255 - (x * 95 / width.max(1) + y * 95 / height.max(1)) as u8;
+            let premul = |c: u32| ((c * a as u32 + 127) / 255) as u8;
+            let r = premul(x * 255 / width.max(1));
+            let g = premul(y * 255 / height.max(1));
+            let b = premul(160);
+            px.extend_from_slice(&[b, g, r, a]);
+        }
+    }
+    px
+}
+
 pub fn solid_buffer(
     state: &ClientState,
     qh: &QueueHandle<ClientState>,
@@ -976,8 +1023,12 @@ pub fn solid_buffer(
         .open(&path)
         .expect("create shm file");
     std::fs::remove_file(&path).expect("unlink shm file");
-    file.write_all(&argb.to_le_bytes().repeat(len / 4))
-        .expect("fill shm file");
+    let pixels = if argb == PATTERN {
+        pattern_pixels(width, height)
+    } else {
+        argb.to_le_bytes().repeat(len / 4)
+    };
+    file.write_all(&pixels).expect("fill shm file");
     let pool = shm.create_pool(file.as_fd(), len as i32, qh, ());
     let buffer = pool.create_buffer(
         0,

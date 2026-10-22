@@ -940,7 +940,15 @@ The ``[headless]`` section
 ::
 
     [headless]
+    renderer = "auto"
     idle_suspend = true
+
+``renderer``
+    What composites the output: ``auto`` (the default: the GPU render node if
+    one opens, else ``pixman``), ``gles`` (the GPU; fail without one),
+    ``pixman`` (a CPU compositor, no GPU or EGL needed), or ``llvmpipe`` (GLES
+    on Mesa's software rasterizer, far costlier than pixman). Read at startup;
+    ``--renderer`` overrides it. See :doc:`running`.
 
 ``idle_suspend``
     Stop the render tick while nothing changes. The headless backend has no

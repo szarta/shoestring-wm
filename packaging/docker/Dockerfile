@@ -8,8 +8,8 @@
 # sandboxed desktop you view from a real machine with shoestring-remote-client.
 #
 # A GPU is OPTIONAL. Pass a render node (`--device /dev/dri/renderD128`) for the
-# hardware GBM path; with no node the headless backend falls back to Mesa's
-# llvmpipe software rasterizer (slower, but real frames). See docs/containers.rst.
+# hardware GBM path; with no node the headless backend renders on the CPU with
+# pixman (real frames, no EGL needed). See docs/containers.rst.
 #
 #   podman build -t shoestring-wm-headless -f packaging/docker/Dockerfile .
 #   mkdir -m 700 -p "$XDG_RUNTIME_DIR/sandbox"
@@ -21,13 +21,14 @@
 # ---- build stage -------------------------------------------------------------
 FROM docker.io/library/rust:1-bookworm AS build
 
-# Build deps for the *headless* WM only: wayland + xkbcommon + drm/gbm/egl. We
+# Build deps for the *headless* WM only: wayland + xkbcommon + drm/gbm/egl +
+# pixman (the default renderer without a GPU). We
 # deliberately build no winit/tty backend, so the udev / libinput / libseat /
 # pipewire / pam dev packages the full workspace needs are absent here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libwayland-dev libxkbcommon-dev \
-        libdrm-dev libgbm-dev libegl-dev \
+        libdrm-dev libgbm-dev libegl-dev libpixman-1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -54,14 +55,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---- runtime stage -----------------------------------------------------------
 FROM docker.io/library/debian:bookworm-slim AS runtime
 
-# Runtime libs + Mesa. The Mesa software stack (libgl1-mesa-dri ships swrast /
-# llvmpipe; libegl-mesa0 is the Mesa EGL driver) is what lets the headless
-# backend render with NO GPU passthrough. With --device /dev/dri/renderD128 the
-# same libs take the hardware path instead — the image is GPU-optional.
+# Runtime libs + Mesa. With no GPU passthrough the headless backend renders
+# with pixman (libpixman-1-0), a CPU compositor that needs no EGL. With
+# --device /dev/dri/renderD128 it takes the hardware path through Mesa instead,
+# and the Mesa software stack (libgl1-mesa-dri ships llvmpipe; libegl-mesa0 is
+# the EGL driver) serves `--renderer llvmpipe` — the image is GPU-optional.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libwayland-server0 libxkbcommon0 \
         libdrm2 libgbm1 libegl1 libgles2 libglapi-mesa libegl-mesa0 \
-        libgl1-mesa-dri \
+        libgl1-mesa-dri libpixman-1-0 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

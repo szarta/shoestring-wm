@@ -416,3 +416,83 @@ fn e2e_remote_lock_preview_after_input() {
         input.elapsed()
     );
 }
+
+/// Render one scene, a translucent gradient window plus the cursor, on
+/// `renderer` at output `scale`, and return the settled output as a viewer
+/// receives it.
+fn capture_scene(renderer: &str, scale: f64) -> Vec<u8> {
+    let mut wm = Wm::start_with(WmOptions {
+        renderer: Some(renderer.into()),
+        software: renderer != "gles",
+        output_scale: Some(scale),
+        ..WmOptions::default()
+    });
+    let client = TestClient::map(&wm);
+    client.paint(PATTERN);
+    wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+    // Settled: half a second without a frame.
+    while viewer.frames_within(Duration::from_millis(500)) > 0 {}
+    viewer.framebuffer().to_vec()
+}
+
+/// The headless renderers draw the same scene alike. At scale 1 every pixel
+/// maps to one texel and they agree to within rounding (byte for byte on the
+/// Mesa this was written against). At a fractional scale filtering differs at
+/// edges, so only a small share of channels may differ. Prints how far each
+/// renderer is from pixman, so a difference shows even within the tolerance.
+#[test]
+#[ignore]
+fn e2e_renderers_agree_on_pixels() {
+    compare_renderers(1.0, |max, _| max <= 2);
+    compare_renderers(1.5, |_, share_off| share_off < 0.01);
+}
+
+/// Compare every available renderer's capture against pixman's. `agree` gets
+/// the largest channel difference and the share of channels off by more than
+/// 2, and says whether that is close enough.
+fn compare_renderers(scale: f64, agree: impl Fn(u8, f64) -> bool) {
+    let mut renderers = vec!["pixman", "llvmpipe"];
+    if (128..=130).any(|n| std::path::Path::new(&format!("/dev/dri/renderD{n}")).exists()) {
+        renderers.push("gles");
+    }
+    let frames: Vec<(&str, Vec<u8>)> = renderers
+        .iter()
+        .map(|&r| (r, capture_scene(r, scale)))
+        .collect();
+    // The gradient must be on screen, or there is nothing to compare.
+    for (name, frame) in &frames {
+        let colours: std::collections::HashSet<&[u8]> = frame.chunks(4).collect();
+        assert!(
+            colours.len() > 1000,
+            "{name} shows only {} colours: the gradient window is missing",
+            colours.len()
+        );
+    }
+    let (base_name, base) = &frames[0];
+    for (name, frame) in &frames[1..] {
+        assert_eq!(
+            frame.len(),
+            base.len(),
+            "{name} streamed a different output size"
+        );
+        let (mut max, mut over) = (0u8, 0usize);
+        for (a, b) in base.iter().zip(frame) {
+            let d = a.abs_diff(*b);
+            max = max.max(d);
+            over += usize::from(d > 2);
+        }
+        eprintln!(
+            "scale {scale}: {base_name} vs {name}: largest channel difference {max}, {over} of {} channels off by more than 2",
+            base.len()
+        );
+        let share_off = over as f64 / base.len() as f64;
+        assert!(
+            agree(max, share_off),
+            "scale {scale}: {base_name} and {name} differ by up to {max}, in {:.2}% of channels",
+            share_off * 100.0
+        );
+    }
+}

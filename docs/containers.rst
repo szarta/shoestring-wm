@@ -20,8 +20,8 @@ its ``README.md`` for the full build/run reference.
    **Status.** Shipped: the headless serve-mode stack is verified end to end (a
    served headless session driven from a separate machine over ``ssh -L``), the
    ``Dockerfile`` in ``packaging/docker/`` builds and runs, and rendering is
-   **GPU-optional** — with a render node it uses the GPU, without one it falls
-   back to Mesa ``llvmpipe`` (so a plain ``docker run`` with no ``--device``
+   **GPU-optional** — with a render node it uses the GPU, without one it renders
+   on the CPU with pixman (so a plain ``docker run`` with no ``--device``
    works). See *GPU and CPU-only rendering* below.
 
 Why headless fits a container
@@ -130,14 +130,13 @@ clients. Point ``$SHOESTRING_WM_RENDER_NODE`` at a different node if the default
 is not the right one.
 
 With **no GPU at all** - a CI runner or a CPU-only cloud host, or simply a
-``docker run`` without ``--device`` - the backend falls back automatically to a
-surfaceless EGL platform on Mesa's ``llvmpipe`` software rasterizer (no GBM, no
-DRM node). It logs a warning and renders real frames on the CPU; everything the
-capture and serve paths need works identically, only slower. Force this path on
-a GPU box with ``-e SHOESTRING_WM_HEADLESS_SOFTWARE=1`` (add
-``-e LIBGL_ALWAYS_SOFTWARE=1`` to guarantee llvmpipe). The container image must
-carry the Mesa software stack (``libgl1-mesa-dri`` / ``mesa-dri-drivers`` -
-which ships ``swrast``/``llvmpipe``) for the fallback to work.
+``docker run`` without ``--device`` - the backend falls back automatically to
+pixman, a CPU compositor that needs no EGL. It logs a warning and renders real
+frames; everything the capture and serve paths need works the same. Force this
+path on a GPU box with ``-e SHOESTRING_WM_HEADLESS_SOFTWARE=1``. Mesa's
+``llvmpipe`` is also available for comparison (``--renderer llvmpipe``; the image
+carries the Mesa software stack, ``libgl1-mesa-dri``), but costs far more CPU.
+See :doc:`running` for the renderers.
 
 A GPU-less run is therefore just the command above, with no ``--device``.
 

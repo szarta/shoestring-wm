@@ -15,6 +15,15 @@
 //!   render at a fixed cadence (the winit backend's `request_redraw` loop is the
 //!   moral equivalent).
 //!
+//! **Renderers.** `[headless] renderer` (or `--renderer`) picks what composites
+//! the output: `gles` on a GPU render node, `llvmpipe` (GLES on Mesa's software
+//! rasterizer), or `pixman`, a CPU compositor that needs no GPU or EGL at all.
+//! `auto`, the default, takes the GPU when a render node opens and pixman
+//! otherwise. For desktop content pixman costs a small fraction of llvmpipe's
+//! CPU: llvmpipe runs every frame through a JIT-compiled GL pipeline and a
+//! thread pool, pixman blits. The render loop and the capture paths are
+//! written once for any renderer (see [`crate::render::OffscreenRenderer`]).
+//!
 //! The EGL setup mirrors the udev backend's, minus the DRM device: we open a
 //! render node (`/dev/dri/renderD128` by default, or `$SHOESTRING_WM_RENDER_NODE`),
 //! wrap it in a [`GbmDevice`], and build a plain [`GlesRenderer`] on a surfaceless
@@ -40,11 +49,13 @@
 //! (single-threaded calloop, never borrowed re-entrantly) via [`HeadlessData`].
 
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use shoestring_config::HeadlessRenderer;
 use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, gbm::GbmDevice, Fourcc},
@@ -52,8 +63,10 @@ use smithay::{
         egl::{native::EGLSurfacelessDisplay, EGLContext, EGLDisplay},
         renderer::{
             damage::OutputDamageTracker,
-            gles::{GlesRenderer, GlesTexture},
-            Bind, ImportDma, Offscreen,
+            element::{surface::WaylandSurfaceRenderElement, RenderElement},
+            gles::GlesRenderer,
+            pixman::PixmanRenderer,
+            Bind, ExportMem, ImportAll, ImportDma, ImportMem, RendererSuper, Texture,
         },
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -64,27 +77,35 @@ use smithay::{
     utils::{Buffer, Size, Transform},
 };
 
-use crate::{backend::scale_from_config, state::ShoestringWm};
+use crate::{
+    backend::scale_from_config, drawing::OutputRenderElements, render::OffscreenRenderer,
+    state::ShoestringWm,
+};
 
-/// Native-headless backend handle stored in [`ShoestringWm::headless`]. Owns a
-/// shared reference to the offscreen GLES renderer (also held by the render
-/// timer) plus the DRM render node it runs on. Lets the `zwp_linux_dmabuf_v1`
-/// import test and the ext-image-copy dmabuf constraints reach the renderer
-/// without threading it through state.
+/// Native-headless backend handle stored in [`ShoestringWm::headless`]: the
+/// render tick for whichever renderer was chosen at startup, the timer that
+/// drives it, and, on the GLES renderers, the renderer itself and the DRM render
+/// node it runs on. Lets the `zwp_linux_dmabuf_v1` import test and the
+/// ext-image-copy dmabuf constraints reach the renderer without threading it
+/// through state.
 ///
-/// The renderer is shared with the render loop via `Rc<RefCell<…>>`: the WM is
+/// The renderer is shared with the render tick via `Rc<RefCell<…>>`: the WM is
 /// single-threaded (one calloop), and the import test runs during client
-/// dispatch while the render loop runs in its own timer callback, so the two
+/// dispatch while the render tick runs in its own timer callback, so the two
 /// never borrow the renderer at the same time.
 #[cfg(feature = "headless")]
 pub struct HeadlessData {
-    renderer: Rc<RefCell<GlesRenderer>>,
+    /// The GLES renderer (GPU or llvmpipe); `None` with pixman, which offers
+    /// clients no dmabuf to import.
+    gles: Option<Rc<RefCell<GlesRenderer>>>,
     /// The render node the offscreen renderer runs on, advertised to
     /// ext-image-copy-capture clients as where to allocate dmabuf buffers.
-    /// `None` if the node couldn't be derived from the device path.
+    /// `None` on the software renderers, or if the node couldn't be derived
+    /// from the device path.
     pub render_node: Option<DrmNode>,
-    /// What every render tick works on, shared by each (re-)armed timer.
-    render_loop: Rc<RefCell<RenderLoop>>,
+    /// One render tick; returns whether the output changed. Built for the
+    /// chosen renderer by [`render_tick`], and shared by each (re-)armed timer.
+    tick: RenderTick,
     /// The render timer currently in the event loop.
     timer: Option<RegistrationToken>,
     /// A tick found no damage with `[headless] idle_suspend` on, so the timer
@@ -94,21 +115,8 @@ pub struct HeadlessData {
     parked_this_iteration: bool,
 }
 
-/// The render loop's own state.
-struct RenderLoop {
-    output: Output,
-    damage_tracker: OutputDamageTracker,
-    /// The offscreen target: the texture, its size, and its buffer *age*.
-    /// Lazily (re)created to the output's current pixel size; nothing scans it
-    /// out — it exists so the scene is composited with real damage tracking and
-    /// so the capture path has a consistent renderer. The age is what makes
-    /// damage tracking incremental: a freshly created buffer has unknown
-    /// contents (age 0 → full damage), but since we reuse the *same* texture
-    /// every frame it is exactly one frame old thereafter (age 1 → only the
-    /// regions that actually changed). Without this the tracker would report
-    /// full-output damage every frame and the capture stream would never idle.
-    target: Option<(GlesTexture, Size<i32, Buffer>, usize)>,
-}
+/// One render tick, returning whether the output changed; see [`render_tick`].
+type RenderTick = Rc<RefCell<dyn FnMut(&mut ShoestringWm) -> bool>>;
 
 #[cfg(feature = "headless")]
 impl HeadlessData {
@@ -117,10 +125,9 @@ impl HeadlessData {
     /// `zwp_linux_dmabuf_v1` protocol runs before creating a wl_buffer. Mirrors
     /// the udev backend's test against the primary GPU.
     pub fn import_dmabuf_test(&self, dmabuf: &Dmabuf) -> bool {
-        self.renderer
-            .borrow_mut()
-            .import_dmabuf(dmabuf, None)
-            .is_ok()
+        self.gles
+            .as_ref()
+            .is_some_and(|r| r.borrow_mut().import_dmabuf(dmabuf, None).is_ok())
     }
 }
 
@@ -163,35 +170,62 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
-/// Build the headless EGL display, preferring a real GPU render node (GBM, which
-/// gives dmabuf import/export) and falling back to a surfaceless software EGL
-/// platform (Mesa llvmpipe) when no node is usable. Returns the display and the
-/// DRM render node it bound — `None` on the software path, where there is no node
-/// to advertise to dmabuf clients.
+/// The renderer the headless backend composites with.
+enum Chosen {
+    /// GLES, on a GPU render node (`render_node` is `Some`) or llvmpipe.
+    Gles {
+        renderer: Box<GlesRenderer>,
+        render_node: Option<DrmNode>,
+    },
+    Pixman(PixmanRenderer),
+}
+
+/// Build the renderer `choice` asks for.
 ///
-/// Selection:
-/// - `$SHOESTRING_WM_HEADLESS_SOFTWARE=1` forces the surfaceless path outright
-///   (CPU-only CI even on a box that has a GPU).
-/// - otherwise try the GBM render node; if it can't be opened or EGL rejects it
-///   (no `/dev/dri`, permissions, ...) fall back to surfaceless rather than
-///   failing, so a GPU-less host still produces frames. The failure is logged at
-///   `warn` so a genuine GPU misconfiguration is still visible.
-fn create_egl_display() -> Result<(EGLDisplay, Option<DrmNode>)> {
-    if env_flag("SHOESTRING_WM_HEADLESS_SOFTWARE") {
-        tracing::info!(
-            "headless: SHOESTRING_WM_HEADLESS_SOFTWARE set; using surfaceless software EGL (llvmpipe)"
-        );
-        return Ok((surfaceless_display()?, None));
-    }
-    match gbm_display() {
-        Ok(pair) => Ok(pair),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "headless: no usable GPU render node; falling back to surfaceless software EGL (llvmpipe)"
-            );
-            Ok((surfaceless_display()?, None))
+/// - `gles` opens the GBM render node and fails if it can't.
+/// - `llvmpipe` builds GLES on a surfaceless EGL platform, which Mesa backs
+///   with llvmpipe when no GPU is present.
+/// - `pixman` needs no EGL at all.
+/// - `auto` tries the render node and falls back to pixman, logging the
+///   failure at `warn` so a genuine GPU misconfiguration is still visible.
+///   `$SHOESTRING_WM_HEADLESS_SOFTWARE=1` skips the GPU (CPU-only CI even on a
+///   box that has one).
+fn choose_renderer(choice: HeadlessRenderer) -> Result<Chosen> {
+    let gles = |(display, render_node): (EGLDisplay, Option<DrmNode>)| -> Result<Chosen> {
+        let context = EGLContext::new(&display).context("create EGL context")?;
+        let renderer = unsafe {
+            let caps = GlesRenderer::supported_capabilities(&context)
+                .context("query GLES capabilities")?;
+            GlesRenderer::with_capabilities(context, caps).context("create GLES renderer")?
+        };
+        Ok(Chosen::Gles {
+            renderer: Box::new(renderer),
+            render_node,
+        })
+    };
+    let pixman = || -> Result<Chosen> {
+        Ok(Chosen::Pixman(
+            PixmanRenderer::new().context("create pixman renderer")?,
+        ))
+    };
+    match choice {
+        HeadlessRenderer::Gles => gles(gbm_display()?),
+        HeadlessRenderer::Llvmpipe => gles((surfaceless_display()?, None)),
+        HeadlessRenderer::Pixman => pixman(),
+        HeadlessRenderer::Auto if env_flag("SHOESTRING_WM_HEADLESS_SOFTWARE") => {
+            tracing::info!("headless: SHOESTRING_WM_HEADLESS_SOFTWARE set; using pixman");
+            pixman()
         }
+        HeadlessRenderer::Auto => match gbm_display().and_then(gles) {
+            Ok(chosen) => Ok(chosen),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "headless: no usable GPU render node; falling back to pixman"
+                );
+                pixman()
+            }
+        },
     }
 }
 
@@ -245,59 +279,59 @@ pub fn init_headless(
     event_loop: &mut EventLoop<'static, ShoestringWm>,
     state: &mut ShoestringWm,
 ) -> Result<()> {
-    // The headless GlesRenderer can render a single window offscreen, so
+    // Every headless renderer can render a single window offscreen, so
     // per-window capture (graft, screenshot_window) is available.
     state.window_capture_supported = true;
     state.output_probe_supported = true;
-    // Build an EGL display and a surfaceless GLES renderer. Preference order: a
-    // real GPU render node via GBM (unprivileged renderD* — no DRM master, no
-    // seat — and gives dmabuf import/export), else a surfaceless software EGL
-    // platform (Mesa llvmpipe) so a host with no usable `/dev/dri` still renders
-    // real frames. `render_node` is `Some` only on the GPU path; `None` marks
-    // the software path (nothing to advertise to dmabuf clients).
-    let (egl_display, render_node) = create_egl_display()?;
-    let software = render_node.is_none();
-    let egl_context = EGLContext::new(&egl_display).context("create EGL context")?;
-    let renderer = unsafe {
-        let caps = GlesRenderer::supported_capabilities(&egl_context)
-            .context("query GLES capabilities")?;
-        GlesRenderer::with_capabilities(egl_context, caps).context("create GLES renderer")?
-    };
-    tracing::info!(software, "headless renderer created");
+    let choice = state.config.headless.renderer;
+    let chosen = choose_renderer(choice)?;
 
-    // Advertise `zwp_linux_dmabuf_v1` off this renderer's import formats so
-    // GPU-accelerated clients can hand us dmabuf surface buffers (the udev
-    // backend does the same off the primary GPU). This is a general GPU
+    // On a GPU, advertise `zwp_linux_dmabuf_v1` off the renderer's import
+    // formats so GPU-accelerated clients can hand us dmabuf surface buffers (the
+    // udev backend does the same off the primary GPU). This is a general GPU
     // facility, NOT behind the screen-capture gate — only the screencopy
     // `linux_dmabuf` *event* respects that gate. There is no DRM scanout here,
-    // so unlike udev we never feed these formats to a DrmOutputManager.
-    let dmabuf_formats: smithay::backend::allocator::format::FormatSet = renderer
-        .egl_context()
-        .dmabuf_render_formats()
-        .iter()
-        .copied()
-        .collect();
-    if state.dmabuf_global.is_none() {
-        if dmabuf_formats.iter().next().is_none() {
-            // Software/llvmpipe path: the renderer imports no dmabuf formats.
-            // Advertising a zero-format `zwp_linux_dmabuf_v1` is useless and only
-            // confuses GPU clients, so we skip the global entirely — every client
-            // still works over shm buffers.
+    // so unlike udev we never feed these formats to a DrmOutputManager. The
+    // software renderers import no dmabuf formats, and a zero-format global only
+    // confuses GPU clients, so they get none: every client still works over shm.
+    let (gles, render_node) = match &chosen {
+        Chosen::Gles {
+            renderer,
+            render_node,
+        } => {
             tracing::info!(
-                "headless: renderer exposes no dmabuf formats (software); zwp_linux_dmabuf_v1 not advertised"
+                software = render_node.is_none(),
+                "headless renderer created (GLES)"
             );
-        } else {
-            let dh = state.display_handle.clone();
-            let global = state
-                .dmabuf_state
-                .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
-            state.dmabuf_global = Some(global);
-            tracing::info!(
-                formats = dmabuf_formats.iter().count(),
-                "zwp_linux_dmabuf_v1 global created (headless)"
-            );
-            state.dmabuf_formats = Some(dmabuf_formats);
+            let dmabuf_formats: smithay::backend::allocator::format::FormatSet = renderer
+                .egl_context()
+                .dmabuf_render_formats()
+                .iter()
+                .copied()
+                .collect();
+            if state.dmabuf_global.is_none() && dmabuf_formats.iter().next().is_some() {
+                let dh = state.display_handle.clone();
+                let global = state
+                    .dmabuf_state
+                    .create_global::<ShoestringWm>(&dh, dmabuf_formats.iter().copied());
+                state.dmabuf_global = Some(global);
+                tracing::info!(
+                    formats = dmabuf_formats.iter().count(),
+                    "zwp_linux_dmabuf_v1 global created (headless)"
+                );
+                state.dmabuf_formats = Some(dmabuf_formats);
+            }
+            (true, *render_node)
         }
+        Chosen::Pixman(_) => {
+            tracing::info!("headless renderer created (pixman)");
+            (false, None)
+        }
+    };
+    if !gles || state.dmabuf_global.is_none() {
+        tracing::info!(
+            "headless: no dmabuf formats (software renderer); zwp_linux_dmabuf_v1 not advertised"
+        );
     }
 
     // One virtual output, sized from the environment (a future remote client
@@ -349,20 +383,21 @@ pub fn init_headless(
     crate::output_management::broadcast_head_added(state, &output);
     crate::ext_workspace::broadcast_output_enter(state, &output);
 
-    let damage_tracker = OutputDamageTracker::from_output(&output);
-    // Share the renderer between the render loop (below) and the dmabuf import
-    // test ([`HeadlessData::import_dmabuf_test`]). Single-threaded calloop, so
-    // the `RefCell` is never borrowed re-entrantly: import runs during client
-    // dispatch, the loop runs in its own timer callback.
-    let renderer = Rc::new(RefCell::new(renderer));
+    // Share a GLES renderer between the render tick and the dmabuf import test
+    // ([`HeadlessData::import_dmabuf_test`]). Single-threaded calloop, so the
+    // `RefCell` is never borrowed re-entrantly: import runs during client
+    // dispatch, the tick runs in its own timer callback.
+    let (gles, tick) = match chosen {
+        Chosen::Gles { renderer, .. } => {
+            let renderer = Rc::new(RefCell::new(*renderer));
+            (Some(renderer.clone()), render_tick(renderer, output))
+        }
+        Chosen::Pixman(renderer) => (None, render_tick(Rc::new(RefCell::new(renderer)), output)),
+    };
     state.headless = Some(HeadlessData {
-        renderer,
+        gles,
         render_node,
-        render_loop: Rc::new(RefCell::new(RenderLoop {
-            output,
-            damage_tracker,
-            target: None,
-        })),
+        tick,
         timer: None,
         parked: false,
         parked_this_iteration: false,
@@ -384,23 +419,9 @@ fn arm(state: &mut ShoestringWm, handle: &LoopHandle<'static, ShoestringWm>) {
         handle.remove(token);
     }
     headless.parked = false;
-    let render_loop = headless.render_loop.clone();
-    let renderer = headless.renderer.clone();
+    let tick = headless.tick.clone();
     let inserted = handle.insert_source(Timer::immediate(), move |_, _, state| {
-        let damaged = {
-            let RenderLoop {
-                output,
-                damage_tracker,
-                target,
-            } = &mut *render_loop.borrow_mut();
-            render_once(
-                state,
-                output,
-                &mut renderer.borrow_mut(),
-                damage_tracker,
-                target,
-            )
-        };
+        let damaged = (tick.borrow_mut())(state);
         let park = state.config.headless.idle_suspend && !damaged;
         if let Some(headless) = state.headless.as_mut() {
             headless.parked = park;
@@ -439,17 +460,55 @@ pub fn after_dispatch(state: &mut ShoestringWm) {
     wake(state);
 }
 
+/// The render tick for `renderer` on `output`: a closure owning the damage
+/// tracker and the offscreen target, so the timer needn't know the renderer
+/// type.
+fn render_tick<R>(renderer: Rc<RefCell<R>>, output: Output) -> RenderTick
+where
+    R: OffscreenRenderer + ImportAll + ImportMem + ExportMem + Bind<Dmabuf> + 'static,
+    R::TextureId: Texture + Clone + Send + 'static,
+    <R as RendererSuper>::Error: Display,
+    OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
+{
+    let mut damage_tracker = OutputDamageTracker::from_output(&output);
+    // The offscreen target: the buffer, its size, and its *age*. Lazily
+    // (re)created to the output's current pixel size; nothing scans it out — it
+    // exists so the scene is composited with real damage tracking and so the
+    // capture path has a consistent renderer. The age is what makes damage
+    // tracking incremental: a freshly created buffer has unknown contents (age
+    // 0 → full damage), but since we reuse the *same* buffer every frame it is
+    // exactly one frame old thereafter (age 1 → only the regions that actually
+    // changed). Without this the tracker would report full-output damage every
+    // frame and the capture stream would never idle.
+    let mut target: Option<(R::Target, Size<i32, Buffer>, usize)> = None;
+    Rc::new(RefCell::new(move |state: &mut ShoestringWm| {
+        render_once(
+            state,
+            &output,
+            &mut renderer.borrow_mut(),
+            &mut damage_tracker,
+            &mut target,
+        )
+    }))
+}
+
 /// One render tick: compose the scene, fulfil pending captures, paint into the
 /// offscreen target, then send frame callbacks and flush. Mirrors the winit
 /// `Redraw` handler, minus the window submit/vsync. Returns whether the output
 /// changed (any damage), or `true` when the tick couldn't tell.
-fn render_once(
+fn render_once<R>(
     state: &mut ShoestringWm,
     output: &Output,
-    renderer: &mut GlesRenderer,
+    renderer: &mut R,
     damage_tracker: &mut OutputDamageTracker,
-    target: &mut Option<(GlesTexture, Size<i32, Buffer>, usize)>,
-) -> bool {
+    target: &mut Option<(R::Target, Size<i32, Buffer>, usize)>,
+) -> bool
+where
+    R: OffscreenRenderer + ImportAll + ImportMem + ExportMem + Bind<Dmabuf>,
+    R::TextureId: Texture + Clone + Send + 'static,
+    <R as RendererSuper>::Error: Display,
+    OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
+{
     let Some(mode) = output.current_mode() else {
         return true;
     };

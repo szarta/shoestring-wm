@@ -78,6 +78,12 @@ struct Cli {
     #[arg(long, value_name = "WxH")]
     output_size: Option<String>,
 
+    /// Headless backend only: what composites the output: `auto`, `gles` (a GPU
+    /// render node), `llvmpipe` (GLES in software), or `pixman` (CPU). Overrides
+    /// `[headless] renderer`.
+    #[arg(long, value_name = "RENDERER")]
+    renderer: Option<shoestring_config::HeadlessRenderer>,
+
     /// Log the Wayland wire protocol (every request from and event to each
     /// client) to stderr — the built-in equivalent of `WAYLAND_DEBUG=server`.
     /// Equivalent to `[debug].protocol_trace = true` in the config; either
@@ -178,7 +184,10 @@ fn main() -> Result<()> {
         return check_config(cli.config.as_deref());
     }
 
-    let (config, config_path) = shoestring_config::load_or_default(cli.config.as_deref())?;
+    let (mut config, config_path) = shoestring_config::load_or_default(cli.config.as_deref())?;
+    if let Some(renderer) = cli.renderer {
+        config.headless.renderer = renderer;
+    }
     match &config_path {
         Some(p) => tracing::info!(path = %p.display(), "loaded config"),
         None => tracing::info!("no config file found; using built-in defaults"),

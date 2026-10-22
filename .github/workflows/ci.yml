@@ -32,7 +32,7 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
-            libseat-dev libdisplay-info-dev \
+            libseat-dev libdisplay-info-dev libpixman-1-dev \
             libpam0g-dev \
             libpipewire-0.3-dev libclang-dev
 
@@ -100,7 +100,7 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
-            libseat-dev libdisplay-info-dev
+            libseat-dev libdisplay-info-dev libpixman-1-dev
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -136,7 +136,7 @@ jobs:
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 \
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
-            libseat-dev libdisplay-info-dev \
+            libseat-dev libdisplay-info-dev libpixman-1-dev \
             libpam0g-dev \
             libpipewire-0.3-dev libclang-dev \
             xvfb libgl1-mesa-dri
@@ -172,7 +172,7 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libdrm-dev libgbm-dev libegl-dev \
             libudev-dev libinput-dev \
-            libseat-dev libdisplay-info-dev \
+            libseat-dev libdisplay-info-dev libpixman-1-dev \
             libpam0g-dev \
             libpipewire-0.3-dev libclang-dev \
             libegl-mesa0 libgl1-mesa-dri
@@ -223,7 +223,7 @@ jobs:
               wayland libxkbcommon \
               libdrm mesa-libs \
               libudev-devd libinput \
-              seatd libdisplay-info
+              seatd libdisplay-info pixman
           # pkg installs libs under /usr/local/lib, which base ld(1) does not
           # search — point the linker at it (matches docs/install.rst).
           # --exclude the screencast portal (see the comment on this job):

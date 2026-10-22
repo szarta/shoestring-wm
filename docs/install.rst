@@ -7,15 +7,16 @@ shoestring-wm into your login screen. Everywhere else, build from source.
 
 When building from source the runtime needs a small set of native
 libraries (DRM, GBM, EGL, udev, libinput, libseat, libdisplay-info,
-wayland, xkbcommon, plus PAM for ``shoestring-lock``). Per-distro install
+pixman, wayland, xkbcommon, plus PAM for ``shoestring-lock``). Per-distro install
 commands for the development headers are below; on most distros the
 matching runtime packages are pulled in automatically.
 
 The TTY backend (the daily-driver path) needs all of the libraries below.
 If you only want the winit dev backend you can build with
 ``--no-default-features --features winit`` and skip the DRM/GBM/EGL/udev/
-libinput/libseat/libdisplay-info dev packages; you still need wayland and
-xkbcommon.
+libinput/libseat/libdisplay-info/pixman dev packages; you still need wayland
+and xkbcommon. pixman is the headless backend's CPU renderer (see
+:doc:`running`).
 
 You also need:
 
@@ -134,7 +135,7 @@ Debian / Ubuntu
         libwayland-dev libxkbcommon-dev \
         libdrm-dev libgbm-dev libegl-dev \
         libudev-dev libinput-dev \
-        libseat-dev libdisplay-info-dev \
+        libseat-dev libdisplay-info-dev libpixman-1-dev \
         libpam0g-dev \
         libpipewire-0.3-dev libclang-dev
 
@@ -156,7 +157,7 @@ Fedora / RHEL
         wayland-devel libxkbcommon-devel \
         libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
         systemd-devel libinput-devel \
-        libseat-devel libdisplay-info-devel \
+        libseat-devel libdisplay-info-devel pixman-devel \
         pam-devel \
         pipewire-devel clang
 
@@ -172,7 +173,7 @@ Arch / Manjaro
         wayland libxkbcommon \
         libdrm libglvnd mesa \
         systemd libinput \
-        seatd libdisplay-info \
+        seatd libdisplay-info pixman \
         pam \
         pipewire clang
 
@@ -185,7 +186,7 @@ Alpine
         wayland-dev libxkbcommon-dev \
         libdrm-dev mesa-dev \
         eudev-dev libinput-dev \
-        seatd-dev libdisplay-info-dev \
+        seatd-dev libdisplay-info-dev pixman-dev \
         linux-pam-dev \
         pipewire-dev clang-dev
 
@@ -219,7 +220,7 @@ To **build from source** instead, install the toolchain and libraries::
     pkg install rust pkgconf \
         wayland libxkbcommon \
         drm-kmod mesa-libs \
-        libinput seatd libdisplay-info \
+        libinput seatd libdisplay-info pixman \
         pipewire
 
 (``pipewire`` provides ``libpipewire-0.3``/``libspa-0.2`` for the screencast
@@ -289,7 +290,7 @@ screencast portal):
         wayland libxkbcommon
         libdrm mesa libGL
         udev libinput
-        seatd libdisplay-info
+        seatd libdisplay-info pixman
         pam
         pipewire           # screencast portal + media monitor (workspace build)
       ];

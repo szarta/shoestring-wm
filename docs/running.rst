@@ -10,10 +10,10 @@ from the environment; all can be forced with ``--backend``.
               ``$WAYLAND_DISPLAY`` or ``$DISPLAY`` is set.
 **tty**       Native DRM/KMS + libinput + libseat. The daily-driver
               path. Selected when both env vars are unset.
-**headless**  Surfaceless EGL with one virtual output and no physical
-              display - on a DRM render node when one is available, else
-              software (llvmpipe) so a host with no ``/dev/dri`` still
-              renders. Never auto-detected - request it explicitly with
+**headless**  One virtual output and no physical display - rendered on a
+              DRM render node when one is available, else on the CPU
+              (pixman) so a host with no ``/dev/dri`` still renders.
+              Never auto-detected - request it explicitly with
               ``--backend headless``. The foundation for remote-desktop
               *serve mode*, and useful on its own for CI, the WLCS
               harness, and automation. Included in the default build (it
@@ -28,25 +28,38 @@ no seat, VT, or display manager - and drives its render at a fixed cadence
 only through the capture path (``shoestring-ctl screenshot``,
 ``wlr-screencopy`` / ``ext-image-copy-capture``).
 
-When no render node can be opened (no ``/dev/dri``, e.g. a CPU-only CI runner
-or a container started without ``--device``), it falls back automatically to a
-surfaceless EGL platform backed by Mesa's **llvmpipe** software rasterizer and
-logs a warning. The offscreen render target is a GLES texture rather than a
-GBM buffer, so compositing and the shm capture/stream path are identical; only
-GPU dmabuf import/export needs a real render node. Software rendering is slower
-but produces real frames - enough for CI, screenshots, and automation. Three
-environment knobs:
+Three renderers can composite the output, chosen with ``[headless] renderer``
+in the config (see :doc:`configuration`) or the ``--renderer`` flag:
+
+``gles``
+    GLES on the GPU render node. Fails to start without one. The only renderer
+    that offers clients ``zwp_linux_dmabuf_v1``, so GPU-accelerated clients can
+    hand over dmabuf buffers.
+
+``pixman``
+    A CPU compositor (the pixman library the X server uses). Needs no GPU and
+    no EGL. For desktop content it costs a small fraction of llvmpipe's CPU:
+    an 800x600 window repainting at 30 fps took about a tenth as much.
+
+``llvmpipe``
+    GLES on Mesa's software rasterizer (a surfaceless EGL platform). Kept for
+    comparison; it runs every frame through a full GL pipeline and a thread
+    pool, which costs far more CPU than pixman.
+
+``auto``, the default, takes the GPU when a render node opens and pixman
+otherwise (a CPU-only CI runner, or a container started without ``--device``),
+logging a warning. Clients render their own content either way; without a GPU
+they hand the compositor shared-memory buffers. The software renderers blend and
+filter slightly differently from each other and from the GPU, so compare
+screenshots taken on the same renderer. Three environment knobs:
 
 ``$SHOESTRING_WM_RENDER_NODE``
     Render node to open. Defaults to the first existing of
-    ``/dev/dri/renderD128`` - ``renderD130``. If it cannot be opened, the
-    backend falls back to software rendering rather than failing.
+    ``/dev/dri/renderD128`` - ``renderD130``.
 
 ``$SHOESTRING_WM_HEADLESS_SOFTWARE``
-    Set to ``1`` to force the software (surfaceless/llvmpipe) path even on a
-    box that has a GPU - useful for reproducing the CPU-only path in CI. Add
-    ``LIBGL_ALWAYS_SOFTWARE=1`` if a real GPU is present and you want to
-    *guarantee* llvmpipe rather than letting Mesa pick the device.
+    Set to ``1`` and ``auto`` skips the GPU even on a box that has one -
+    useful for reproducing the CPU-only path. An explicit ``renderer`` wins.
 
 ``$SHOESTRING_WM_HEADLESS_SIZE``
     Virtual output mode size as ``WIDTHxHEIGHT`` (e.g. ``2560x1440``).
@@ -113,6 +126,10 @@ Command-line flags
     by the output scale, so automation usually pairs it with scale 1.
     Sugar for ``$SHOESTRING_WM_HEADLESS_SIZE``; the flag wins. An invalid
     spec fails startup rather than silently defaulting.
+
+``--renderer auto|gles|llvmpipe|pixman``
+    Headless backend only: what composites the output (see above).
+    Overrides ``[headless] renderer``.
 
 ``--write-default-config``
     Write the bundled default config to the user config path (or to
