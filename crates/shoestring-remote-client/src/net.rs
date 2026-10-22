@@ -252,8 +252,11 @@ mod socket_tests {
         let (mut net, mut peer) = pair();
         peer.write_all(&((MAX_MESSAGE_LEN as u32) + 1).to_le_bytes())
             .unwrap();
-        // More input after the bad header, as a hostile peer would send. Nobody
-        // reads the far end, so the write may stop short; either way is fine.
+        // More input after the bad header, as a hostile peer would send.
+        // Non-blocking, because nobody reads the far end: the write stops when
+        // the socket buffer fills (8 KiB by default on FreeBSD, more on Linux)
+        // instead of hanging the test.
+        peer.set_nonblocking(true).unwrap();
         let _ = peer.write_all(&vec![0u8; 100 * 1024]);
         let err = net.fill().expect_err("oversize header accepted");
         assert!(err.to_string().contains("exceeds cap"), "{err:#}");
