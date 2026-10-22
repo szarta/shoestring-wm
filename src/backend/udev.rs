@@ -92,6 +92,10 @@ type UdevRenderer<'a> = MultiRenderer<
     GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
 >;
 
+impl crate::render::OffscreenRenderer for UdevRenderer<'_> {
+    type Target = smithay::backend::renderer::gles::GlesTexture;
+}
+
 /// Per-frame user-data we hang on each queued frame: the presentation
 /// feedback collected at render time, returned by `frame_submitted` on the
 /// matching VBlank so we can mark it `presented` with the hardware timestamp.

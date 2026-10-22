@@ -44,6 +44,7 @@ pub mod profiling;
 mod remote;
 mod remote_command;
 mod remote_screenshot;
+pub mod render;
 mod scale;
 mod screencopy;
 pub mod state;

@@ -16,7 +16,6 @@ use smithay::{
             surface::WaylandSurfaceRenderElement,
             AsRenderElements, Kind,
         },
-        gles::GlesRenderer,
         ImportAll, ImportMem, Renderer, Texture,
     },
     desktop::{
@@ -228,22 +227,26 @@ where
 /// `elements` is stacked exactly as the scanout draws it — `render_output`
 /// paints first-element-first, so cursor/lock surface and borders come first
 /// (top-most), then the window/layer space, then the wallpaper last (bottom).
-pub type ComposedScene = (
-    Vec<OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>>,
+pub type ComposedScene<R> = (
+    Vec<OutputRenderElements<R, WaylandSurfaceRenderElement<R>>>,
     [f32; 4],
 );
 
 impl ShoestringWm {
     /// Build the composited scene for `output` using `renderer` to realize the
     /// cursor, wallpaper, and (while locked) lock-surface elements. Shared by
-    /// the winit and headless backends, which both render with a plain
-    /// [`GlesRenderer`]; the udev backend has its own `MultiRenderer` path.
+    /// the winit backend and the headless backend (GLES or pixman); the udev
+    /// backend has its own `MultiRenderer` path.
     ///
     /// The returned list is what both the capture path and the on-screen render
     /// composite, so screenshots match the screen. The screen-only diagnostics
     /// overlay is deliberately NOT included here — the caller inserts it AFTER
     /// any capture pass so it never burns into captures.
-    pub fn compose_scene(&mut self, output: &Output, renderer: &mut GlesRenderer) -> ComposedScene {
+    pub fn compose_scene<R>(&mut self, output: &Output, renderer: &mut R) -> ComposedScene<R>
+    where
+        R: Renderer + ImportAll + ImportMem,
+        R::TextureId: Texture + Clone + Send + 'static,
+    {
         let locked = self.is_locked();
 
         // Re-pick the cursor frame for the configured scale (cursors are raster
@@ -253,7 +256,7 @@ impl ShoestringWm {
 
         // Cursor only when unlocked; while locked the lock surface owns the
         // visible content and its surface elements ride the same overlay slot.
-        let cursor_elements: Vec<PointerRenderElement<GlesRenderer>> = if !locked {
+        let cursor_elements: Vec<PointerRenderElement<R>> = if !locked {
             if let Some((pe, location, hotspot)) = self.cursor_render_snapshot() {
                 let scale: Scale<f64> = output.current_scale().fractional_scale().into();
                 let physical_location: Point<i32, Physical> = Point::<f64, Physical>::from((
@@ -302,7 +305,7 @@ impl ShoestringWm {
         // lock surface) plus the server-side window borders. Built once so the
         // capture path composites the exact same overlays the screen shows.
         let border_elements = self.output_border_elements(output, locked, fullscreen.as_ref());
-        let overlays: Vec<CaptureOverlay<GlesRenderer>> = cursor_elements
+        let overlays: Vec<CaptureOverlay<R>> = cursor_elements
             .into_iter()
             .map(CaptureOverlay::Pointer)
             .chain(border_elements.into_iter().map(CaptureOverlay::Border))
@@ -317,9 +320,8 @@ impl ShoestringWm {
         // Compose top to bottom: overlays (cursor, then borders), the
         // window/layer stack, then the wallpaper at the very bottom (pushed
         // last — below every window and layer-shell surface).
-        let mut elements: Vec<
-            OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
-        > = Vec::with_capacity(overlays.len() + space_elements.len() + 1);
+        let mut elements: Vec<OutputRenderElements<R, WaylandSurfaceRenderElement<R>>> =
+            Vec::with_capacity(overlays.len() + space_elements.len() + 1);
         elements.extend(
             overlays
                 .into_iter()

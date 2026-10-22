@@ -38,8 +38,9 @@ pub fn init_winit(
         .with_inner_size(PhysicalSize::new(1600, 1000))
         .with_title(title)
         .with_visible(true);
-    let (mut backend, winit) = winit::init_from_attributes(attrs)
-        .map_err(|e| anyhow::anyhow!("winit init failed: {e}"))?;
+    let (mut backend, winit) =
+        winit::init_from_attributes::<smithay::backend::renderer::gles::GlesRenderer>(attrs)
+            .map_err(|e| anyhow::anyhow!("winit init failed: {e}"))?;
 
     let mode = Mode {
         size: backend.window_size(),

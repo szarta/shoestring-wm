@@ -30,12 +30,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::render::OffscreenRenderer;
 use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, Fourcc},
         renderer::{
-            damage::OutputDamageTracker, element::RenderElement, gles::GlesTexture, Bind,
-            ExportMem, ImportAll, ImportMem, Offscreen, Renderer, RendererSuper,
+            damage::OutputDamageTracker, element::RenderElement, Bind, ExportMem, ImportAll,
+            ImportMem, Renderer, RendererSuper,
         },
     },
     output::Output,
@@ -143,13 +144,7 @@ pub fn process_pending<R>(
     >],
     clear: [f32; 4],
 ) where
-    R: Renderer
-        + ImportAll
-        + ImportMem
-        + ExportMem
-        + Bind<GlesTexture>
-        + Bind<Dmabuf>
-        + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<Dmabuf> + OffscreenRenderer,
     <R as RendererSuper>::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
     crate::drawing::OutputRenderElements<
@@ -233,7 +228,7 @@ pub fn process_pending<R>(
 
     // shm path: render the scene into an offscreen texture once, then read back
     // into each client's shm buffer.
-    let texture: GlesTexture =
+    let texture: R::Target =
         match renderer.create_buffer(Fourcc::Argb8888, (output_size.w, output_size.h).into()) {
             Ok(t) => t,
             Err(e) => {

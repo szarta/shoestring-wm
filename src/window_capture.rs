@@ -27,13 +27,16 @@
 
 use std::fmt::Display;
 
+use std::any::Any;
+
+use crate::render::OffscreenRenderer;
 use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
             damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
-            element::AsRenderElements, element::RenderElement, gles::GlesTexture, Bind, ExportMem,
-            ImportAll, ImportMem, Offscreen, Renderer, RendererSuper, Texture,
+            element::AsRenderElements, element::RenderElement, ExportMem, ImportAll, ImportMem,
+            Renderer, RendererSuper, Texture,
         },
     },
     desktop::{space::SpaceRenderElements, Window},
@@ -93,8 +96,10 @@ pub struct WindowCaptureSub {
     /// per-tick render so an idle window costs nothing. Set on first push too.
     pub dirty: bool,
     /// Reused offscreen render target, sized to the window's physical pixels.
-    /// `None` until the first push; recreated on resize.
-    texture: Option<GlesTexture>,
+    /// `None` until the first push; recreated on resize. The renderer's
+    /// [`OffscreenRenderer::Target`], type-erased so this state doesn't name a
+    /// renderer.
+    texture: Option<Box<dyn Any>>,
     /// Damage tracker paired with `texture`; recreated alongside it.
     tracker: Option<OutputDamageTracker>,
     /// Buffer age for the tracker: `0` right after a (re)create (full repaint),
@@ -167,7 +172,7 @@ where
 ///   before any GPU work, so it produces zero frames.
 pub fn push_window_capture<R>(state: &mut ShoestringWm, renderer: &mut R)
 where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + OffscreenRenderer,
     R::TextureId: Clone + Texture + 'static,
     <R as RendererSuper>::Error: Display,
     OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
@@ -296,7 +301,7 @@ fn render_and_push<R>(
     title: &str,
 ) -> bool
 where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + OffscreenRenderer,
     R::TextureId: Clone + Texture + 'static,
     <R as RendererSuper>::Error: Display,
     OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
@@ -309,11 +314,13 @@ where
     };
 
     let size_changed = sub.sent_ready && sub.last_size != (pw as u32, ph as u32);
-    let need_new_target = sub.texture.is_none() || size_changed;
+    let need_new_target =
+        !sub.texture.as_ref().is_some_and(|t| t.is::<R::Target>()) || size_changed;
     if need_new_target {
         match renderer.create_buffer(Fourcc::Argb8888, (pw, ph).into()) {
             Ok(tex) => {
-                sub.texture = Some(tex);
+                let tex: R::Target = tex;
+                sub.texture = Some(Box::new(tex));
                 sub.tracker = Some(OutputDamageTracker::new(
                     Size::<i32, Physical>::from((pw, ph)),
                     scale,
@@ -329,7 +336,11 @@ where
     }
 
     // Render the window into the offscreen texture, collecting damage rects.
-    let texture = sub.texture.as_mut().expect("texture set above");
+    let texture = sub
+        .texture
+        .as_mut()
+        .and_then(|t| t.downcast_mut::<R::Target>())
+        .expect("texture set above");
     let tracker = sub.tracker.as_mut().expect("tracker set above");
     let age = sub.age;
 
@@ -505,7 +516,7 @@ fn render_window_argb<R>(
     window: &Window,
 ) -> Result<(u32, u32, Vec<u8>), String>
 where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + OffscreenRenderer,
     R::TextureId: Clone + Texture + 'static,
     <R as RendererSuper>::Error: Display,
     OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
@@ -584,7 +595,7 @@ fn argb8888_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
 /// empty, so it costs nothing when unused.
 pub fn process_pending_window_screenshots<R>(state: &mut ShoestringWm, renderer: &mut R)
 where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + OffscreenRenderer,
     R::TextureId: Clone + Texture + 'static,
     <R as RendererSuper>::Error: Display,
     OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,
@@ -634,7 +645,7 @@ fn capture_window_png<R>(
     ft_id: &str,
 ) -> Result<Vec<u8>, String>
 where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + OffscreenRenderer,
     R::TextureId: Clone + Texture + 'static,
     <R as RendererSuper>::Error: Display,
     OutputRenderElements<R, WaylandSurfaceRenderElement<R>>: RenderElement<R>,

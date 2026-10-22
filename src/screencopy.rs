@@ -25,12 +25,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use std::any::Any;
+
+use crate::render::OffscreenRenderer;
 use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, Fourcc},
         renderer::{
-            damage::OutputDamageTracker, element::RenderElement, gles::GlesTexture, Bind,
-            ExportMem, ImportAll, ImportMem, Offscreen, Renderer, RendererSuper,
+            damage::OutputDamageTracker, element::RenderElement, Bind, ExportMem, ImportAll,
+            ImportMem, Renderer, RendererSuper,
         },
     },
     output::Output,
@@ -90,7 +93,9 @@ pub struct ScreencopyState {
 pub struct OffscreenTarget {
     size: Size<i32, smithay::utils::Physical>,
     scale: f64,
-    texture: GlesTexture,
+    /// The renderer's [`OffscreenRenderer::Target`], type-erased so this state
+    /// doesn't name a renderer.
+    texture: Box<dyn Any>,
     tracker: OutputDamageTracker,
 }
 
@@ -184,13 +189,7 @@ pub fn process_pending<R>(
     >],
     clear: [f32; 4],
 ) where
-    R: Renderer
-        + ImportAll
-        + ImportMem
-        + ExportMem
-        + Bind<GlesTexture>
-        + Bind<Dmabuf>
-        + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<Dmabuf> + OffscreenRenderer,
     <R as RendererSuper>::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
     crate::drawing::OutputRenderElements<
@@ -323,9 +322,9 @@ pub fn process_pending<R>(
     let cached = screencopy
         .offscreen
         .get(&output.name())
-        .is_some_and(|t| t.size == output_size && t.scale == scale);
+        .is_some_and(|t| t.size == output_size && t.scale == scale && t.texture.is::<R::Target>());
     if !cached {
-        let texture: GlesTexture =
+        let texture: R::Target =
             match renderer.create_buffer(Fourcc::Argb8888, (output_size.w, output_size.h).into()) {
                 Ok(t) => t,
                 Err(e) => {
@@ -347,7 +346,7 @@ pub fn process_pending<R>(
             OffscreenTarget {
                 size: output_size,
                 scale,
-                texture,
+                texture: Box::new(texture),
                 tracker: OutputDamageTracker::new(output_size, scale, Transform::Normal),
             },
         );
@@ -362,7 +361,10 @@ pub fn process_pending<R>(
     // holds exactly what it last rendered) repaints only what changed since
     // the previous capture — a fresh texture's first render is full.
     {
-        let texture = &mut target.texture;
+        let texture = target
+            .texture
+            .downcast_mut::<R::Target>()
+            .expect("target type checked above");
         let mut framebuffer = match renderer.bind(&mut *texture) {
             Ok(fb) => fb,
             Err(e) => {
@@ -689,7 +691,7 @@ pub fn process_pending_probes<R>(
     >],
     clear: [f32; 4],
 ) where
-    R: Renderer + ImportAll + ImportMem + ExportMem + Bind<GlesTexture> + Offscreen<GlesTexture>,
+    R: Renderer + ImportAll + ImportMem + ExportMem + OffscreenRenderer,
     <R as RendererSuper>::Error: std::fmt::Display,
     <R as RendererSuper>::TextureId: Clone + 'static,
     crate::drawing::OutputRenderElements<
