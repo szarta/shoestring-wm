@@ -9,24 +9,19 @@
 //! the child does not block on a full pipe buffer) but discard the
 //! bytes and set the response's `truncated` flag.
 
-use std::{
-    cell::RefCell,
-    io::Read,
-    os::fd::{AsFd, AsRawFd, BorrowedFd},
-    process::Stdio,
-    rc::Rc,
-    time::Duration,
-};
+use std::{cell::RefCell, io::Read, os::fd::AsRawFd, process::Stdio, rc::Rc, time::Duration};
 
 use anyhow::{Context, Result};
 use shoestring_ipc::{Response, RUN_COMMAND_OUTPUT_CAP};
 use smithay::reexports::calloop::{
-    generic::Generic,
     timer::{TimeoutAction, Timer},
-    Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+    LoopHandle, RegistrationToken,
 };
 
-use crate::state::ShoestringWm;
+use crate::{
+    child_pipe::{self, PipeEvent},
+    state::ShoestringWm,
+};
 
 pub struct Pending {
     pub(crate) client: Rc<RefCell<crate::ipc::Client>>,
@@ -50,19 +45,6 @@ pub struct Pending {
     /// Set when a timeout was configured. Removed when the response is
     /// finalised (whether the timer fired or the child finished first).
     timer_token: Option<RegistrationToken>,
-}
-
-struct PipeFd<T: AsRawFd> {
-    inner: T,
-}
-
-impl<T: AsRawFd> AsFd for PipeFd<T> {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        // SAFETY: see remote_screenshot::PipeFd — calloop owns the
-        // Generic which owns this wrapper which owns the ChildStdout /
-        // ChildStderr that backs the fd.
-        unsafe { BorrowedFd::borrow_raw(self.inner.as_raw_fd()) }
-    }
 }
 
 impl ShoestringWm {
@@ -214,6 +196,26 @@ impl ShoestringWm {
         true
     }
 
+    /// Append a chunk of child output, up to [`RUN_COMMAND_OUTPUT_CAP`] per
+    /// stream. Past the cap the bytes are dropped (the pipe keeps draining so
+    /// the child never blocks on a full buffer) and `truncated` is set. The
+    /// pending entry can already be gone if we finalised early; the bytes
+    /// are discarded then.
+    fn on_command_output(&mut self, pending_id: u64, kind: PipeKind, bytes: &[u8]) {
+        let Some(p) = self.pending_commands.get_mut(&pending_id) else {
+            return;
+        };
+        let target = match kind {
+            PipeKind::Stdout => &mut p.stdout_buf,
+            PipeKind::Stderr => &mut p.stderr_buf,
+        };
+        let room = RUN_COMMAND_OUTPUT_CAP.saturating_sub(target.len());
+        if bytes.len() > room {
+            p.truncated = true;
+        }
+        target.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
     /// Timer fired before the child exited. SIGKILL it; the pipe
     /// sources will then drain the remaining buffered output and EOF,
     /// at which point `finalize_remote_command` runs as normal.
@@ -302,52 +304,17 @@ fn register_pipe<T>(
 where
     T: AsRawFd + Read + 'static,
 {
-    let source = Generic::new(PipeFd { inner: stream }, Interest::READ, Mode::Level);
-    loop_handle
-        .insert_source(source, move |_, pipe, state| {
-            // SAFETY: see remote_screenshot::register_pipe.
-            let pipe = unsafe { pipe.get_mut() };
-            let mut buf = [0u8; 4096];
-            loop {
-                match pipe.inner.read(&mut buf) {
-                    Ok(0) => {
-                        state.on_command_pipe_closed(pending_id, kind);
-                        return Ok(PostAction::Remove);
-                    }
-                    Ok(n) => {
-                        let Some(p) = state.pending_commands.get_mut(&pending_id) else {
-                            // The pending entry can disappear if we
-                            // already finalised (e.g. the other pipe
-                            // closed first and the child exited
-                            // synchronously) — keep draining the fd
-                            // so the kernel can close it, then bail.
-                            continue;
-                        };
-                        let target = match kind {
-                            PipeKind::Stdout => &mut p.stdout_buf,
-                            PipeKind::Stderr => &mut p.stderr_buf,
-                        };
-                        let room = RUN_COMMAND_OUTPUT_CAP.saturating_sub(target.len());
-                        if room == 0 {
-                            // Already at cap. Drop the bytes but flag.
-                            p.truncated = true;
-                        } else if n <= room {
-                            target.extend_from_slice(&buf[..n]);
-                        } else {
-                            target.extend_from_slice(&buf[..room]);
-                            p.truncated = true;
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        return Ok(PostAction::Continue);
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, ?kind, "run_command pipe read failed");
-                        state.on_command_pipe_closed(pending_id, kind);
-                        return Ok(PostAction::Remove);
-                    }
-                }
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("insert run_command pipe source: {e}"))
+    let label = match kind {
+        PipeKind::Stdout => "run_command stdout",
+        PipeKind::Stderr => "run_command stderr",
+    };
+    child_pipe::register(
+        loop_handle,
+        stream,
+        label,
+        move |state, event| match event {
+            PipeEvent::Data(bytes) => state.on_command_output(pending_id, kind, bytes),
+            PipeEvent::Closed => state.on_command_pipe_closed(pending_id, kind),
+        },
+    )
 }

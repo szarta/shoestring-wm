@@ -23,7 +23,7 @@
 use std::{
     cell::RefCell,
     io::Read,
-    os::fd::{AsFd, AsRawFd, BorrowedFd},
+    os::fd::AsRawFd,
     path::PathBuf,
     process::Stdio,
     rc::Rc,
@@ -32,11 +32,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use shoestring_ipc::{Response, ScreenshotRegion};
-use smithay::reexports::calloop::{
-    generic::Generic, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
-};
+use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 
-use crate::state::ShoestringWm;
+use crate::{
+    child_pipe::{self, PipeEvent},
+    state::ShoestringWm,
+};
 
 /// In-flight subprocess. Completion needs two independent signals: both
 /// pipes reaching EOF (output fully drained) *and* the child's exit status
@@ -64,23 +65,6 @@ pub struct Pending {
     /// Destination the child was told to `--file` to; the finalized reply
     /// reports it directly rather than re-parsing the child's printed path.
     dest: PathBuf,
-}
-
-/// Generic<T> wrapper that satisfies AsFd on a stdout/stderr pipe. We
-/// can't use ChildStdout/ChildStderr directly because they don't
-/// implement AsFd in the way calloop expects across versions.
-struct PipeFd<T: AsRawFd> {
-    inner: T,
-}
-
-impl<T: AsRawFd> AsFd for PipeFd<T> {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        // SAFETY: ChildStdout/ChildStderr own the underlying pipe fd
-        // and outlive the source (calloop owns the Generic, which owns
-        // the PipeFd, which owns the Child*). The raw fd is valid for
-        // the lifetime of `self`.
-        unsafe { BorrowedFd::borrow_raw(self.inner.as_raw_fd()) }
-    }
 }
 
 impl ShoestringWm {
@@ -278,40 +262,26 @@ fn register_pipe<T>(
 where
     T: AsRawFd + Read + 'static,
 {
-    let source = Generic::new(PipeFd { inner: stream }, Interest::READ, Mode::Level);
-    loop_handle
-        .insert_source(source, move |_, pipe, state| {
-            // SAFETY: the calloop source owns the PipeFd; we never drop
-            // the FD out from under it. get_mut gives us the inner T
-            // through the NoIoDrop wrapper so we can call Read::read.
-            let pipe = unsafe { pipe.get_mut() };
-            let mut buf = [0u8; 4096];
-            loop {
-                match pipe.inner.read(&mut buf) {
-                    Ok(0) => {
-                        state.on_pipe_closed(pending_id, kind);
-                        return Ok(PostAction::Remove);
-                    }
-                    Ok(n) => {
-                        if let Some(p) = state.pending_screenshots.get_mut(&pending_id) {
-                            match kind {
-                                PipeKind::Stdout => p.stdout_buf.extend_from_slice(&buf[..n]),
-                                PipeKind::Stderr => p.stderr_buf.extend_from_slice(&buf[..n]),
-                            }
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        return Ok(PostAction::Continue);
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, ?kind, "screenshot pipe read failed");
-                        state.on_pipe_closed(pending_id, kind);
-                        return Ok(PostAction::Remove);
+    let label = match kind {
+        PipeKind::Stdout => "screenshot stdout",
+        PipeKind::Stderr => "screenshot stderr",
+    };
+    child_pipe::register(
+        loop_handle,
+        stream,
+        label,
+        move |state, event| match event {
+            PipeEvent::Data(bytes) => {
+                if let Some(p) = state.pending_screenshots.get_mut(&pending_id) {
+                    match kind {
+                        PipeKind::Stdout => p.stdout_buf.extend_from_slice(bytes),
+                        PipeKind::Stderr => p.stderr_buf.extend_from_slice(bytes),
                     }
                 }
             }
-        })
-        .map_err(|e| anyhow::anyhow!("insert screenshot pipe source: {e}"))
+            PipeEvent::Closed => state.on_pipe_closed(pending_id, kind),
+        },
+    )
 }
 
 // Howard Hinnant's date algorithm — duplicated from shoestring-screenshot

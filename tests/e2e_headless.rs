@@ -21,6 +21,7 @@
 
 mod common;
 
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -553,4 +554,75 @@ fn e2e_window_targeted_input_respects_the_lock() {
         "from_x": 20.0, "from_y": 20.0, "to_x": 40.0, "to_y": 40.0}));
     wm.park_pointer();
     wm.wait_pixel(centre, rgb(CLICKED), "targeted drag after unlock");
+}
+
+/// Send a `run_command` on its own connection and return it unread, with the
+/// time it was sent, so the test can probe the WM while the command runs.
+fn start_command(wm: &Wm, argv: &[&str], timeout_ms: u32) -> (UnixStream, std::time::Instant) {
+    let mut stream = wm.connect_ipc();
+    let request = json!({"type": "run_command", "argv": argv, "timeout_ms": timeout_ms});
+    writeln!(stream, "{request}").expect("write run_command");
+    (stream, std::time::Instant::now())
+}
+
+/// How long an unrelated IPC query takes to answer.
+fn query_latency(wm: &Wm) -> Duration {
+    let start = std::time::Instant::now();
+    wm.ipc_ok(json!({"type": "outputs"}));
+    start.elapsed()
+}
+
+/// A command that prints and then goes quiet must not park the event loop on
+/// its output pipe: other IPC keeps being answered, and its timeout still
+/// kills it on time. (`exec` makes the killed shell the process holding the
+/// pipes; a descendant that keeps them open is a separate case.)
+#[test]
+#[ignore]
+fn e2e_run_command_quiet_child_does_not_block_the_loop() {
+    let wm = Wm::start();
+    let (mut command, sent) =
+        start_command(&wm, &["/bin/sh", "-c", "printf ready; exec sleep 5"], 300);
+
+    std::thread::sleep(Duration::from_millis(100));
+    let latency = query_latency(&wm);
+    assert!(
+        latency < Duration::from_millis(500),
+        "outputs took {latency:?} while a command sat quiet"
+    );
+
+    let reply = read_line(&mut command);
+    let took = sent.elapsed();
+    assert_eq!(reply["type"], "command_result", "{reply}");
+    assert_eq!(
+        reply["exit_code"], -1,
+        "the timeout should kill it: {reply}"
+    );
+    assert_eq!(reply["stdout"], "ready", "{reply}");
+    assert!(
+        took < Duration::from_secs(2),
+        "a 300 ms timeout took {took:?} to answer"
+    );
+}
+
+/// A command that prints without pause shares the loop: other IPC is still
+/// answered promptly, and its output comes back capped.
+#[test]
+#[ignore]
+fn e2e_run_command_chatty_child_shares_the_loop() {
+    let wm = Wm::start();
+    let (mut command, _) = start_command(&wm, &["yes"], 1500);
+
+    std::thread::sleep(Duration::from_millis(200));
+    for _ in 0..5 {
+        let latency = query_latency(&wm);
+        assert!(
+            latency < Duration::from_millis(500),
+            "outputs took {latency:?} while a command printed"
+        );
+    }
+
+    let reply = read_line(&mut command);
+    assert_eq!(reply["type"], "command_result", "{reply}");
+    assert_eq!(reply["exit_code"], -1, "{reply}");
+    assert_eq!(reply["truncated"], true, "{reply}");
 }
