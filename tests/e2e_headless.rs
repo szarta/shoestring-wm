@@ -717,3 +717,124 @@ fn e2e_remote_graft_keys_skip_bindings() {
     assert_eq!(active_workspace(&wm), 1, "a graft key ran a binding");
     graft.bye();
 }
+
+/// Send one raw key transition from a viewer.
+fn viewer_key(viewer: &mut Viewer, keycode: u32, pressed: bool) {
+    viewer.send(ClientMessage::Key { keycode, pressed });
+}
+
+/// Tap L from a viewer, then wait for the workspace it should reach.
+fn viewer_tap_l(wm: &Wm, viewer: &mut Viewer, want: u64, what: &str) {
+    viewer_key(viewer, KEY_L, true);
+    viewer_key(viewer, KEY_L, false);
+    wait_for(what, || (active_workspace(wm) == want).then_some(()));
+}
+
+/// Tap L through automation's raw keys with bindings on, as a keystroke on
+/// the served machine would arrive: it runs Super+L only if Super is down.
+fn automation_tap_l(wm: &Wm) {
+    for pressed in [true, false] {
+        wm.ipc_ok(json!({"type": "inject_input", "bindings": true,
+                         "event": {"kind": "key", "keycode": KEY_L, "pressed": pressed}}));
+    }
+}
+
+/// A viewer that drops mid-chord leaves nothing held: its Super is released,
+/// so a later L is just L.
+#[test]
+#[ignore]
+fn e2e_remote_hang_up_releases_held_keys() {
+    let mut wm = start_with_super_l();
+    let _client = TestClient::map(&wm);
+    wm.mapped_window();
+    wm.start_remote_server();
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    viewer_key(&mut viewer, KEY_LEFTMETA, true);
+    viewer_tap_l(&wm, &mut viewer, 2, "Super+L while the viewer holds Super");
+
+    viewer.hang_up();
+    // The session releases what it held before it stops counting as a viewer.
+    wm.wait_viewers(0);
+    automation_tap_l(&wm);
+    assert_eq!(
+        active_workspace(&wm),
+        2,
+        "Super stayed held after a hang-up"
+    );
+}
+
+/// One viewer leaving releases only what nobody else holds: a second viewer
+/// still holding Super keeps it.
+#[test]
+#[ignore]
+fn e2e_remote_hang_up_keeps_another_viewers_keys() {
+    let mut wm = start_with_super_l();
+    let _client = TestClient::map(&wm);
+    wm.mapped_window();
+    wm.start_remote_server();
+
+    // One at a time: concurrent connects can report the viewer count out of
+    // order, which is its own bug.
+    let mut first = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    let mut second = Viewer::serve(&wm);
+    wm.wait_viewers(2);
+    viewer_key(&mut first, KEY_LEFTMETA, true);
+    viewer_key(&mut second, KEY_LEFTMETA, true);
+    viewer_tap_l(&wm, &mut first, 2, "Super+L with both viewers on Super");
+
+    first.hang_up();
+    wm.wait_viewers(1);
+    viewer_tap_l(&wm, &mut second, 3, "Super+L after the other viewer left");
+
+    second.hang_up();
+    wm.wait_viewers(0);
+    automation_tap_l(&wm);
+    assert_eq!(
+        active_workspace(&wm),
+        3,
+        "Super stayed held after both left"
+    );
+}
+
+/// Closing the gate releases what viewers held even though injection is now
+/// refused, and sessions after it reopens start clean.
+#[test]
+#[ignore]
+fn e2e_remote_gate_off_releases_held_keys() {
+    let mut wm = start_with_super_l();
+    let _client = TestClient::map(&wm);
+    wm.mapped_window();
+    wm.start_remote_server();
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    viewer_key(&mut viewer, KEY_LEFTMETA, true);
+    viewer_tap_l(&wm, &mut viewer, 2, "Super+L while the viewer holds Super");
+
+    wm.set_remote(false);
+    assert_eq!(viewer.wait_end(), End::Bye);
+    wm.ipc_ok(json!({"type": "set_automation", "enabled": true}));
+    automation_tap_l(&wm);
+    assert_eq!(
+        active_workspace(&wm),
+        2,
+        "Super stayed held after the gate closed"
+    );
+
+    // A new session holds and releases normally.
+    wm.set_remote(true);
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    viewer_key(&mut viewer, KEY_LEFTMETA, true);
+    viewer_tap_l(
+        &wm,
+        &mut viewer,
+        3,
+        "Super+L from a session after the gate reopened",
+    );
+    viewer_key(&mut viewer, KEY_LEFTMETA, false);
+    viewer.bye();
+}

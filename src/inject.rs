@@ -20,6 +20,8 @@
 //! - `inject_click`: `"left"` / `"right"` / `"middle"` or a numeric
 //!   BTN_* code. Optional `(x, y)` pre-moves the pointer.
 
+use std::collections::BTreeSet;
+
 use smithay::{
     backend::input::{Axis, ButtonState, KeyState},
     input::{
@@ -31,6 +33,38 @@ use smithay::{
 };
 
 use crate::state::ShoestringWm;
+
+/// Keys (X-style keycodes, evdev + 8) and pointer buttons (evdev codes) one
+/// input source holds down. The WM keeps one set for raw injection and one for
+/// the real devices on this seat, so that a transition reaches clients only
+/// when it changes what the seat as a whole holds: injection can't lift a key a
+/// finger is still on, and releasing everything injection holds (when its gate
+/// closes) leaves physically held keys alone.
+#[derive(Debug, Default)]
+pub struct HeldInput {
+    pub keys: BTreeSet<u32>,
+    pub buttons: BTreeSet<u32>,
+}
+
+impl HeldInput {
+    /// Record a transition. Returns whether it changed this source's state (a
+    /// repeated press, or a release of something not held, does not).
+    fn note(set: &mut BTreeSet<u32>, code: u32, pressed: bool) -> bool {
+        if pressed {
+            set.insert(code)
+        } else {
+            set.remove(&code)
+        }
+    }
+
+    pub fn note_key(&mut self, keycode: u32, pressed: bool) -> bool {
+        Self::note(&mut self.keys, keycode, pressed)
+    }
+
+    pub fn note_button(&mut self, button: u32, pressed: bool) -> bool {
+        Self::note(&mut self.buttons, button, pressed)
+    }
+}
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -392,6 +426,13 @@ impl ShoestringWm {
         // raw evdev code, matching what smithay's libinput backend adds before
         // calling KeyboardHandle::input.
         let keycode = evdev_keycode + 8;
+        // Pass on only what changes the seat's state: not a repeat or a stray
+        // release, and not a key a real keyboard is holding too.
+        if !self.injected_held.note_key(keycode, pressed)
+            || self.physical_held.keys.contains(&keycode)
+        {
+            return;
+        }
         if bindings {
             self.process_key(keycode.into(), state, monotonic_msec());
         } else {
@@ -405,6 +446,12 @@ impl ShoestringWm {
     /// it does *not* run the click-to-focus logic: the served WM applies its
     /// own focus policy as the events flow through the seat.
     pub fn inject_raw_button(&mut self, button: u32, pressed: bool) {
+        // Same ownership rule as keys (see `inject_raw_keycode`).
+        if !self.injected_held.note_button(button, pressed)
+            || self.physical_held.buttons.contains(&button)
+        {
+            return;
+        }
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.seat.get_pointer().expect("seat must have pointer");
         pointer.button(
@@ -422,6 +469,49 @@ impl ShoestringWm {
         );
         let pointer = self.seat.get_pointer().unwrap();
         pointer.frame(self);
+    }
+
+    /// Release every key and button raw injection still holds, so input a
+    /// viewer or script left down (a dropped connection mid-chord or mid-drag)
+    /// doesn't stay pressed on the seat. Called when the automation gate
+    /// closes, which every revocation path goes through. Keys a real keyboard
+    /// also holds stay down, and a keybind repeat the released key drove stops.
+    pub fn release_injected_input(&mut self) {
+        let held = std::mem::take(&mut self.injected_held);
+        for keycode in held.keys {
+            if self
+                .key_repeat
+                .as_ref()
+                .is_some_and(|r| r.keycode == keycode)
+            {
+                self.cancel_key_repeat();
+            }
+            if !self.physical_held.keys.contains(&keycode) {
+                tracing::debug!(keycode, "releasing a key injection left held");
+                self.dispatch_key(keycode, KeyState::Released);
+            }
+        }
+        let pointer = self.seat.get_pointer().expect("seat must have pointer");
+        let mut released = false;
+        for button in held.buttons {
+            if self.physical_held.buttons.contains(&button) {
+                continue;
+            }
+            tracing::debug!(button, "releasing a button injection left held");
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button,
+                    state: ButtonState::Released,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: monotonic_msec(),
+                },
+            );
+            released = true;
+        }
+        if released {
+            pointer.frame(self);
+        }
     }
 
     /// Inject a scroll event. `horizontal` / `vertical` are continuous deltas

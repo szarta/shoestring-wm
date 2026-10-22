@@ -726,6 +726,8 @@ impl ShoestringWm {
 
     /// A key transition from a physical keyboard.
     fn handle_keyboard_event<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
+        self.physical_held
+            .note_key(event.key_code().into(), event.state() == KeyState::Pressed);
         self.process_key(event.key_code(), event.state(), Event::time_msec(&event));
     }
 
@@ -1155,6 +1157,8 @@ impl ShoestringWm {
         let serial = SERIAL_COUNTER.next_serial();
         let button = event.button_code();
         let button_state = event.state();
+        self.physical_held
+            .note_button(button, button_state == ButtonState::Pressed);
 
         // Machine-axis capture: forward the raw button transition to the
         // active remote and swallow it locally (no click-to-focus, no

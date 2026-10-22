@@ -486,6 +486,14 @@ pub struct ShoestringWm {
     /// press; cleared on the matching release. See [`crate::input`].
     pub key_repeat: Option<crate::input::KeyRepeat>,
 
+    /// Keys and buttons that raw injection (`inject_input`, a remote viewer)
+    /// is holding down, and those a real keyboard or pointer on this seat is
+    /// holding. Injection only passes on a transition no other source owns,
+    /// and closing the automation gate releases whatever injection still
+    /// holds. See [`crate::inject::HeldInput`].
+    pub injected_held: crate::inject::HeldInput,
+    pub physical_held: crate::inject::HeldInput,
+
     /// Accumulated mouse-wheel travel (in v120 units, 120 per physical
     /// detent) while scrolling the bare desktop to switch workspaces.
     /// Lets high-resolution wheels — which emit several sub-detent events
@@ -943,6 +951,8 @@ impl ShoestringWm {
             edge_drag_window: None,
             edge_drag_repeat_token: None,
             key_repeat: None,
+            injected_held: Default::default(),
+            physical_held: Default::default(),
             desktop_scroll_accum: 0.0,
             rules_applied: HashSet::new(),
             sticky: HashSet::new(),
@@ -1905,6 +1915,12 @@ impl ShoestringWm {
     /// owns automation logging / `AutomationChanged` (mirrors set_screen_capture).
     pub fn set_automation(&mut self, enabled: bool) -> bool {
         self.automation_enabled = enabled;
+        if !enabled {
+            // Every way of revoking injection lands here (automation off, the
+            // remote gate off, the remote server going away), so a key or
+            // button a viewer was holding can't outlive the gate.
+            self.release_injected_input();
+        }
         let capture_changed = self.screen_capture_enabled != enabled;
         if capture_changed {
             self.set_screen_capture(enabled);

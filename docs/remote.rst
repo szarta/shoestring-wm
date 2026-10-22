@@ -187,6 +187,12 @@ The remote gate reuses the existing capability-gate model end to end:
   registered**. Flip it from the bar chip, with ``shoestring-ctl remote on``,
   or - for a headless box or container - from the entrypoint. See
   :doc:`ipc` for ``set_remote`` / ``remote_status`` / ``remote_changed``.
+- **Nothing a viewer held outlives it.** The server tracks which keys and
+  buttons each session holds. When a session ends with some still down (a
+  dropped connection mid-chord or mid-drag), it releases the ones no other
+  viewer holds. Closing the remote gate, or the server exiting or crashing,
+  closes the automation gate, and the WM then releases everything injection
+  held itself, since injection is refused from that point.
 - A **"being viewed / controlled" indicator** lights while a client is connected
   - a bar chip alongside MUTE/MIC/CAM, the same privacy-opt-in pattern as the
   capture indicator: never silent, always visible.

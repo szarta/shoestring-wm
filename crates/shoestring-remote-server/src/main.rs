@@ -20,6 +20,7 @@
 //! authentication (see [`listen`]). An explicit `--tcp` listener has no such
 //! check and warns at startup.
 
+mod holds;
 mod listen;
 mod session;
 mod viewers;
@@ -37,6 +38,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer as _;
 
+use holds::Holds;
 use listen::{Endpoint, Listener};
 use viewers::Viewers;
 
@@ -99,6 +101,7 @@ fn main() -> Result<()> {
 
     let gate = Arc::new(Gate::new(initial_enabled)?);
     let viewers = Arc::new(Viewers::new());
+    let holds = Arc::new(Holds::new());
 
     // Reader thread: turn RemoteChanged events into gate transitions, and treat
     // the WM closing the connection as a shutdown signal.
@@ -110,7 +113,7 @@ fn main() -> Result<()> {
             .context("spawn wm-events thread")?;
     }
 
-    run_supervisor(&cfg, &gate, &viewers)
+    run_supervisor(&cfg, &gate, &viewers, &holds)
 }
 
 /// Gate state shared between the event reader and the listener supervisor.
@@ -236,7 +239,12 @@ fn read_wm_events(mut reader: std::io::BufReader<std::os::unix::net::UnixStream>
 
 /// Open the listener while the gate is on; close it when the gate goes off.
 /// Each accepted connection is handed to a session thread.
-fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result<()> {
+fn run_supervisor(
+    cfg: &Cfg,
+    gate: &Arc<Gate>,
+    viewers: &Arc<Viewers>,
+    holds: &Arc<Holds>,
+) -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     loop {
         if gate.wait_enabled() {
@@ -275,14 +283,19 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
                     };
                     tracing::info!(peer = %accepted.peer, "client connected");
                     let viewers = Arc::clone(viewers);
+                    let holds = Arc::clone(holds);
                     let output = cfg.output.clone();
                     std::thread::Builder::new()
                         .name("session".into())
                         .spawn(move || {
                             let _slot = slot;
-                            if let Err(e) =
-                                session::serve(accepted.stream, accepted.peer, output, viewers)
-                            {
+                            if let Err(e) = session::serve(
+                                accepted.stream,
+                                accepted.peer,
+                                output,
+                                viewers,
+                                holds,
+                            ) {
                                 tracing::warn!(error = %e, "session error");
                             }
                         })
@@ -300,9 +313,14 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
 
         // Gate off (or accept died): drop the listener so the socket goes, and
         // clear the viewer chip. Live sessions end on their own when the WM
-        // tears down their capture subscriptions.
+        // tears down their capture subscriptions. With the gate off the WM has
+        // also released the keys they held, so their holds start over; after a
+        // failed accept the sessions are still live and keep theirs.
         drop(listener);
         viewers.reset();
+        if !gate.snapshot().0 {
+            holds.reset();
+        }
         tracing::info!("listener closed (remote gate off)");
 
         if gate.snapshot().1 {

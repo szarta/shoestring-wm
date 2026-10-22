@@ -25,6 +25,7 @@ use shoestring_ipc::RawInput;
 use shoestring_remote::transport::Stream;
 use shoestring_remote::{read_framed, write_framed, ClientMessage, ServerMessage};
 
+use crate::holds::{Held, Holds};
 use crate::viewers::Viewers;
 use crate::wm;
 
@@ -64,6 +65,7 @@ pub fn serve(
     peer: String,
     output: Option<String>,
     viewers: Arc<Viewers>,
+    holds: Arc<Holds>,
 ) -> Result<()> {
     // The client's first message discriminates the mode:
     // - `Hello` → **serve mode**: stream a whole output. Hello carries the
@@ -135,7 +137,7 @@ pub fn serve(
     };
 
     // Input loop on this thread: network → WM injection + clipboard brokering.
-    let input_result = forward_input(net_in, net_out, &teardown, graft_id);
+    let input_result = forward_input(net_in, net_out, &teardown, graft_id, &holds);
     teardown.stop();
     let _ = frames.join();
 
@@ -166,13 +168,16 @@ fn forward_frames(wm_capture: UnixStream, net_out: SharedNet, teardown: &Teardow
     teardown.stop();
 }
 
-/// Read `ClientMessage`s and inject them into the WM until Bye/EOF/error.
+/// Read `ClientMessage`s and inject them into the WM until Bye/EOF/error,
+/// then release whatever this viewer still held that no other viewer does.
 fn forward_input(
     mut net_in: BufReader<Stream>,
     net_out: SharedNet,
     teardown: &Teardown,
     graft_id: Option<String>,
+    holds: &Holds,
 ) -> Result<()> {
+    let mut mine = holds.session();
     // Read ends the loop on EOF / shutdown / malformed.
     while let Ok(msg) = read_framed::<_, ClientMessage>(&mut net_in) {
         match msg {
@@ -216,11 +221,18 @@ fn forward_input(
                 let Some(event) = to_raw_input(&other) else {
                     continue;
                 };
+                // Key and button transitions pass only when they change what
+                // the viewers hold as a whole (see holds.rs).
+                if let Some((held, pressed)) = held_transition(event) {
+                    if !holds.transition(&mut mine, held, pressed) {
+                        continue;
+                    }
+                }
                 // Graft mode targets the grafted window; serve mode drives the
                 // global seat.
                 let result = match &graft_id {
                     Some(id) => wm::inject_to_window(id, event),
-                    None => wm::inject(event),
+                    None => wm::inject(event, true),
                 };
                 if let Err(e) = result {
                     // The gate likely flipped off mid-session; stop cleanly.
@@ -231,7 +243,42 @@ fn forward_input(
         }
     }
     teardown.stop();
+    release_held(holds.end(&mut mine), graft_id.is_none());
     Ok(())
+}
+
+/// The key or button a raw event presses or releases, if any.
+fn held_transition(event: RawInput) -> Option<(Held, bool)> {
+    match event {
+        RawInput::Key { keycode, pressed } => Some((Held::Key(keycode), pressed)),
+        RawInput::Button { button, pressed } => Some((Held::Button(button), pressed)),
+        RawInput::Motion { .. } | RawInput::Axis { .. } => None,
+    }
+}
+
+/// Release what an ended session held and nobody else does, so a viewer that
+/// dropped mid-chord or mid-drag leaves nothing pressed. Serve-mode keys go
+/// back through the bindings path, which also stops a keybind repeat the key
+/// was driving. If the gate has closed these fail, harmlessly: the WM released
+/// everything injection held when it did.
+fn release_held(released: Vec<Held>, serve: bool) {
+    for held in released {
+        let event = match held {
+            Held::Key(keycode) => RawInput::Key {
+                keycode,
+                pressed: false,
+            },
+            Held::Button(button) => RawInput::Button {
+                button,
+                pressed: false,
+            },
+        };
+        tracing::debug!(?held, "releasing what a closed session held");
+        if let Err(e) = wm::inject(event, serve) {
+            tracing::debug!(error = %e, "release after session end failed");
+            return;
+        }
+    }
 }
 
 /// Translate a client input message into the WM's raw-injection event. Returns

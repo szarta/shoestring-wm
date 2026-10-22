@@ -691,6 +691,12 @@ impl Viewer {
     pub fn bye(mut self) {
         self.send(ClientMessage::Bye);
     }
+
+    /// Drop the connection without a `Bye`, as a viewer whose network or
+    /// process died would.
+    pub fn hang_up(self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Counts the bytes that pass through a reader.

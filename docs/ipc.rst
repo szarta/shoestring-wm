@@ -85,7 +85,10 @@ What each state allows
        ``inject_input_to_window``, ``get_clipboard``, ``set_clipboard``,
        ``paste``, ``dispatch_action``, ``shutdown``, ``screenshot``,
        ``screenshot_window``, ``get_pixel``, ``hash_region``,
-       ``run_command``.
+       ``run_command``. Turning automation off also releases every key and
+       button that ``inject_input`` / ``inject_input_to_window`` still holds
+       down (except those a real keyboard or pointer on the seat is holding),
+       so nothing injected stays pressed once injection is no longer allowed.
    * - Screen capture off (default)
      - The ``zwlr_screencopy_manager_v1`` and ``ext-image-copy-capture``
        globals are withdrawn from new clients and live sessions are stopped.
@@ -334,8 +337,12 @@ Each request is a JSON object with a ``type`` discriminator:
        ``vertical`` scroll deltas). Each carries ``"pressed"`` for the
        down/up variants. Unlike ``inject_key`` / ``inject_click`` (atomic
        tap / press+release) each is a single event, so a held key, a chord,
-       or a drag reproduces exactly. Optional ``"bindings": true`` lets a key
-       trigger this WM's keybindings, taking the same path as a physical
+       or a drag reproduces exactly. The WM tracks what raw injection holds:
+       a press of a key or button it already holds, or a release of one it
+       doesn't, is ignored, and a transition on a key or button a real device
+       on the seat is holding is recorded but not delivered, so injection
+       can't lift a finger that is still down. Optional ``"bindings": true``
+       lets a key trigger this WM's keybindings, taking the same path as a physical
        keystroke (window picker, lock screen and shortcut inhibitors
        included); remote serve mode sets it, because the viewer is driving
        this whole desktop. Without it (the default) keys go to the focused
