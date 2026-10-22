@@ -1214,6 +1214,13 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
                     let _ = write_response(client, &automation_off_error());
                     return true;
                 }
+                // A window-targeted drag pins the pointer to that window's
+                // surface, past the lock screen; a global one meets the lock
+                // surface like real input.
+                if id.is_some() && state.is_locked() {
+                    let _ = write_response(client, &session_locked_error("drag"));
+                    return true;
+                }
                 let resp =
                     match state.inject_drag(id.as_deref(), &button, (from_x, from_y), (to_x, to_y))
                     {
@@ -1607,7 +1614,8 @@ fn capture_off_error() -> Response {
 /// window. Whole-output capture and global input need no such check, since
 /// they meet the locked scene and the lock surface's focus. But
 /// `capture_window` / `screenshot_window` render the app's own surface tree,
-/// and `inject_input_to_window` moves keyboard focus to the app. The
+/// `inject_input_to_window` moves keyboard focus to the app, and a `drag` with
+/// a window id pins the pointer to the app's surface. The
 /// `session locked:` prefix is stable for scripts, like the gate errors above.
 pub(crate) fn session_locked_error(request: &str) -> Response {
     Response::Error {

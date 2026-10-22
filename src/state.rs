@@ -1081,6 +1081,15 @@ impl ShoestringWm {
                 .map(|g| (o.clone(), g))
         });
 
+        // While locked, the lock surface covering the output is the only thing
+        // pointer input may reach: the windows and layers stay mapped behind
+        // it. Nothing until that output's lock surface exists.
+        if self.is_locked() {
+            let (output, geo) = output_geo?;
+            let surface = self.lock_surface_for(&output)?;
+            return Some((surface.wl_surface().clone(), geo.loc.to_f64()));
+        }
+
         if let Some((output, geo)) = output_geo.as_ref() {
             let local = pos - geo.loc.to_f64();
             let map = layer_map_for_output(output);
@@ -1200,9 +1209,12 @@ impl ShoestringWm {
         }
 
         // Graft input pinned the focus to a window that may not be under the
-        // cursor; keep it while it is still the delivered focus.
+        // cursor; keep it while it is still the delivered focus. A session lock
+        // drops the pin: the pointer must meet the lock screen, or a press
+        // would reach the window behind it.
         if let Some(pinned) = &self.graft_pointer_focus {
-            let still_pinned = pinned.is_alive()
+            let still_pinned = !self.is_locked()
+                && pinned.is_alive()
                 && self
                     .last_pointer_focus
                     .as_ref()

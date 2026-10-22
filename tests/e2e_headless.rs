@@ -496,3 +496,61 @@ fn compare_renderers(scale: f64, agree: impl Fn(u8, f64) -> bool) {
         );
     }
 }
+
+/// Input aimed at one window must not reach past the session lock: a
+/// window-targeted drag is refused, a window-relative click meets the lock
+/// screen, and a pointer pinned to a window by graft input before the lock
+/// doesn't carry a press through it. All still work once unlocked.
+#[test]
+#[ignore]
+fn e2e_window_targeted_input_respects_the_lock() {
+    let wm = Wm::start();
+    let client = TestClient::map(&wm);
+    let (id, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.wait_pixel(centre, rgb(IDLE), "window before the lock");
+
+    // Pin the pointer to the window the way graft input does, then lock.
+    wm.ipc_ok(json!({"type": "inject_input_to_window", "id": id,
+        "event": {"kind": "motion", "x": 20.0, "y": 20.0}}));
+    client.lock();
+
+    let drag = wm.ipc(json!({"type": "drag", "id": id, "button": "left",
+        "from_x": 20.0, "from_y": 20.0, "to_x": 40.0, "to_y": 40.0}));
+    assert_eq!(drag["type"], "error", "targeted drag while locked: {drag}");
+    assert!(
+        drag["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("session locked:"),
+        "targeted drag while locked: {drag}"
+    );
+    wm.ipc_ok(
+        json!({"type": "inject_click_to_window", "id": id, "button": "left",
+        "wx": 20.0, "wy": 20.0}),
+    );
+    // A global press goes wherever the pointer's focus is.
+    for pressed in [true, false] {
+        wm.ipc_ok(json!({"type": "inject_input",
+            "event": {"kind": "button", "button": 0x110, "pressed": pressed}}));
+    }
+    // A global drag is fine: it meets the lock screen.
+    wm.ipc_ok(json!({"type": "drag", "button": "left",
+        "from_x": centre.0, "from_y": centre.1, "to_x": centre.0 + 10, "to_y": centre.1}));
+    std::thread::sleep(Duration::from_millis(300));
+
+    client.unlock();
+    wm.park_pointer();
+    std::thread::sleep(Duration::from_millis(300));
+    wm.wait_pixel(
+        centre,
+        rgb(IDLE),
+        "window after the lock (no input got through)",
+    );
+
+    // Unlocked, the targeted drag works again.
+    wm.ipc_ok(json!({"type": "drag", "id": id, "button": "left",
+        "from_x": 20.0, "from_y": 20.0, "to_x": 40.0, "to_y": 40.0}));
+    wm.park_pointer();
+    wm.wait_pixel(centre, rgb(CLICKED), "targeted drag after unlock");
+}

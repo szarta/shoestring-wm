@@ -808,6 +808,11 @@ pub struct ClientState {
     lock_finished: bool,
     /// Each lock surface's configured size, by index.
     lock_sizes: Vec<(u32, u32)>,
+    /// The toplevel's surface. Input counts only while it has focus, so events
+    /// aimed at this client's own lock surfaces don't change the window.
+    window_surface: Option<WlSurface>,
+    pointer_in_window: bool,
+    keyboard_in_window: bool,
 }
 
 pub fn client_main(
@@ -831,6 +836,7 @@ pub fn client_main(
     eq.roundtrip(&mut state).expect("seat roundtrip");
 
     let surface = compositor.create_surface(&qh, ());
+    state.window_surface = Some(surface.clone());
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title(TITLE.into());
@@ -1109,12 +1115,16 @@ impl Dispatch<WlKeyboard, ()> for ClientState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Key {
-            state: WEnum::Value(wl_keyboard::KeyState::Pressed),
-            ..
-        } = event
-        {
-            state.colour = KEYED;
+        match event {
+            wl_keyboard::Event::Enter { surface, .. } => {
+                state.keyboard_in_window = state.window_surface.as_ref() == Some(&surface);
+            }
+            wl_keyboard::Event::Leave { .. } => state.keyboard_in_window = false,
+            wl_keyboard::Event::Key {
+                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
+                ..
+            } if state.keyboard_in_window => state.colour = KEYED,
+            _ => {}
         }
     }
 }
@@ -1128,12 +1138,16 @@ impl Dispatch<WlPointer, ()> for ClientState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Button {
-            state: WEnum::Value(wl_pointer::ButtonState::Pressed),
-            ..
-        } = event
-        {
-            state.colour = CLICKED;
+        match event {
+            wl_pointer::Event::Enter { surface, .. } => {
+                state.pointer_in_window = state.window_surface.as_ref() == Some(&surface);
+            }
+            wl_pointer::Event::Leave { .. } => state.pointer_in_window = false,
+            wl_pointer::Event::Button {
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ..
+            } if state.pointer_in_window => state.colour = CLICKED,
+            _ => {}
         }
     }
 }

@@ -100,8 +100,9 @@ What each state allows
        subscriber gets one static locked frame instead, except briefly after
        input), and global input
        (``inject_input``, ``inject_key``, ...) goes to the lock surface like
-       real input. ``capture_window``, ``screenshot_window`` and
-       ``inject_input_to_window`` are refused with ``session locked:``, and
+       real input. ``capture_window``, ``screenshot_window``,
+       ``inject_input_to_window`` and a ``drag`` with a window ``id`` are
+       refused with ``session locked:``, and
        open ``capture_window`` streams pause until unlock (see
        :ref:`ipc-session-lock`). ``get_clipboard`` and the window-list
        queries keep working.
@@ -814,6 +815,12 @@ they are held back:
   but receives no frames until unlock, then resumes with whatever
   changed in the meantime. Unlocking is the consent; no new request is
   needed.
+
+Input aimed at one window is held back the same way. ``inject_input_to_window``
+and a ``drag`` with a window ``id`` are refused with ``session locked:``. All
+other pointer input, injected or real, reaches only the lock surface, whatever
+window sits under the cursor behind it; a window-relative
+``inject_click_to_window`` therefore lands on the lock screen.
 
 Responses
 ---------
