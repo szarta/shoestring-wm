@@ -887,3 +887,97 @@ fn e2e_remote_viewer_count_survives_a_gate_cycle() {
     new.bye();
     wm.wait_viewers(0);
 }
+
+/// Whether `pid` is still a live process (not gone, not a zombie).
+fn process_alive(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The state is the field after the parenthesised command name.
+        Ok(stat) => stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z')),
+        Err(_) => false,
+    }
+}
+
+/// Run a command to completion, returning its reply and how long it took.
+fn run_command(wm: &Wm, argv: &[&str], timeout_ms: Option<u32>) -> (serde_json::Value, Duration) {
+    let start = std::time::Instant::now();
+    let mut request = json!({"type": "run_command", "argv": argv});
+    if let Some(ms) = timeout_ms {
+        request["timeout_ms"] = json!(ms);
+    }
+    let reply = wm.ipc(request);
+    assert_eq!(reply["type"], "command_result", "{reply}");
+    (reply, start.elapsed())
+}
+
+/// The first line of a command's stdout, as a pid.
+fn printed_pid(reply: &serde_json::Value) -> u32 {
+    let stdout = reply["stdout"].as_str().expect("stdout");
+    stdout
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .unwrap_or_else(|| {
+            panic!("no pid in {reply}");
+        })
+}
+
+/// A timeout kills the command's whole process tree, not just the shell, so a
+/// background process holding the output can't keep the request open.
+#[test]
+#[ignore]
+fn e2e_run_command_timeout_kills_the_tree() {
+    let wm = Wm::start();
+    let (reply, took) = run_command(
+        &wm,
+        &["/bin/sh", "-c", "sleep 30 & echo $!; wait"],
+        Some(300),
+    );
+    assert!(
+        took < Duration::from_secs(3),
+        "a 300 ms timeout took {took:?}"
+    );
+    assert_eq!(reply["exit_code"], -1, "{reply}");
+    let pid = printed_pid(&reply);
+    wait_for("the background sleep to die", || {
+        (!process_alive(pid)).then_some(())
+    });
+}
+
+/// A command that exits while something it started still holds its output
+/// is answered shortly after it exits, and that leftover is killed.
+#[test]
+#[ignore]
+fn e2e_run_command_leftover_holding_output_is_bounded() {
+    let wm = Wm::start();
+    let (reply, took) = run_command(&wm, &["/bin/sh", "-c", "sleep 30 & echo $!"], None);
+    assert!(took < Duration::from_secs(3), "reply took {took:?}");
+    assert_eq!(reply["exit_code"], 0, "{reply}");
+    let pid = printed_pid(&reply);
+    wait_for("the leftover sleep to die", || {
+        (!process_alive(pid)).then_some(())
+    });
+}
+
+/// A background process that doesn't hold the output is left running, as
+/// before: the command was answered without waiting on it.
+#[test]
+#[ignore]
+fn e2e_run_command_leaves_unrelated_background_alone() {
+    let wm = Wm::start();
+    let (reply, took) = run_command(
+        &wm,
+        &["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"],
+        None,
+    );
+    let pid = printed_pid(&reply);
+    let alive = process_alive(pid);
+    // Clean up before asserting.
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    assert!(took < Duration::from_secs(2), "reply took {took:?}");
+    assert!(
+        alive,
+        "a background process that didn't hold the output was killed"
+    );
+}

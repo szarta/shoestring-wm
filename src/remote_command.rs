@@ -8,6 +8,19 @@
 //! per-stream output cap. Past the cap we keep draining the pipe (so
 //! the child does not block on a full pipe buffer) but discard the
 //! bytes and set the response's `truncated` flag.
+//!
+//! ## What a command is
+//!
+//! An attached command is its whole **process group**: the child runs in a
+//! new group of its own, which the processes it starts join unless they leave
+//! on purpose. The timeout kills the group, not just the child, so a shell
+//! and what it started go together. The reply waits for the child to exit and
+//! its output to reach EOF; a process it started that still holds the pipes
+//! after it exits gets [`OUTPUT_GRACE`] to finish, then the group is killed
+//! and the reply goes out with the output so far, instead of the request
+//! hanging for as long as that process runs. Processes that don't hold the
+//! output (redirected elsewhere) are left alone; `detach` is for anything
+//! meant to outlive the request.
 
 use std::{cell::RefCell, io::Read, os::fd::AsRawFd, process::Stdio, rc::Rc, time::Duration};
 
@@ -22,6 +35,10 @@ use crate::{
     child_pipe::{self, PipeEvent},
     state::ShoestringWm,
 };
+
+/// How long the reply waits for output to reach EOF after the child exits,
+/// before killing what is left of its process group.
+const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 
 pub struct Pending {
     pub(crate) client: Rc<RefCell<crate::ipc::Client>>,
@@ -45,6 +62,9 @@ pub struct Pending {
     /// Set when a timeout was configured. Removed when the response is
     /// finalised (whether the timer fired or the child finished first).
     timer_token: Option<RegistrationToken>,
+    /// Set once the child has exited with its pipes still open: the
+    /// [`OUTPUT_GRACE`] timer that ends the wait.
+    grace_token: Option<RegistrationToken>,
 }
 
 impl ShoestringWm {
@@ -62,11 +82,15 @@ impl ShoestringWm {
     ) -> Result<()> {
         anyhow::ensure!(!argv.is_empty(), "run_command: argv must be non-empty");
 
+        use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // A group of its own (pgid = its pid), so the command can be
+            // killed as a whole; see the module docs.
+            .process_group(0);
         apply_cwd_env(&mut cmd, cwd, env);
 
         let mut child = cmd
@@ -96,6 +120,7 @@ impl ShoestringWm {
             stdout_token: None,
             stderr_token: None,
             timer_token: None,
+            grace_token: None,
         };
         self.pending_commands.insert(pending_id, pending);
 
@@ -193,7 +218,46 @@ impl ShoestringWm {
             p.exit_status = Some(status);
         }
         self.maybe_finalize_remote_command(pending_id);
+        // Still pending: the child is gone but something it started holds the
+        // pipes. Give the output a moment, then stop waiting.
+        if self.pending_commands.contains_key(&pending_id) {
+            self.arm_output_grace(pending_id);
+        }
         true
+    }
+
+    fn arm_output_grace(&mut self, pending_id: u64) {
+        let token = self.loop_handle.insert_source(
+            Timer::from_duration(OUTPUT_GRACE),
+            move |_, _, state| {
+                state.on_output_grace_over(pending_id);
+                TimeoutAction::Drop
+            },
+        );
+        match token {
+            Ok(token) => {
+                if let Some(p) = self.pending_commands.get_mut(&pending_id) {
+                    p.grace_token = Some(token);
+                }
+            }
+            // Without the timer the reply waits for EOF, as it always did.
+            Err(e) => tracing::warn!(error = %e, "insert run_command grace timer"),
+        }
+    }
+
+    /// The child exited [`OUTPUT_GRACE`] ago and its pipes are still open:
+    /// kill what is left of its process group and reply with what we have.
+    fn on_output_grace_over(&mut self, pending_id: u64) {
+        let Some(p) = self.pending_commands.get_mut(&pending_id) else {
+            return;
+        };
+        p.grace_token = None;
+        tracing::info!(
+            ?pending_id,
+            "run_command exited but its output is still held open; killing its process group"
+        );
+        kill_group(p.pid);
+        self.finalize_remote_command(pending_id);
     }
 
     /// Append a chunk of child output, up to [`RUN_COMMAND_OUTPUT_CAP`] per
@@ -216,21 +280,19 @@ impl ShoestringWm {
         target.extend_from_slice(&bytes[..bytes.len().min(room)]);
     }
 
-    /// Timer fired before the child exited. SIGKILL it; the pipe
-    /// sources will then drain the remaining buffered output and EOF,
-    /// at which point `finalize_remote_command` runs as normal.
+    /// Timer fired before the reply went out. SIGKILL the command's whole
+    /// process group; the pipe sources then drain the remaining buffered
+    /// output and EOF, and the reply goes out as normal.
     fn on_command_timeout(&mut self, pending_id: u64) {
         let Some(p) = self.pending_commands.get_mut(&pending_id) else {
             return;
         };
-        // SIGKILL. We log but ignore errors: ESRCH just means the child
-        // was reaped between the timer firing and us reaching here.
-        if let Err(e) = crate::child_reaper::kill(p.pid) {
-            tracing::debug!(error = %e, "run_command kill (child already exited?)");
-        } else {
-            tracing::info!(?pending_id, "run_command timed out → SIGKILL");
-        }
         p.timer_token = None;
+        tracing::info!(
+            ?pending_id,
+            "run_command timed out → SIGKILL its process group"
+        );
+        kill_group(p.pid);
     }
 
     /// Reply only once both pipes have drained *and* the exit status has
@@ -241,10 +303,17 @@ impl ShoestringWm {
             Some(p) => !p.stdout_open && !p.stderr_open && p.exit_status.is_some(),
             None => return,
         };
-        if !ready {
-            return;
+        if ready {
+            self.finalize_remote_command(pending_id);
         }
-        let mut pending = self.pending_commands.remove(&pending_id).unwrap();
+    }
+
+    /// Send the reply with whatever output has arrived, and stop watching the
+    /// command: pipe sources, timers and all.
+    fn finalize_remote_command(&mut self, pending_id: u64) {
+        let Some(mut pending) = self.pending_commands.remove(&pending_id) else {
+            return;
+        };
         if let Some(t) = pending.stdout_token.take() {
             self.loop_handle.remove(t);
         }
@@ -254,13 +323,15 @@ impl ShoestringWm {
         if let Some(t) = pending.timer_token.take() {
             self.loop_handle.remove(t);
         }
+        if let Some(t) = pending.grace_token.take() {
+            self.loop_handle.remove(t);
+        }
 
         // SIGKILL on timeout (and other signal deaths) yield no exit code;
         // -1 preserves the prior sentinel for "killed / no code".
         let exit_code = pending
             .exit_status
-            .expect("ready implies status present")
-            .code()
+            .and_then(|status| status.code())
             .unwrap_or(-1);
 
         let stdout = String::from_utf8_lossy(&pending.stdout_buf).into_owned();
@@ -273,6 +344,21 @@ impl ShoestringWm {
         };
         let _ = crate::ipc::write_response(&pending.client, &response);
         self.drop_ipc_client(pending.client_id);
+    }
+}
+
+/// SIGKILL every process in the group `pgid` (the command's child pid, see
+/// `process_group(0)`). ESRCH — the group is already empty — is expected and
+/// ignored. Safe to call after the child is reaped: a pid isn't handed out
+/// again while a process group of that id still has members, and an empty
+/// group just gets ESRCH.
+fn kill_group(pgid: i32) {
+    // SAFETY: plain syscall; a positive pgid names exactly one group.
+    if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(error = %e, pgid, "run_command: killpg failed");
+        }
     }
 }
 

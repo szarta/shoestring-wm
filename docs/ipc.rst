@@ -739,11 +739,19 @@ Each request is a JSON object with a ``type`` discriminator:
        ``get_pixel``.
    * - ``{"type": "run_command", "argv": ["...", ...], "timeout_ms": null}``
      - Spawn a child process under the WM's environment and return its
-       captured output once it exits. ``argv`` must be non-empty;
-       ``timeout_ms`` (optional) sends ``SIGKILL`` after the given
-       milliseconds. Output is capped at 64 KiB per stream; extra bytes
-       are drained but discarded and ``truncated`` is set. Reply is
-       ``command_result``. Optional ``"cwd"`` runs the child in that working
+       captured output once it exits. ``argv`` must be non-empty. The
+       command is its whole **process group**: the child gets a group of its
+       own, which the processes it starts join, and ``timeout_ms``
+       (optional) sends ``SIGKILL`` to that whole group after the given
+       milliseconds. The reply waits for the child to exit and its output
+       to end; if something it started still holds stdout or stderr open
+       after it exits, the WM waits 500 ms, then kills the group and replies
+       with the output so far (so ``sh -c "server &"`` can't hang the
+       request). Background processes that don't hold the output, such as
+       ``cmd >/dev/null 2>&1 &``, are left running; use ``detach`` for
+       anything meant to outlive the request. Output is capped at 64 KiB per
+       stream; extra bytes are drained but discarded and ``truncated`` is
+       set. Reply is ``command_result``. Optional ``"cwd"`` runs the child in that working
        directory (Stars!'s save dialog defaults to the process cwd); optional
        ``"env"`` is a list of ``["KEY", "VALUE"]`` pairs layered onto the
        inherited environment. Optional ``"detach": true`` spawns the child in
