@@ -309,6 +309,15 @@ fn main() -> Result<()> {
         "shoestring-wm ready",
     );
 
+    // Re-anchor the idle-lock clock to readiness. It was first armed above,
+    // before the backend came up; a software renderer's EGL bring-up can take
+    // several seconds, and that blocking startup must not count as idle time,
+    // or a short idle period could lock the session before the first frame or
+    // any input. Measure idleness from here, when we can actually present and
+    // accept input.
+    state.note_user_activity();
+    state.sync_idle_lock();
+
     // Tell systemd we're up. No-op unless launched as a `Type=notify`
     // service (i.e. `$NOTIFY_SOCKET` is set), so it's safe in every other
     // launch path — display-manager session, nested dev, non-systemd. Done
