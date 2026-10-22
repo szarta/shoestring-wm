@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # System deps mirror the Debian/Ubuntu list in docs/install.rst.
       # libseat-dev + libdisplay-info-dev land in 24.04; older runners
@@ -87,7 +87,7 @@ jobs:
     name: build (${{ matrix.name }})
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Superset of every backend's build deps (same list as `check`, minus the
       # PipeWire/clang headers, which only the portal/mediad crates need — this
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Same build deps as `check`, plus Xvfb (the X server the winit backend
       # nests in) and the Mesa DRI drivers (llvmpipe, for software EGL/GLES).
@@ -160,7 +160,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Same build deps as `check`, plus Mesa's surfaceless EGL and the DRI
       # drivers (llvmpipe), which the headless backend renders with.
@@ -207,7 +207,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build + test on FreeBSD
         uses: vmactions/freebsd-vm@v1

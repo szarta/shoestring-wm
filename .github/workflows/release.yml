@@ -37,7 +37,7 @@ jobs:
   version-check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Tag must match Cargo.toml version
         run: |
           if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
@@ -57,7 +57,7 @@ jobs:
     needs: version-check
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Same dev headers as ci.yml — cargo-deb links the same runtime libs.
       # libpipewire-0.3-dev + libclang-dev: the screencast portal's bindgen build.
@@ -136,7 +136,7 @@ jobs:
       image: fedora:latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Fedora dev headers — mirrors the Fedora/RHEL list in
       # docs/install.rst. rpm-build provides find-requires; rust/cargo
