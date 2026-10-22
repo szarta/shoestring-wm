@@ -838,3 +838,52 @@ fn e2e_remote_gate_off_releases_held_keys() {
     viewer_key(&mut viewer, KEY_LEFTMETA, false);
     viewer.bye();
 }
+
+/// The "being viewed" count follows viewers that connect and leave all at
+/// once: every change reaches the WM in order, so it ends on the true number.
+#[test]
+#[ignore]
+fn e2e_remote_viewer_count_tracks_concurrent_sessions() {
+    const N: u64 = 6;
+    let mut wm = Wm::start();
+    wm.start_remote_server();
+
+    for _ in 0..3 {
+        let viewers: Vec<Viewer> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..N).map(|_| s.spawn(|| Viewer::serve(&wm))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        wm.wait_viewers(N);
+        std::thread::scope(|s| {
+            for viewer in viewers {
+                s.spawn(move || viewer.hang_up());
+            }
+        });
+        wm.wait_viewers(0);
+    }
+}
+
+/// Turning the gate off and straight back on: the old session's teardown
+/// can't take the new viewer off the count.
+#[test]
+#[ignore]
+fn e2e_remote_viewer_count_survives_a_gate_cycle() {
+    let mut wm = Wm::start();
+    wm.start_remote_server();
+
+    let mut old = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    wm.set_remote(false);
+    wm.set_remote(true);
+    let new = Viewer::serve(&wm);
+    assert_eq!(old.wait_end(), End::Bye);
+    wm.wait_viewers(1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        wm.viewers(),
+        1,
+        "the old session's teardown changed the count"
+    );
+    new.bye();
+    wm.wait_viewers(0);
+}

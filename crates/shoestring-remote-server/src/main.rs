@@ -311,14 +311,15 @@ fn run_supervisor(
             }
         }
 
-        // Gate off (or accept died): drop the listener so the socket goes, and
-        // clear the viewer chip. Live sessions end on their own when the WM
-        // tears down their capture subscriptions. With the gate off the WM has
-        // also released the keys they held, so their holds start over; after a
-        // failed accept the sessions are still live and keep theirs.
+        // Gate off (or accept died): drop the listener so the socket goes. With
+        // the gate off, live sessions end on their own when the WM tears down
+        // their capture subscriptions, and the WM has released the keys they
+        // held, so the viewer chip clears now and the count and holds start a
+        // new generation. After a failed accept the sessions are still live and
+        // keep both.
         drop(listener);
-        viewers.reset();
         if !gate.snapshot().0 {
+            viewers.reset();
             holds.reset();
         }
         tracing::info!("listener closed (remote gate off)");

@@ -117,8 +117,9 @@ pub fn serve(
         done: AtomicBool::new(false),
     });
 
-    // This client now counts as a viewer (lights the WM's "being viewed" chip).
-    viewers.add();
+    // This client now counts as a viewer (lights the WM's "being viewed" chip)
+    // until the guard drops, which an early error below can't skip.
+    let viewer = viewers.join();
     tracing::info!(%peer, "session started");
 
     // One shared writer for both directions (capture frames + clipboard replies).
@@ -141,7 +142,9 @@ pub fn serve(
     teardown.stop();
     let _ = frames.join();
 
-    viewers.remove();
+    // Only now: the input loop has released what this viewer held, so anyone
+    // waiting for the count to fall sees a seat with nothing left pressed.
+    drop(viewer);
     tracing::info!(%peer, "session ended");
     input_result
 }
