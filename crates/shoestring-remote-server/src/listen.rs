@@ -113,6 +113,15 @@ impl Listener {
     }
 }
 
+impl AsRawFd for Listener {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        match self {
+            Listener::Unix { listener, .. } => listener.as_raw_fd(),
+            Listener::Tcp(listener) => listener.as_raw_fd(),
+        }
+    }
+}
+
 impl Drop for Listener {
     fn drop(&mut self) {
         if let Listener::Unix { path, .. } = self {

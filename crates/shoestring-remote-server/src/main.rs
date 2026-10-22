@@ -25,6 +25,7 @@ mod session;
 mod viewers;
 mod wm;
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -96,7 +97,7 @@ fn main() -> Result<()> {
     let (event_reader, initial_enabled) = wm::register().context("registering with WM")?;
     tracing::info!(initial_enabled, "registered with WM");
 
-    let gate = Arc::new(Gate::new(initial_enabled));
+    let gate = Arc::new(Gate::new(initial_enabled)?);
     let viewers = Arc::new(Viewers::new());
 
     // Reader thread: turn RemoteChanged events into gate transitions, and treat
@@ -113,9 +114,15 @@ fn main() -> Result<()> {
 }
 
 /// Gate state shared between the event reader and the listener supervisor.
+///
+/// Every change also writes a byte to a self-pipe, so the supervisor can sleep
+/// in `poll` on the listener and the pipe together: it wakes for a connection
+/// or a gate change and otherwise not at all.
 struct Gate {
     inner: Mutex<GateInner>,
     cv: Condvar,
+    wake_read: OwnedFd,
+    wake_write: OwnedFd,
 }
 
 struct GateInner {
@@ -124,26 +131,59 @@ struct GateInner {
 }
 
 impl Gate {
-    fn new(enabled: bool) -> Self {
-        Gate {
+    fn new(enabled: bool) -> Result<Self> {
+        let mut fds = [0; 2];
+        // SAFETY: pipe2 writes two fds into the array we pass.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("create gate wake pipe");
+        }
+        // SAFETY: both fds were just created and are owned by no one else.
+        let (wake_read, wake_write) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        Ok(Gate {
             inner: Mutex::new(GateInner {
                 enabled,
                 shutdown: false,
             }),
             cv: Condvar::new(),
-        }
+            wake_read,
+            wake_write,
+        })
     }
 
     fn set_enabled(&self, enabled: bool) {
         let mut g = self.inner.lock().unwrap();
         g.enabled = enabled;
         self.cv.notify_all();
+        self.wake();
     }
 
     fn set_shutdown(&self) {
         let mut g = self.inner.lock().unwrap();
         g.shutdown = true;
         self.cv.notify_all();
+        self.wake();
+    }
+
+    /// Nudge a supervisor sleeping in [`wait_for_activity`]. A full pipe
+    /// already holds a pending wakeup, so a failed write is fine.
+    fn wake(&self) {
+        // SAFETY: one byte from a local, to our own non-blocking pipe.
+        unsafe { libc::write(self.wake_write.as_raw_fd(), [0u8].as_ptr().cast(), 1) };
+    }
+
+    /// Empty the wake pipe after a wakeup.
+    fn drain_wake(&self) {
+        let mut buf = [0u8; 64];
+        // SAFETY: reading into a local buffer from our own non-blocking pipe.
+        while unsafe {
+            libc::read(
+                self.wake_read.as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        } > 0
+        {}
     }
 
     /// Block until the gate is enabled or shutdown is requested. Returns the
@@ -215,13 +255,18 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
         };
         tracing::info!(endpoint = %cfg.endpoint, "listening (remote gate on)");
 
-        // Accept while the gate stays on. Non-blocking accept + a short sleep so
-        // a gate-off is noticed promptly without a dedicated wakeup socket.
+        // Accept while the gate stays on, sleeping until a connection arrives
+        // or the gate changes; an idle server wakes for nothing.
         loop {
             let (enabled, shutdown) = gate.snapshot();
             if !enabled || shutdown {
                 break;
             }
+            if let Err(e) = wait_for_activity(listener.as_raw_fd(), gate.wake_read.as_raw_fd()) {
+                tracing::warn!(error = %e, "poll failed; reopening listener");
+                break;
+            }
+            gate.drain_wake();
             match listener.accept() {
                 Ok(Some(accepted)) => {
                     let Some(slot) = SessionSlot::take(&active) else {
@@ -243,10 +288,9 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
                         })
                         .ok();
                 }
-                // Nothing pending, or a peer the access check refused.
-                Ok(None) => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
+                // Nothing pending (a gate wakeup), or a peer the access check
+                // refused: back to waiting.
+                Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(error = %e, "accept failed; reopening listener");
                     break;
@@ -264,6 +308,33 @@ fn run_supervisor(cfg: &Cfg, gate: &Arc<Gate>, viewers: &Arc<Viewers>) -> Result
         if gate.snapshot().1 {
             tracing::info!("shutting down");
             return Ok(());
+        }
+    }
+}
+
+/// Block until `listener` has a connection waiting or `wake` (the gate's pipe)
+/// is readable.
+fn wait_for_activity(listener: RawFd, wake: RawFd) -> std::io::Result<()> {
+    let mut fds = [
+        libc::pollfd {
+            fd: listener,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: two valid pollfds; no timeout.
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } >= 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
         }
     }
 }
@@ -380,6 +451,70 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Instant;
+
+    /// A listener nobody connects to, at a private path.
+    fn quiet_listener(name: &str) -> (UnixListener, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "shoestring-remote-test-{}-{name}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        (UnixListener::bind(&path).unwrap(), path)
+    }
+
+    /// The supervisor sleeps until the gate changes: no wakeup before, a
+    /// prompt one after, and the pipe is empty again once drained.
+    #[test]
+    fn gate_change_wakes_the_supervisor() {
+        let gate = Arc::new(Gate::new(true).unwrap());
+        let (listener, path) = quiet_listener("gate");
+        let flipper = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                gate.set_enabled(false);
+            })
+        };
+        let start = Instant::now();
+        wait_for_activity(listener.as_raw_fd(), gate.wake_read.as_raw_fd()).unwrap();
+        let waited = start.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150),
+            "woke early, after {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "woke late, after {waited:?}"
+        );
+        assert_eq!(gate.snapshot(), (false, false));
+        gate.drain_wake();
+        let mut fd = libc::pollfd {
+            fd: gate.wake_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, zero timeout.
+        assert_eq!(
+            unsafe { libc::poll(&mut fd, 1, 0) },
+            0,
+            "wake pipe not drained"
+        );
+        flipper.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A connection wakes the supervisor too.
+    #[test]
+    fn connection_wakes_the_supervisor() {
+        let gate = Gate::new(true).unwrap();
+        let (listener, path) = quiet_listener("conn");
+        let _client = UnixStream::connect(&path).unwrap();
+        wait_for_activity(listener.as_raw_fd(), gate.wake_read.as_raw_fd()).unwrap();
+        assert!(listener.accept().is_ok());
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn session_slots_cap_and_free() {
