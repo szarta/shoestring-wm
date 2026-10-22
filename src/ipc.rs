@@ -510,1035 +510,1171 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             state.note_user_activity();
         }
 
+        // Route each request to its group. Exhaustive, so a new request
+        // type must be given a group before it compiles.
         match request {
-            Request::Workspaces => {
-                let resp = Response::Workspaces {
-                    active: state.workspaces.active().one_based(),
-                    count: state.workspaces.count(),
-                    names: state.workspaces.name_list(),
-                };
-                let _ = write_response(client, &resp);
+            r @ (Request::Workspaces
+            | Request::Windows
+            | Request::Outputs
+            | Request::Inputs
+            | Request::GetTree
+            | Request::EventStream
+            | Request::ServerInfo
+            | Request::PointerPosition
+            | Request::FindWindows { .. }
+            | Request::Metrics
+            | Request::MetricsStream { .. }
+            | Request::WaitWindow { .. }
+            | Request::WaitReady { .. }) => return dispatch_queries(state, id, client, r),
+            r @ (Request::SetAutomation { .. }
+            | Request::AutomationStatus
+            | Request::SetScreenCapture { .. }
+            | Request::ScreenCaptureStatus
+            | Request::Lock
+            | Request::Quit
+            | Request::Shutdown
+            | Request::PowerOff
+            | Request::Reboot
+            | Request::Suspend
+            | Request::ReloadConfig
+            | Request::DispatchAction { .. }
+            | Request::RunCommand { .. }
+            | Request::SetGamma { .. }
+            | Request::ResetGamma { .. }
+            | Request::MediaStatus
+            | Request::ReportMedia { .. }
+            | Request::SetAudioMute { .. }
+            | Request::SetMicMute { .. }) => return dispatch_session(state, id, client, r),
+            r @ (Request::InjectKey { .. }
+            | Request::InjectText { .. }
+            | Request::InjectClick { .. }
+            | Request::InjectClickToWindow { .. }
+            | Request::Drag { .. }
+            | Request::MoveMouse { .. }
+            | Request::InjectInput { .. }
+            | Request::InjectInputToWindow { .. }) => return dispatch_input(state, client, r),
+            r @ (Request::Screenshot { .. }
+            | Request::ScreenshotWindow { .. }
+            | Request::CaptureStream { .. }
+            | Request::CaptureWindow { .. }
+            | Request::GetPixel { .. }
+            | Request::HashRegion { .. }) => return dispatch_capture(state, id, client, r),
+            r @ (Request::RegisterRemoteServer
+            | Request::SetRemote { .. }
+            | Request::RemoteStatus
+            | Request::ReportRemoteViewers { .. }
+            | Request::RegisterRemoteClient { .. }
+            | Request::RemoteClientStatus
+            | Request::SetView { .. }
+            | Request::GetClipboard { .. }
+            | Request::SetClipboard { .. }
+            | Request::Paste { .. }) => return dispatch_remote(state, id, client, r),
+            r @ (Request::PickWindow
+            | Request::CloseWindow { .. }
+            | Request::KillWindow { .. }
+            | Request::FocusWindow { .. }
+            | Request::RaiseWindow { .. }
+            | Request::LowerWindow { .. }
+            | Request::SetWindowSticky { .. }
+            | Request::SetWindowAlwaysOnTop { .. }
+            | Request::SetWindowName { .. }
+            | Request::MoveWindowToWorkspace { .. }
+            | Request::SetWindowMinimized { .. }
+            | Request::SetWindowMaximized { .. }) => return dispatch_windows(state, id, client, r),
+        }
+    }
+}
+
+/// Read-only queries and subscriptions: the window, workspace, output and input lists, server info, metrics, and the event and readiness waits.
+/// Returns whether to close the connection, as [`handle_readable`] does.
+fn dispatch_queries(
+    state: &mut ShoestringWm,
+    id: ClientId,
+    client: &Rc<RefCell<Client>>,
+    request: Request,
+) -> bool {
+    match request {
+        Request::Workspaces => {
+            let resp = Response::Workspaces {
+                active: state.workspaces.active().one_based(),
+                count: state.workspaces.count(),
+                names: state.workspaces.name_list(),
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::Windows => {
+            let windows = collect_windows(state);
+            let _ = write_response(client, &Response::Windows { windows });
+            true
+        }
+        Request::Outputs => {
+            let outputs = collect_outputs(state);
+            let _ = write_response(client, &Response::Outputs { outputs });
+            true
+        }
+        Request::Inputs => {
+            let inputs = collect_inputs(state);
+            let _ = write_response(client, &Response::Inputs { inputs });
+            true
+        }
+        Request::GetTree => {
+            let (outputs, workspaces, minimized) = collect_tree(state);
+            let _ = write_response(
+                client,
+                &Response::Tree {
+                    outputs,
+                    workspaces,
+                    minimized,
+                },
+            );
+            true
+        }
+        Request::EventStream => {
+            if write_response(client, &Response::Ok).is_err() {
                 return true;
             }
-            Request::Windows => {
-                let windows = collect_windows(state);
-                let _ = write_response(client, &Response::Windows { windows });
-                return true;
-            }
-            Request::Outputs => {
-                let outputs = collect_outputs(state);
-                let _ = write_response(client, &Response::Outputs { outputs });
-                return true;
-            }
-            Request::Inputs => {
-                let inputs = collect_inputs(state);
-                let _ = write_response(client, &Response::Inputs { inputs });
-                return true;
-            }
-            Request::GetTree => {
-                let (outputs, workspaces, minimized) = collect_tree(state);
+            client.borrow_mut().subscriber = true;
+            client.borrow_mut().spent = true;
+            tracing::debug!(?id, "ipc client subscribed to events");
+            false
+        }
+        Request::ServerInfo => {
+            let resp = Response::ServerInfo {
+                version: env!("CARGO_PKG_VERSION").into(),
+                backend: state.backend_name.into(),
+                locked: state.is_locked(),
+                gates: shoestring_ipc::GateStates {
+                    automation: state.automation_enabled,
+                    screen_capture: state.screen_capture_enabled,
+                    remote: state.remote_enabled,
+                    remote_server_available: state.remote_server.is_some(),
+                },
+                requests: shoestring_ipc::REQUEST_TYPES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::PointerPosition => {
+            let (x, y) = state.pointer_position();
+            let _ = write_response(client, &Response::PointerPosition { x, y });
+            true
+        }
+        Request::FindWindows { title, app_id } => {
+            let resp = match find_windows(state, title.as_deref(), app_id.as_deref()) {
+                Ok(windows) => Response::Windows { windows },
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::Metrics => {
+            // Sample fresh on demand so a snapshot is current even when
+            // the background sampler is off. Ungated — pure observation.
+            state.sample_metrics();
+            let resp = Response::Metrics {
+                ts_ms: crate::metrics::now_ms(),
+                metrics: state.metrics.snapshot(),
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::MetricsStream { interval_ms } => {
+            if !state.config.diagnostics.enabled {
                 let _ = write_response(
                     client,
-                    &Response::Tree {
-                        outputs,
-                        workspaces,
-                        minimized,
+                    &Response::Error {
+                        message: "metrics stream unavailable: diagnostics disabled \
+                                  (set [diagnostics].enabled = true)"
+                            .into(),
                     },
                 );
                 return true;
             }
-            Request::EventStream => {
-                if write_response(client, &Response::Ok).is_err() {
-                    return true;
-                }
-                client.borrow_mut().subscriber = true;
-                client.borrow_mut().spent = true;
-                tracing::debug!(?id, "ipc client subscribed to events");
-                return false;
+            if write_response(client, &Response::Ok).is_err() {
+                return true;
             }
-            Request::InjectKey { keysym, modifiers } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
+            // Clamp the requested interval up to the sampler cadence —
+            // v1 can't push faster than it samples.
+            let floor = state.config.diagnostics.sample_interval_ms.max(1);
+            let want = interval_ms.map(u64::from).unwrap_or(0).max(floor);
+            {
+                let mut c = client.borrow_mut();
+                c.metrics_sub = Some(MetricsSub {
+                    interval: Duration::from_millis(want),
+                    last_push: None,
+                });
+                // Long-lived like an event subscriber: stay open, re-armed
+                // for READ only to notice hangup.
+                c.spent = true;
+            }
+            tracing::debug!(?id, interval_ms = want, "ipc client subscribed to metrics");
+            false
+        }
+        Request::WaitWindow {
+            title,
+            app_id,
+            unmap,
+            timeout_ms,
+        } => state.handle_wait_window(id, client, title, app_id, unmap, timeout_ms),
+        Request::WaitReady {
+            xwayland,
+            timeout_ms,
+        } => state.handle_wait_ready(id, client, xwayland, timeout_ms),
+        _ => unreachable!("routed to dispatch_queries by handle_readable"),
+    }
+}
+
+/// The session and its gates: automation and screen-capture gates, lock, quit, power, config reload, bound actions, run_command, gamma, and media.
+/// Returns whether to close the connection, as [`handle_readable`] does.
+fn dispatch_session(
+    state: &mut ShoestringWm,
+    id: ClientId,
+    client: &Rc<RefCell<Client>>,
+    request: Request,
+) -> bool {
+    match request {
+        Request::SetAutomation { enabled } => {
+            let changed = state.automation_enabled != enabled;
+            // Automation is a superset of screen capture: this also opens
+            // (or closes) the capture gate so `screenshot` works under
+            // automation alone. Returns whether capture followed.
+            let capture_changed = state.set_automation(enabled);
+            let _ = write_response(client, &Response::Automation { enabled });
+            if changed {
+                tracing::info!(enabled, "automation gate changed via ipc");
+                state.emit_ipc(Event::AutomationChanged { enabled });
+            }
+            if capture_changed {
+                tracing::info!(enabled, "screen-capture gate followed automation gate");
+                state.emit_ipc(Event::ScreenCaptureChanged { enabled });
+            }
+            true
+        }
+        Request::AutomationStatus => {
+            let _ = write_response(
+                client,
+                &Response::Automation {
+                    enabled: state.automation_enabled,
+                },
+            );
+            true
+        }
+        Request::SetScreenCapture { enabled } => {
+            let changed = state.screen_capture_enabled != enabled;
+            state.set_screen_capture(enabled);
+            let _ = write_response(client, &Response::ScreenCapture { enabled });
+            if changed {
+                tracing::info!(enabled, "screen-capture gate changed via ipc");
+                state.emit_ipc(Event::ScreenCaptureChanged { enabled });
+            }
+            true
+        }
+        Request::ScreenCaptureStatus => {
+            let _ = write_response(
+                client,
+                &Response::ScreenCapture {
+                    enabled: state.screen_capture_enabled,
+                },
+            );
+            true
+        }
+        Request::Lock => {
+            state.spawn_lock();
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::Quit => {
+            // Ungated: routes through the same confirm_action(Quit) path as
+            // the keybind, so the user must accept the dialog before the WM
+            // exits. We reply Ok once the dialog is up, not on acceptance.
+            tracing::info!("quit requested via ipc; prompting for confirmation");
+            state.dispatch_action(shoestring_config::Action::Quit);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::Shutdown => {
+            // Automation-gated, no confirmation: the scripted teardown path.
+            // Reply Ok first so the caller sees success, then signal the
+            // process group and stop the loop (which unlinks the sockets on
+            // drop). Marked spent is unnecessary — we exit immediately.
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            tracing::info!("shutdown requested via ipc; tearing down");
+            let _ = write_response(client, &Response::Ok);
+            state.shutdown();
+            true
+        }
+        Request::PowerOff => {
+            // Ungated, like Quit: the confirm dialog is the authorization.
+            // Reply Ok once the dialog is up, not on acceptance.
+            tracing::info!("power-off requested via ipc; prompting for confirmation");
+            state.confirm_power(crate::power::PowerAction::PowerOff);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::Reboot => {
+            tracing::info!("reboot requested via ipc; prompting for confirmation");
+            state.confirm_power(crate::power::PowerAction::Reboot);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::Suspend => {
+            tracing::info!("suspend requested via ipc; prompting for confirmation");
+            state.confirm_power(crate::power::PowerAction::Suspend);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::ReloadConfig => {
+            let resp = match state.reload_config_from_disk() {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: format!("reload_config: {e}"),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::DispatchAction { action } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            // Decode the JSON Value into a real Action via shoestring-config's
+            // serde impl. Failures here are user-fixable (bad key, missing
+            // field) so the error string is surfaced verbatim.
+            let resp = match serde_json::from_value::<shoestring_config::Action>(action) {
+                Ok(action) => {
+                    tracing::info!(?action, "dispatching action via ipc");
+                    state.dispatch_action(action);
+                    Response::Ok
                 }
-                let resp = match state.inject_key(&keysym, &modifiers) {
-                    Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: format!("dispatch_action: malformed action: {e}"),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::RunCommand {
+            argv,
+            timeout_ms,
+            cwd,
+            env,
+            detach,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            if argv.is_empty() {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: "run_command: argv must be non-empty".into(),
+                    },
+                );
+                return true;
+            }
+            if detach {
+                // Fire-and-forget: spawn detached and reply with the PID
+                // now. No deferred reply, no pending-command bookkeeping.
+                let resp = match state.spawn_detached_command(&argv, cwd.as_deref(), &env) {
+                    Ok(pid) => Response::CommandStarted { pid },
                     Err(e) => Response::Error {
-                        message: e.to_string(),
+                        message: format!("run_command spawn failed: {e}"),
                     },
                 };
                 let _ = write_response(client, &resp);
                 return true;
             }
-            Request::InjectText { text } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                let resp = match state.inject_text(&text) {
-                    Ok(()) => Response::Ok,
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                    },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::Lock => {
-                state.spawn_lock();
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::Quit => {
-                // Ungated: routes through the same confirm_action(Quit) path as
-                // the keybind, so the user must accept the dialog before the WM
-                // exits. We reply Ok once the dialog is up, not on acceptance.
-                tracing::info!("quit requested via ipc; prompting for confirmation");
-                state.dispatch_action(shoestring_config::Action::Quit);
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::Shutdown => {
-                // Automation-gated, no confirmation: the scripted teardown path.
-                // Reply Ok first so the caller sees success, then signal the
-                // process group and stop the loop (which unlinks the sockets on
-                // drop). Marked spent is unnecessary — we exit immediately.
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                tracing::info!("shutdown requested via ipc; tearing down");
-                let _ = write_response(client, &Response::Ok);
-                state.shutdown();
-                return true;
-            }
-            Request::PowerOff => {
-                // Ungated, like Quit: the confirm dialog is the authorization.
-                // Reply Ok once the dialog is up, not on acceptance.
-                tracing::info!("power-off requested via ipc; prompting for confirmation");
-                state.confirm_power(crate::power::PowerAction::PowerOff);
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::Reboot => {
-                tracing::info!("reboot requested via ipc; prompting for confirmation");
-                state.confirm_power(crate::power::PowerAction::Reboot);
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::Suspend => {
-                tracing::info!("suspend requested via ipc; prompting for confirmation");
-                state.confirm_power(crate::power::PowerAction::Suspend);
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::SetAutomation { enabled } => {
-                let changed = state.automation_enabled != enabled;
-                // Automation is a superset of screen capture: this also opens
-                // (or closes) the capture gate so `screenshot` works under
-                // automation alone. Returns whether capture followed.
-                let capture_changed = state.set_automation(enabled);
-                let _ = write_response(client, &Response::Automation { enabled });
-                if changed {
-                    tracing::info!(enabled, "automation gate changed via ipc");
-                    state.emit_ipc(Event::AutomationChanged { enabled });
-                }
-                if capture_changed {
-                    tracing::info!(enabled, "screen-capture gate followed automation gate");
-                    state.emit_ipc(Event::ScreenCaptureChanged { enabled });
-                }
-                return true;
-            }
-            Request::ServerInfo => {
-                let resp = Response::ServerInfo {
-                    version: env!("CARGO_PKG_VERSION").into(),
-                    backend: state.backend_name.into(),
-                    locked: state.is_locked(),
-                    gates: shoestring_ipc::GateStates {
-                        automation: state.automation_enabled,
-                        screen_capture: state.screen_capture_enabled,
-                        remote: state.remote_enabled,
-                        remote_server_available: state.remote_server.is_some(),
-                    },
-                    requests: shoestring_ipc::REQUEST_TYPES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::AutomationStatus => {
-                let _ = write_response(
-                    client,
-                    &Response::Automation {
-                        enabled: state.automation_enabled,
-                    },
-                );
-                return true;
-            }
-            Request::SetScreenCapture { enabled } => {
-                let changed = state.screen_capture_enabled != enabled;
-                state.set_screen_capture(enabled);
-                let _ = write_response(client, &Response::ScreenCapture { enabled });
-                if changed {
-                    tracing::info!(enabled, "screen-capture gate changed via ipc");
-                    state.emit_ipc(Event::ScreenCaptureChanged { enabled });
-                }
-                return true;
-            }
-            Request::ScreenCaptureStatus => {
-                let _ = write_response(
-                    client,
-                    &Response::ScreenCapture {
-                        enabled: state.screen_capture_enabled,
-                    },
-                );
-                return true;
-            }
-            Request::RegisterRemoteServer => {
-                // Mark this connection as *the* remote server (replacing any
-                // prior one) and subscribe it to events so it learns when the
-                // gate flips. Long-lived: its disconnect clears the
-                // registration and forces the gate off (see drop_ipc_client).
-                state.remote_server = Some(id);
-                client.borrow_mut().subscriber = true;
-                let _ = write_response(
-                    client,
-                    &Response::Remote {
-                        enabled: state.remote_enabled,
-                        server_available: true,
-                        viewers: state.remote_viewers,
-                    },
-                );
-                tracing::info!(?id, "remote server registered");
-                // Tell the bar a server is now available (toggle un-greys).
-                state.emit_remote_changed();
-                return false;
-            }
-            Request::SetRemote { enabled } => {
-                // Enabling requires a registered server (the consent toggle is
-                // greyed until then; refuse it over IPC too).
-                if enabled && state.remote_server.is_none() {
+            // Hold the connection open across the deferred reply,
+            // same as Screenshot. Mark spent so a misbehaving
+            // client can't slip in a second request.
+            client.borrow_mut().spent = true;
+            match state.spawn_remote_command(
+                id,
+                Rc::clone(client),
+                &argv,
+                timeout_ms,
+                cwd.as_deref(),
+                &env,
+            ) {
+                Ok(()) => false,
+                Err(e) => {
                     let _ = write_response(
                         client,
                         &Response::Error {
-                            message: "remote disabled: no shoestring-remote-server registered"
-                                .into(),
+                            message: format!("run_command spawn failed: {e}"),
                         },
                     );
-                    return true;
+                    true
                 }
-                let changed = state.remote_enabled != enabled;
-                // Couples the automation + capture gates on/off.
-                let (auto_changed, capture_changed) = state.set_remote(enabled);
-                let _ = write_response(
-                    client,
-                    &Response::Remote {
-                        enabled: state.remote_enabled,
-                        server_available: state.remote_server.is_some(),
-                        viewers: state.remote_viewers,
-                    },
-                );
-                if auto_changed {
-                    state.emit_ipc(Event::AutomationChanged {
-                        enabled: state.automation_enabled,
-                    });
-                }
-                if capture_changed {
-                    state.emit_ipc(Event::ScreenCaptureChanged {
-                        enabled: state.screen_capture_enabled,
-                    });
-                }
-                if changed {
-                    tracing::info!(enabled, "remote gate changed via ipc");
-                    state.emit_remote_changed();
-                }
-                return true;
             }
-            Request::RemoteStatus => {
-                let _ = write_response(
-                    client,
-                    &Response::Remote {
-                        enabled: state.remote_enabled,
-                        server_available: state.remote_server.is_some(),
-                        viewers: state.remote_viewers,
-                    },
-                );
-                return true;
-            }
-            Request::ReportRemoteViewers { viewers } => {
-                // Pushed by the registered server as clients come and go. Like
-                // ReportMedia, the local socket is the trust boundary.
-                let changed = state.remote_viewers != viewers;
-                state.remote_viewers = viewers;
-                let _ = write_response(client, &Response::Ok);
-                if changed {
-                    state.emit_remote_changed();
-                }
-                return true;
-            }
-            Request::RegisterRemoteClient {
-                label,
-                width,
-                height,
-            } => {
-                // Add this connection to the machine-axis (index 1.. in arrival
-                // order) and subscribe it so it receives ViewChanged (to reveal/
-                // hide its surface) and CapturedInput while it's the active view.
-                // Long-lived: its disconnect removes the machine (see
-                // drop_ipc_client → drop_remote_client).
-                state.remote_clients.push(crate::remote::RemoteClient {
-                    id,
-                    label,
-                    width,
-                    height,
-                });
-                client.borrow_mut().subscriber = true;
-                let _ = write_response(
-                    client,
-                    &Response::RemoteClients {
-                        machines: state.machine_entries(),
-                        active: state.view_index,
-                    },
-                );
-                tracing::info!(?id, "remote client registered on machine-axis");
-                return false;
-            }
-            Request::RemoteClientStatus => {
-                let _ = write_response(
-                    client,
-                    &Response::RemoteClients {
-                        machines: state.machine_entries(),
-                        active: state.view_index,
-                    },
-                );
-                return true;
-            }
-            Request::SetView { index } => {
-                // Clamps to the machine count and broadcasts ViewChanged when the
-                // index actually moves (entering/leaving capture mode).
-                state.set_view(index);
-                let _ = write_response(
-                    client,
-                    &Response::RemoteClients {
-                        machines: state.machine_entries(),
-                        active: state.view_index,
-                    },
-                );
-                return true;
-            }
-            Request::MediaStatus => {
-                let _ = write_response(client, &Response::Media { state: state.media });
-                return true;
-            }
-            Request::ReportMedia {
+        }
+        Request::SetGamma {
+            output,
+            temperature,
+            brightness,
+            gamma,
+        } => {
+            let resp = set_gamma_response(state, output, temperature, brightness, gamma);
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::ResetGamma { output } => {
+            let resp = reset_gamma_response(state, output);
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::MediaStatus => {
+            let _ = write_response(client, &Response::Media { state: state.media });
+            true
+        }
+        Request::ReportMedia {
+            audio_muted,
+            mic_muted,
+            camera_active,
+        } => {
+            // Pushed by the trusted `shoestring-mediad` monitor: the WM
+            // only caches PipeWire's truth, it never authors mute state.
+            let snapshot = shoestring_ipc::MediaState {
                 audio_muted,
                 mic_muted,
                 camera_active,
-            } => {
-                // Pushed by the trusted `shoestring-mediad` monitor: the WM
-                // only caches PipeWire's truth, it never authors mute state.
-                let snapshot = shoestring_ipc::MediaState {
+            };
+            let changed = state.set_media(snapshot);
+            let _ = write_response(client, &Response::Ok);
+            if changed {
+                state.emit_ipc(Event::MediaChanged {
                     audio_muted,
                     mic_muted,
                     camera_active,
-                };
-                let changed = state.set_media(snapshot);
-                let _ = write_response(client, &Response::Ok);
-                if changed {
-                    state.emit_ipc(Event::MediaChanged {
-                        audio_muted,
-                        mic_muted,
-                        camera_active,
-                    });
+                });
+            }
+            true
+        }
+        Request::SetAudioMute { enabled } => {
+            // We don't mute anything ourselves — spawn the pipewire-linked
+            // helper, which flips the real default-sink mute. The new state
+            // returns via ReportMedia.
+            state.spawn_mediad(&["audio-mute", if enabled { "on" } else { "off" }]);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::SetMicMute { enabled } => {
+            state.spawn_mediad(&["mic-mute", if enabled { "on" } else { "off" }]);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        _ => unreachable!("routed to dispatch_session by handle_readable"),
+    }
+}
+
+/// Synthesized input: keys, text, clicks, drags, pointer motion, and raw events, globally or aimed at one window.
+/// Returns whether to close the connection, as [`handle_readable`] does.
+fn dispatch_input(
+    state: &mut ShoestringWm,
+    client: &Rc<RefCell<Client>>,
+    request: Request,
+) -> bool {
+    match request {
+        Request::InjectKey { keysym, modifiers } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            let resp = match state.inject_key(&keysym, &modifiers) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::InjectText { text } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            let resp = match state.inject_text(&text) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::InjectClick {
+            button,
+            x,
+            y,
+            count,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            let xy = match (x, y) {
+                (Some(x), Some(y)) => Some((x, y)),
+                (None, None) => None,
+                _ => {
+                    let _ = write_response(
+                        client,
+                        &Response::Error {
+                            message: "inject_click: x and y must be passed together".into(),
+                        },
+                    );
+                    return true;
                 }
+            };
+            let resp = match state.inject_click(&button, xy, count.unwrap_or(1)) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::InjectClickToWindow {
+            id,
+            button,
+            wx,
+            wy,
+            count,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
                 return true;
             }
-            Request::SetAudioMute { enabled } => {
-                // We don't mute anything ourselves — spawn the pipewire-linked
-                // helper, which flips the real default-sink mute. The new state
-                // returns via ReportMedia.
-                state.spawn_mediad(&["audio-mute", if enabled { "on" } else { "off" }]);
-                let _ = write_response(client, &Response::Ok);
+            let resp = match state.inject_click_to_window(&id, &button, wx, wy, count.unwrap_or(1))
+            {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::Drag {
+            id,
+            button,
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
                 return true;
             }
-            Request::SetMicMute { enabled } => {
-                state.spawn_mediad(&["mic-mute", if enabled { "on" } else { "off" }]);
-                let _ = write_response(client, &Response::Ok);
+            // A window-targeted drag pins the pointer to that window's
+            // surface, past the lock screen; a global one meets the lock
+            // surface like real input.
+            if id.is_some() && state.is_locked() {
+                let _ = write_response(client, &session_locked_error("drag"));
                 return true;
             }
-            Request::Screenshot {
-                output,
+            let resp =
+                match state.inject_drag(id.as_deref(), &button, (from_x, from_y), (to_x, to_y)) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error {
+                        message: e.to_string(),
+                    },
+                };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::MoveMouse { x, y } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            state.inject_move_mouse(x, y);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::InjectInput { event } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            match event {
+                shoestring_ipc::RawInput::Key { keycode, pressed } => {
+                    state.inject_raw_keycode(keycode, pressed)
+                }
+                shoestring_ipc::RawInput::Button { button, pressed } => {
+                    state.inject_raw_button(button, pressed)
+                }
+                shoestring_ipc::RawInput::Motion { x, y } => state.inject_move_mouse(x, y),
+                shoestring_ipc::RawInput::Axis {
+                    horizontal,
+                    vertical,
+                } => state.inject_raw_axis(horizontal, vertical),
+            }
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::InjectInputToWindow { id: ft_id, event } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            // Targeting a window moves keyboard focus to it, which would
+            // take it off the lock surface. While locked, only the locker
+            // gets input; global `inject_input` still reaches it.
+            if state.is_locked() {
+                let _ = write_response(client, &session_locked_error("inject_input_to_window"));
+                return true;
+            }
+            let resp = match state.inject_input_to_window(&ft_id, event) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        _ => unreachable!("routed to dispatch_input by handle_readable"),
+    }
+}
+
+/// Screen capture: screenshots, the streaming captures behind remote serve and graft, and pixel probes.
+/// Returns whether to close the connection, as [`handle_readable`] does.
+fn dispatch_capture(
+    state: &mut ShoestringWm,
+    id: ClientId,
+    client: &Rc<RefCell<Client>>,
+    request: Request,
+) -> bool {
+    match request {
+        Request::Screenshot {
+            output,
+            region,
+            path,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            if region.is_some() && output.is_none() {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: "screenshot: region requires output (coordinates are \
+                                  output-relative)"
+                            .into(),
+                    },
+                );
+                return true;
+            }
+            // Mark spent so any further bytes from this client are
+            // dropped — the response is deferred until the subprocess
+            // exits, but we've already accepted the request.
+            client.borrow_mut().spent = true;
+            match state.spawn_remote_screenshot(
+                id,
+                Rc::clone(client),
+                output.as_deref(),
                 region,
-                path,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
+                path.map(std::path::PathBuf::from),
+            ) {
+                Ok(()) => {
+                    // Hold the connection open; finalize_remote_screenshot
+                    // will write the response and drop_ipc_client.
+                    false
                 }
-                if region.is_some() && output.is_none() {
+                Err(e) => {
                     let _ = write_response(
                         client,
                         &Response::Error {
-                            message: "screenshot: region requires output (coordinates are \
-                                      output-relative)"
-                                .into(),
+                            message: format!("screenshot spawn failed: {e}"),
                         },
                     );
-                    return true;
+                    true
                 }
-                // Mark spent so any further bytes from this client are
-                // dropped — the response is deferred until the subprocess
-                // exits, but we've already accepted the request.
-                client.borrow_mut().spent = true;
-                match state.spawn_remote_screenshot(
-                    id,
-                    Rc::clone(client),
-                    output.as_deref(),
-                    region,
-                    path.map(std::path::PathBuf::from),
-                ) {
-                    Ok(()) => {
-                        // Hold the connection open; finalize_remote_screenshot
-                        // will write the response and drop_ipc_client.
-                        return false;
-                    }
-                    Err(e) => {
-                        let _ = write_response(
-                            client,
-                            &Response::Error {
-                                message: format!("screenshot spawn failed: {e}"),
-                            },
-                        );
-                        return true;
-                    }
-                }
-            }
-            Request::ScreenshotWindow { id: ft_id, path } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                if !state.window_capture_supported {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: "screenshot_window: not supported on this backend".into(),
-                        },
-                    );
-                    return true;
-                }
-                if state.is_locked() {
-                    let _ = write_response(client, &session_locked_error("screenshot_window"));
-                    return true;
-                }
-                // Fail fast if the window is already gone; otherwise defer the
-                // capture to the next render tick (where the renderer is in scope)
-                // and hold the connection open for the reply — same deferred shape
-                // as the full-screen screenshot.
-                if window_by_ft_id(state, &ft_id).is_none() {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: format!("screenshot_window: no window with id {ft_id}"),
-                        },
-                    );
-                    return true;
-                }
-                client.borrow_mut().spent = true;
-                state
-                    .pending_window_screenshots
-                    .push(crate::window_capture::PendingWindowShot {
-                        id,
-                        ft_id,
-                        client: Rc::clone(client),
-                        path: path.map(std::path::PathBuf::from),
-                    });
-                state.schedule_window_capture();
-                return false;
-            }
-            Request::RunCommand {
-                argv,
-                timeout_ms,
-                cwd,
-                env,
-                detach,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                if argv.is_empty() {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: "run_command: argv must be non-empty".into(),
-                        },
-                    );
-                    return true;
-                }
-                if detach {
-                    // Fire-and-forget: spawn detached and reply with the PID
-                    // now. No deferred reply, no pending-command bookkeeping.
-                    let resp = match state.spawn_detached_command(&argv, cwd.as_deref(), &env) {
-                        Ok(pid) => Response::CommandStarted { pid },
-                        Err(e) => Response::Error {
-                            message: format!("run_command spawn failed: {e}"),
-                        },
-                    };
-                    let _ = write_response(client, &resp);
-                    return true;
-                }
-                // Hold the connection open across the deferred reply,
-                // same as Screenshot. Mark spent so a misbehaving
-                // client can't slip in a second request.
-                client.borrow_mut().spent = true;
-                match state.spawn_remote_command(
-                    id,
-                    Rc::clone(client),
-                    &argv,
-                    timeout_ms,
-                    cwd.as_deref(),
-                    &env,
-                ) {
-                    Ok(()) => return false,
-                    Err(e) => {
-                        let _ = write_response(
-                            client,
-                            &Response::Error {
-                                message: format!("run_command spawn failed: {e}"),
-                            },
-                        );
-                        return true;
-                    }
-                }
-            }
-            Request::ReloadConfig => {
-                let resp = match state.reload_config_from_disk() {
-                    Ok(()) => Response::Ok,
-                    Err(e) => Response::Error {
-                        message: format!("reload_config: {e}"),
-                    },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::PickWindow => {
-                // The reply is deferred until the user clicks (or
-                // cancels). Mark spent so we don't try to read a
-                // follow-up request on this same connection — the
-                // picker resolution will write the response and drop
-                // the client. A disconnect mid-pick cancels via
-                // `cancel_picker_if_owned_by` in `drop_ipc_client`.
-                client.borrow_mut().spent = true;
-                if let Err(msg) = state.start_picker(id, Rc::clone(client)) {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: msg.into(),
-                        },
-                    );
-                    return true;
-                }
-                return false;
-            }
-            Request::CloseWindow { id: window_id } => {
-                let resp = match state.close_window_by_id(&window_id) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::KillWindow { id: window_id } => {
-                let resp = match state.kill_window_by_id(&window_id) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::FocusWindow { id: window_id } => {
-                let resp = match state.focus_window_by_id(&window_id) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::RaiseWindow { id: window_id } => {
-                let resp = match state.raise_window_by_id(&window_id) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::LowerWindow { id: window_id } => {
-                let resp = match state.lower_window_by_id(&window_id) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::SetWindowSticky {
-                id: window_id,
-                sticky,
-            } => {
-                let resp = match state.set_window_sticky_by_id(&window_id, sticky) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::SetWindowAlwaysOnTop {
-                id: window_id,
-                always_on_top,
-            } => {
-                let resp = match state.set_window_always_on_top_by_id(&window_id, always_on_top) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::SetWindowName {
-                id: window_id,
-                name,
-            } => {
-                let resp = match state.set_window_name_by_id(&window_id, &name) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::MoveWindowToWorkspace {
-                id: window_id,
-                index,
-            } => {
-                let resp = match state.move_window_to_workspace_by_id(&window_id, index) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::SetWindowMinimized {
-                id: window_id,
-                minimized,
-            } => {
-                let resp = match state.set_window_minimized_by_id(&window_id, minimized) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::SetWindowMaximized {
-                id: window_id,
-                maximized,
-            } => {
-                let resp = match state.set_window_maximized_by_id(&window_id, maximized) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::InjectClick {
-                button,
-                x,
-                y,
-                count,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                let xy = match (x, y) {
-                    (Some(x), Some(y)) => Some((x, y)),
-                    (None, None) => None,
-                    _ => {
-                        let _ = write_response(
-                            client,
-                            &Response::Error {
-                                message: "inject_click: x and y must be passed together".into(),
-                            },
-                        );
-                        return true;
-                    }
-                };
-                let resp = match state.inject_click(&button, xy, count.unwrap_or(1)) {
-                    Ok(()) => Response::Ok,
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                    },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::InjectClickToWindow {
-                id,
-                button,
-                wx,
-                wy,
-                count,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                let resp =
-                    match state.inject_click_to_window(&id, &button, wx, wy, count.unwrap_or(1)) {
-                        Ok(()) => Response::Ok,
-                        Err(e) => Response::Error {
-                            message: e.to_string(),
-                        },
-                    };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::Drag {
-                id,
-                button,
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                // A window-targeted drag pins the pointer to that window's
-                // surface, past the lock screen; a global one meets the lock
-                // surface like real input.
-                if id.is_some() && state.is_locked() {
-                    let _ = write_response(client, &session_locked_error("drag"));
-                    return true;
-                }
-                let resp =
-                    match state.inject_drag(id.as_deref(), &button, (from_x, from_y), (to_x, to_y))
-                    {
-                        Ok(()) => Response::Ok,
-                        Err(e) => Response::Error {
-                            message: e.to_string(),
-                        },
-                    };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::MoveMouse { x, y } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                state.inject_move_mouse(x, y);
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::InjectInput { event } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                match event {
-                    shoestring_ipc::RawInput::Key { keycode, pressed } => {
-                        state.inject_raw_keycode(keycode, pressed)
-                    }
-                    shoestring_ipc::RawInput::Button { button, pressed } => {
-                        state.inject_raw_button(button, pressed)
-                    }
-                    shoestring_ipc::RawInput::Motion { x, y } => state.inject_move_mouse(x, y),
-                    shoestring_ipc::RawInput::Axis {
-                        horizontal,
-                        vertical,
-                    } => state.inject_raw_axis(horizontal, vertical),
-                }
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::GetClipboard { primary } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                // Mark spent up front: the inline-reply paths drop the conn and
-                // the deferred path holds it open for a single reply either way.
-                client.borrow_mut().spent = true;
-                return state.handle_get_clipboard(id, client, primary);
-            }
-            Request::SetClipboard {
-                primary,
-                mime,
-                data,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                state.handle_set_clipboard(primary, mime, data);
-                let _ = write_response(client, &Response::Ok);
-                return true;
-            }
-            Request::Paste {
-                text,
-                keysym,
-                modifiers,
-            } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                // Optionally load the selection first, then synthesize the paste
-                // chord so the focused client requests it back. Setting the
-                // selection is infallible; only the key injection can fail (a
-                // paste chord absent from the current keymap), so we surface that.
-                if let Some(t) = text {
-                    state.handle_set_clipboard(
-                        false,
-                        "text/plain;charset=utf-8".to_string(),
-                        t.into_bytes(),
-                    );
-                }
-                let resp = match state.inject_key(&keysym, &modifiers) {
-                    Ok(()) => Response::Ok,
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                    },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::PointerPosition => {
-                let (x, y) = state.pointer_position();
-                let _ = write_response(client, &Response::PointerPosition { x, y });
-                return true;
-            }
-            Request::FindWindows { title, app_id } => {
-                let resp = match find_windows(state, title.as_deref(), app_id.as_deref()) {
-                    Ok(windows) => Response::Windows { windows },
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::Metrics => {
-                // Sample fresh on demand so a snapshot is current even when
-                // the background sampler is off. Ungated — pure observation.
-                state.sample_metrics();
-                let resp = Response::Metrics {
-                    ts_ms: crate::metrics::now_ms(),
-                    metrics: state.metrics.snapshot(),
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::MetricsStream { interval_ms } => {
-                if !state.config.diagnostics.enabled {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: "metrics stream unavailable: diagnostics disabled \
-                                      (set [diagnostics].enabled = true)"
-                                .into(),
-                        },
-                    );
-                    return true;
-                }
-                if write_response(client, &Response::Ok).is_err() {
-                    return true;
-                }
-                // Clamp the requested interval up to the sampler cadence —
-                // v1 can't push faster than it samples.
-                let floor = state.config.diagnostics.sample_interval_ms.max(1);
-                let want = interval_ms.map(u64::from).unwrap_or(0).max(floor);
-                {
-                    let mut c = client.borrow_mut();
-                    c.metrics_sub = Some(MetricsSub {
-                        interval: Duration::from_millis(want),
-                        last_push: None,
-                    });
-                    // Long-lived like an event subscriber: stay open, re-armed
-                    // for READ only to notice hangup.
-                    c.spent = true;
-                }
-                tracing::debug!(?id, interval_ms = want, "ipc client subscribed to metrics");
-                return false;
-            }
-            Request::CaptureStream { output } => {
-                // Gated by the screen-capture flag — never stream without consent.
-                if !state.screen_capture_enabled {
-                    let _ = write_response(client, &capture_off_error());
-                    return true;
-                }
-                // Resolve the target output: a named one, else the first mapped.
-                let resolved = match &output {
-                    Some(name) => state
-                        .space
-                        .outputs()
-                        .find(|o| o.name() == *name)
-                        .map(|o| o.name()),
-                    None => state.space.outputs().next().map(|o| o.name()),
-                };
-                let Some(output_name) = resolved else {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: match output {
-                                Some(name) => format!("capture_stream: no output named {name}"),
-                                None => "capture_stream: no outputs available".into(),
-                            },
-                        },
-                    );
-                    return true;
-                };
-                // One Ok line, then the connection upgrades to a binary
-                // shoestring_remote frame stream pushed from the render loop.
-                if write_response(client, &Response::Ok).is_err() {
-                    return true;
-                }
-                {
-                    let mut c = client.borrow_mut();
-                    c.capture_sub =
-                        Some(crate::capture_stream::CaptureSub::new(output_name.clone()));
-                    // Long-lived like the other subscribers: stay open; further
-                    // newline input is unexpected on a binary stream.
-                    c.spent = true;
-                }
-                tracing::debug!(?id, %output_name, "ipc client subscribed to capture stream");
-                return false;
-            }
-            Request::CaptureWindow { id: ft_id } => {
-                // Gated by the screen-capture flag — same consent as CaptureStream.
-                if !state.screen_capture_enabled {
-                    let _ = write_response(client, &capture_off_error());
-                    return true;
-                }
-                // A stream opened before the lock pauses instead (see
-                // `push_window_capture`); a new one is refused outright.
-                if state.is_locked() {
-                    let _ = write_response(client, &session_locked_error("capture_window"));
-                    return true;
-                }
-                // The window must exist now; it may later close (→ Bye) but we
-                // refuse to open a stream for a window that isn't there.
-                if window_by_ft_id(state, &ft_id).is_none() {
-                    let _ = write_response(
-                        client,
-                        &Response::Error {
-                            message: format!("capture_window: no window with id {ft_id}"),
-                        },
-                    );
-                    return true;
-                }
-                // One Ok line, then upgrade to the binary frame stream (Ready,
-                // optional Meta, then Frame/Resize/Bye) pushed from the render loop.
-                if write_response(client, &Response::Ok).is_err() {
-                    return true;
-                }
-                {
-                    let mut c = client.borrow_mut();
-                    c.window_capture_sub =
-                        Some(crate::window_capture::WindowCaptureSub::new(ft_id.clone()));
-                    c.spent = true;
-                }
-                // The first frame (Ready + Meta + full damage) goes out on the
-                // next capture pass, not on the window's next commit.
-                state.schedule_window_capture();
-                tracing::debug!(?id, %ft_id, "ipc client subscribed to window-capture stream");
-                return false;
-            }
-            Request::InjectInputToWindow { id: ft_id, event } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                // Targeting a window moves keyboard focus to it, which would
-                // take it off the lock surface. While locked, only the locker
-                // gets input; global `inject_input` still reaches it.
-                if state.is_locked() {
-                    let _ = write_response(client, &session_locked_error("inject_input_to_window"));
-                    return true;
-                }
-                let resp = match state.inject_input_to_window(&ft_id, event) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::DispatchAction { action } => {
-                if !state.automation_enabled {
-                    let _ = write_response(client, &automation_off_error());
-                    return true;
-                }
-                // Decode the JSON Value into a real Action via shoestring-config's
-                // serde impl. Failures here are user-fixable (bad key, missing
-                // field) so the error string is surfaced verbatim.
-                let resp = match serde_json::from_value::<shoestring_config::Action>(action) {
-                    Ok(action) => {
-                        tracing::info!(?action, "dispatching action via ipc");
-                        state.dispatch_action(action);
-                        Response::Ok
-                    }
-                    Err(e) => Response::Error {
-                        message: format!("dispatch_action: malformed action: {e}"),
-                    },
-                };
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::SetGamma {
-                output,
-                temperature,
-                brightness,
-                gamma,
-            } => {
-                let resp = set_gamma_response(state, output, temperature, brightness, gamma);
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::ResetGamma { output } => {
-                let resp = reset_gamma_response(state, output);
-                let _ = write_response(client, &resp);
-                return true;
-            }
-            Request::WaitWindow {
-                title,
-                app_id,
-                unmap,
-                timeout_ms,
-            } => {
-                return state.handle_wait_window(id, client, title, app_id, unmap, timeout_ms);
-            }
-            Request::WaitReady {
-                xwayland,
-                timeout_ms,
-            } => {
-                return state.handle_wait_ready(id, client, xwayland, timeout_ms);
-            }
-            Request::GetPixel { output, x, y } => {
-                return state.handle_probe(
-                    id,
-                    client,
-                    output,
-                    crate::screencopy::ProbeTarget::Pixel { x, y },
-                );
-            }
-            Request::HashRegion { output, region } => {
-                return state.handle_probe(
-                    id,
-                    client,
-                    output,
-                    crate::screencopy::ProbeTarget::Region(region),
-                );
             }
         }
+        Request::ScreenshotWindow { id: ft_id, path } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            if !state.window_capture_supported {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: "screenshot_window: not supported on this backend".into(),
+                    },
+                );
+                return true;
+            }
+            if state.is_locked() {
+                let _ = write_response(client, &session_locked_error("screenshot_window"));
+                return true;
+            }
+            // Fail fast if the window is already gone; otherwise defer the
+            // capture to the next render tick (where the renderer is in scope)
+            // and hold the connection open for the reply — same deferred shape
+            // as the full-screen screenshot.
+            if window_by_ft_id(state, &ft_id).is_none() {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: format!("screenshot_window: no window with id {ft_id}"),
+                    },
+                );
+                return true;
+            }
+            client.borrow_mut().spent = true;
+            state
+                .pending_window_screenshots
+                .push(crate::window_capture::PendingWindowShot {
+                    id,
+                    ft_id,
+                    client: Rc::clone(client),
+                    path: path.map(std::path::PathBuf::from),
+                });
+            state.schedule_window_capture();
+            false
+        }
+        Request::CaptureStream { output } => {
+            // Gated by the screen-capture flag — never stream without consent.
+            if !state.screen_capture_enabled {
+                let _ = write_response(client, &capture_off_error());
+                return true;
+            }
+            // Resolve the target output: a named one, else the first mapped.
+            let resolved = match &output {
+                Some(name) => state
+                    .space
+                    .outputs()
+                    .find(|o| o.name() == *name)
+                    .map(|o| o.name()),
+                None => state.space.outputs().next().map(|o| o.name()),
+            };
+            let Some(output_name) = resolved else {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: match output {
+                            Some(name) => format!("capture_stream: no output named {name}"),
+                            None => "capture_stream: no outputs available".into(),
+                        },
+                    },
+                );
+                return true;
+            };
+            // One Ok line, then the connection upgrades to a binary
+            // shoestring_remote frame stream pushed from the render loop.
+            if write_response(client, &Response::Ok).is_err() {
+                return true;
+            }
+            {
+                let mut c = client.borrow_mut();
+                c.capture_sub = Some(crate::capture_stream::CaptureSub::new(output_name.clone()));
+                // Long-lived like the other subscribers: stay open; further
+                // newline input is unexpected on a binary stream.
+                c.spent = true;
+            }
+            tracing::debug!(?id, %output_name, "ipc client subscribed to capture stream");
+            false
+        }
+        Request::CaptureWindow { id: ft_id } => {
+            // Gated by the screen-capture flag — same consent as CaptureStream.
+            if !state.screen_capture_enabled {
+                let _ = write_response(client, &capture_off_error());
+                return true;
+            }
+            // A stream opened before the lock pauses instead (see
+            // `push_window_capture`); a new one is refused outright.
+            if state.is_locked() {
+                let _ = write_response(client, &session_locked_error("capture_window"));
+                return true;
+            }
+            // The window must exist now; it may later close (→ Bye) but we
+            // refuse to open a stream for a window that isn't there.
+            if window_by_ft_id(state, &ft_id).is_none() {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: format!("capture_window: no window with id {ft_id}"),
+                    },
+                );
+                return true;
+            }
+            // One Ok line, then upgrade to the binary frame stream (Ready,
+            // optional Meta, then Frame/Resize/Bye) pushed from the render loop.
+            if write_response(client, &Response::Ok).is_err() {
+                return true;
+            }
+            {
+                let mut c = client.borrow_mut();
+                c.window_capture_sub =
+                    Some(crate::window_capture::WindowCaptureSub::new(ft_id.clone()));
+                c.spent = true;
+            }
+            // The first frame (Ready + Meta + full damage) goes out on the
+            // next capture pass, not on the window's next commit.
+            state.schedule_window_capture();
+            tracing::debug!(?id, %ft_id, "ipc client subscribed to window-capture stream");
+            false
+        }
+        Request::GetPixel { output, x, y } => state.handle_probe(
+            id,
+            client,
+            output,
+            crate::screencopy::ProbeTarget::Pixel { x, y },
+        ),
+        Request::HashRegion { output, region } => state.handle_probe(
+            id,
+            client,
+            output,
+            crate::screencopy::ProbeTarget::Region(region),
+        ),
+        _ => unreachable!("routed to dispatch_capture by handle_readable"),
+    }
+}
+
+/// Remote desktop: server and viewer registration, the remote gate, the machine axis, and the clipboard bridge.
+/// Returns whether to close the connection, as [`handle_readable`] does.
+fn dispatch_remote(
+    state: &mut ShoestringWm,
+    id: ClientId,
+    client: &Rc<RefCell<Client>>,
+    request: Request,
+) -> bool {
+    match request {
+        Request::RegisterRemoteServer => {
+            // Mark this connection as *the* remote server (replacing any
+            // prior one) and subscribe it to events so it learns when the
+            // gate flips. Long-lived: its disconnect clears the
+            // registration and forces the gate off (see drop_ipc_client).
+            state.remote_server = Some(id);
+            client.borrow_mut().subscriber = true;
+            let _ = write_response(
+                client,
+                &Response::Remote {
+                    enabled: state.remote_enabled,
+                    server_available: true,
+                    viewers: state.remote_viewers,
+                },
+            );
+            tracing::info!(?id, "remote server registered");
+            // Tell the bar a server is now available (toggle un-greys).
+            state.emit_remote_changed();
+            false
+        }
+        Request::SetRemote { enabled } => {
+            // Enabling requires a registered server (the consent toggle is
+            // greyed until then; refuse it over IPC too).
+            if enabled && state.remote_server.is_none() {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: "remote disabled: no shoestring-remote-server registered".into(),
+                    },
+                );
+                return true;
+            }
+            let changed = state.remote_enabled != enabled;
+            // Couples the automation + capture gates on/off.
+            let (auto_changed, capture_changed) = state.set_remote(enabled);
+            let _ = write_response(
+                client,
+                &Response::Remote {
+                    enabled: state.remote_enabled,
+                    server_available: state.remote_server.is_some(),
+                    viewers: state.remote_viewers,
+                },
+            );
+            if auto_changed {
+                state.emit_ipc(Event::AutomationChanged {
+                    enabled: state.automation_enabled,
+                });
+            }
+            if capture_changed {
+                state.emit_ipc(Event::ScreenCaptureChanged {
+                    enabled: state.screen_capture_enabled,
+                });
+            }
+            if changed {
+                tracing::info!(enabled, "remote gate changed via ipc");
+                state.emit_remote_changed();
+            }
+            true
+        }
+        Request::RemoteStatus => {
+            let _ = write_response(
+                client,
+                &Response::Remote {
+                    enabled: state.remote_enabled,
+                    server_available: state.remote_server.is_some(),
+                    viewers: state.remote_viewers,
+                },
+            );
+            true
+        }
+        Request::ReportRemoteViewers { viewers } => {
+            // Pushed by the registered server as clients come and go. Like
+            // ReportMedia, the local socket is the trust boundary.
+            let changed = state.remote_viewers != viewers;
+            state.remote_viewers = viewers;
+            let _ = write_response(client, &Response::Ok);
+            if changed {
+                state.emit_remote_changed();
+            }
+            true
+        }
+        Request::RegisterRemoteClient {
+            label,
+            width,
+            height,
+        } => {
+            // Add this connection to the machine-axis (index 1.. in arrival
+            // order) and subscribe it so it receives ViewChanged (to reveal/
+            // hide its surface) and CapturedInput while it's the active view.
+            // Long-lived: its disconnect removes the machine (see
+            // drop_ipc_client → drop_remote_client).
+            state.remote_clients.push(crate::remote::RemoteClient {
+                id,
+                label,
+                width,
+                height,
+            });
+            client.borrow_mut().subscriber = true;
+            let _ = write_response(
+                client,
+                &Response::RemoteClients {
+                    machines: state.machine_entries(),
+                    active: state.view_index,
+                },
+            );
+            tracing::info!(?id, "remote client registered on machine-axis");
+            false
+        }
+        Request::RemoteClientStatus => {
+            let _ = write_response(
+                client,
+                &Response::RemoteClients {
+                    machines: state.machine_entries(),
+                    active: state.view_index,
+                },
+            );
+            true
+        }
+        Request::SetView { index } => {
+            // Clamps to the machine count and broadcasts ViewChanged when the
+            // index actually moves (entering/leaving capture mode).
+            state.set_view(index);
+            let _ = write_response(
+                client,
+                &Response::RemoteClients {
+                    machines: state.machine_entries(),
+                    active: state.view_index,
+                },
+            );
+            true
+        }
+        Request::GetClipboard { primary } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            // Mark spent up front: the inline-reply paths drop the conn and
+            // the deferred path holds it open for a single reply either way.
+            client.borrow_mut().spent = true;
+            state.handle_get_clipboard(id, client, primary)
+        }
+        Request::SetClipboard {
+            primary,
+            mime,
+            data,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            state.handle_set_clipboard(primary, mime, data);
+            let _ = write_response(client, &Response::Ok);
+            true
+        }
+        Request::Paste {
+            text,
+            keysym,
+            modifiers,
+        } => {
+            if !state.automation_enabled {
+                let _ = write_response(client, &automation_off_error());
+                return true;
+            }
+            // Optionally load the selection first, then synthesize the paste
+            // chord so the focused client requests it back. Setting the
+            // selection is infallible; only the key injection can fail (a
+            // paste chord absent from the current keymap), so we surface that.
+            if let Some(t) = text {
+                state.handle_set_clipboard(
+                    false,
+                    "text/plain;charset=utf-8".to_string(),
+                    t.into_bytes(),
+                );
+            }
+            let resp = match state.inject_key(&keysym, &modifiers) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        _ => unreachable!("routed to dispatch_remote by handle_readable"),
+    }
+}
+
+/// Window management by id: pick, close, kill, focus, stacking, sticky, always-on-top, name, workspace, minimize, maximize.
+/// Returns whether to close the connection, as [`handle_readable`] does.
+fn dispatch_windows(
+    state: &mut ShoestringWm,
+    id: ClientId,
+    client: &Rc<RefCell<Client>>,
+    request: Request,
+) -> bool {
+    match request {
+        Request::PickWindow => {
+            // The reply is deferred until the user clicks (or
+            // cancels). Mark spent so we don't try to read a
+            // follow-up request on this same connection — the
+            // picker resolution will write the response and drop
+            // the client. A disconnect mid-pick cancels via
+            // `cancel_picker_if_owned_by` in `drop_ipc_client`.
+            client.borrow_mut().spent = true;
+            if let Err(msg) = state.start_picker(id, Rc::clone(client)) {
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: msg.into(),
+                    },
+                );
+                return true;
+            }
+            false
+        }
+        Request::CloseWindow { id: window_id } => {
+            let resp = match state.close_window_by_id(&window_id) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::KillWindow { id: window_id } => {
+            let resp = match state.kill_window_by_id(&window_id) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::FocusWindow { id: window_id } => {
+            let resp = match state.focus_window_by_id(&window_id) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::RaiseWindow { id: window_id } => {
+            let resp = match state.raise_window_by_id(&window_id) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::LowerWindow { id: window_id } => {
+            let resp = match state.lower_window_by_id(&window_id) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::SetWindowSticky {
+            id: window_id,
+            sticky,
+        } => {
+            let resp = match state.set_window_sticky_by_id(&window_id, sticky) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::SetWindowAlwaysOnTop {
+            id: window_id,
+            always_on_top,
+        } => {
+            let resp = match state.set_window_always_on_top_by_id(&window_id, always_on_top) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::SetWindowName {
+            id: window_id,
+            name,
+        } => {
+            let resp = match state.set_window_name_by_id(&window_id, &name) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::MoveWindowToWorkspace {
+            id: window_id,
+            index,
+        } => {
+            let resp = match state.move_window_to_workspace_by_id(&window_id, index) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::SetWindowMinimized {
+            id: window_id,
+            minimized,
+        } => {
+            let resp = match state.set_window_minimized_by_id(&window_id, minimized) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        Request::SetWindowMaximized {
+            id: window_id,
+            maximized,
+        } => {
+            let resp = match state.set_window_maximized_by_id(&window_id, maximized) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            };
+            let _ = write_response(client, &resp);
+            true
+        }
+        _ => unreachable!("routed to dispatch_windows by handle_readable"),
     }
 }
 
