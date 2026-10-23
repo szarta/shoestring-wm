@@ -57,14 +57,16 @@ use smithay::{
         },
         udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent},
     },
-    desktop::{space::SpaceRenderElements, utils::OutputPresentationFeedback},
+    desktop::{
+        layer_map_for_output, space::SpaceRenderElements, utils::OutputPresentationFeedback,
+    },
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
         calloop::{
             timer::{TimeoutAction, Timer},
             EventLoop, RegistrationToken,
         },
-        drm::control::{connector, crtc, ModeTypeFlags},
+        drm::control::{connector, crtc, Mode, ModeTypeFlags},
         input::Libinput,
         rustix::fs::OFlags,
         wayland_server::backend::GlobalId,
@@ -200,6 +202,12 @@ struct SurfaceData {
     /// this is cheap and guards against any pending-state reset across mode
     /// changes or VT switches.
     vrr: bool,
+    /// The connector this surface drives, for re-reading its mode list.
+    connector: connector::Handle,
+    /// The mode picked automatically from the connector's preferred mode, or
+    /// `None` once a client has set a mode explicitly. While it is `Some`,
+    /// [`refresh_preferred_modes`] follows the kernel's preferred mode.
+    auto_mode: Option<Mode>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -667,6 +675,7 @@ fn device_changed(state: &mut ShoestringWm, node: DrmNode) {
 
     // Collect first because connector_connected/disconnected mutate `state`.
     let events: Vec<_> = scan.into_iter().collect();
+    let mut any_connected = false;
     for ev in events {
         match ev {
             DrmScanEvent::Connected {
@@ -674,6 +683,7 @@ fn device_changed(state: &mut ShoestringWm, node: DrmNode) {
                 crtc: Some(crtc),
             } => {
                 connector_connected(state, node, connector, crtc);
+                any_connected = true;
             }
             DrmScanEvent::Disconnected {
                 connector,
@@ -683,6 +693,134 @@ fn device_changed(state: &mut ShoestringWm, node: DrmNode) {
             }
             _ => {}
         }
+    }
+
+    // A connector that stays connected can still change its mode list, and
+    // the scanner reports no event for that. The scan just probed, so the
+    // cached connector state is fresh.
+    refresh_preferred_modes(state, node, false);
+
+    // A monitor waking from power-off can report itself connected before its
+    // EDID is readable. The kernel then offers only fallback modes (e.g.
+    // 1280x720), and the real list may arrive without a further uevent. Look
+    // again once the monitor has had time to settle.
+    if any_connected {
+        let mut delays = PREFERRED_MODE_RECHECKS.iter().copied();
+        if let Some(first) = delays.next() {
+            let _ =
+                state
+                    .loop_handle
+                    .insert_source(Timer::from_duration(first), move |_, _, state| {
+                        refresh_preferred_modes(state, node, true);
+                        match delays.next() {
+                            Some(next) => TimeoutAction::ToDuration(next),
+                            None => TimeoutAction::Drop,
+                        }
+                    });
+        }
+    }
+}
+
+/// Delays between successive re-checks of a newly-connected connector's
+/// preferred mode. Each delay counts from the previous check.
+const PREFERRED_MODE_RECHECKS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(6),
+];
+
+/// The mode to drive a connector at by default: the one the kernel flags as
+/// preferred, else the first listed.
+fn preferred_mode(modes: &[Mode]) -> Option<Mode> {
+    modes
+        .iter()
+        .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .or_else(|| modes.first())
+        .copied()
+}
+
+/// Re-read the mode list of every connector on `node` that still follows its
+/// preferred mode, and switch any whose preferred mode has changed.
+/// `force_probe` makes the kernel re-read each connector (and its EDID), so a
+/// late EDID is picked up even when no uevent announced it.
+fn refresh_preferred_modes(state: &mut ShoestringWm, node: DrmNode, force_probe: bool) {
+    let pending: Vec<(crtc::Handle, Output, Mode)> = {
+        let Some(device) = state.udev.as_ref().and_then(|u| u.backends.get(&node)) else {
+            return;
+        };
+        let dev = device.drm_output_manager.device().device_fd();
+        device
+            .surfaces
+            .iter()
+            .filter_map(|(crtc, surface)| {
+                let current = surface.auto_mode?;
+                let info = dev.get_connector(surface.connector, force_probe).ok()?;
+                if info.state() != connector::State::Connected {
+                    return None;
+                }
+                let preferred = preferred_mode(info.modes())?;
+                (preferred != current).then(|| (*crtc, surface.output.clone(), preferred))
+            })
+            .collect()
+    };
+
+    for (crtc, output, drm_mode) in pending {
+        let Some(udev) = state.udev.as_mut() else {
+            return;
+        };
+        let Some(render_node) = udev
+            .backends
+            .get(&node)
+            .map(|d| d.render_node.unwrap_or(udev.primary_gpu))
+        else {
+            return;
+        };
+        let mut renderer: UdevRenderer<'_> = match udev.gpus.single_renderer(&render_node) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(output = output.name(), error = ?e, "preferred mode refresh: renderer unavailable");
+                continue;
+            }
+        };
+        let Some(surface) = udev
+            .backends
+            .get_mut(&node)
+            .and_then(|d| d.surfaces.get_mut(&crtc))
+        else {
+            continue;
+        };
+        let elements: DrmOutputRenderElements<
+            UdevRenderer<'_>,
+            crate::drawing::PointerRenderElement<UdevRenderer<'_>>,
+        > = DrmOutputRenderElements::new();
+        if let Err(e) = surface
+            .drm_output
+            .use_mode(drm_mode, &mut renderer, &elements)
+        {
+            tracing::warn!(output = output.name(), error = ?e, "preferred mode refresh: use_mode failed");
+            continue;
+        }
+        surface.auto_mode = Some(drm_mode);
+
+        let wl_mode = WlMode::from(drm_mode);
+        tracing::info!(
+            output = output.name(),
+            size = ?wl_mode.size,
+            refresh = wl_mode.refresh,
+            "connector's preferred mode changed; switched to it"
+        );
+        output.set_preferred(wl_mode);
+        output.change_current_state(Some(wl_mode), None, None, None);
+        layer_map_for_output(&output).arrange();
+
+        // Re-announce the head so output-management clients see the new
+        // mode list and current mode.
+        crate::output_management::broadcast_head_removed(state, &output);
+        crate::output_management::broadcast_head_added(state, &output);
+
+        state.loop_handle.insert_idle(move |state| {
+            state.render_surface(node, crtc);
+        });
     }
 }
 
@@ -753,12 +891,10 @@ fn connector_connected(
         .and_then(|i| i.serial())
         .unwrap_or_else(|| "Unknown".into());
 
-    let mode_id = connector
-        .modes()
-        .iter()
-        .position(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .unwrap_or(0);
-    let drm_mode = connector.modes()[mode_id];
+    let Some(drm_mode) = preferred_mode(connector.modes()) else {
+        tracing::warn!(%output_name, "connector reports no modes");
+        return;
+    };
     let wl_mode = WlMode::from(drm_mode);
 
     let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
@@ -886,6 +1022,8 @@ fn connector_connected(
         global: Some(global),
         drm_output,
         vrr,
+        connector: connector.handle(),
+        auto_mode: Some(drm_mode),
     };
     device.surfaces.insert(crtc, surface);
 
@@ -1102,6 +1240,8 @@ pub fn change_output_mode(
         .use_mode(drm_mode, &mut renderer, &elements)
     {
         Ok(()) => {
+            // An explicit choice: stop following the preferred mode.
+            surface.auto_mode = None;
             let wl_mode = WlMode::from(drm_mode);
             output.change_current_state(Some(wl_mode), None, None, None);
             tracing::info!(

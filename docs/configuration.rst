@@ -239,6 +239,14 @@ Per-output overrides. ``<name>`` is the connector name the WM logs when an
 output is connected (e.g. ``DP-1``, ``HDMI-A-1``, ``eDP-1``). All fields
 are optional; unset fields fall back to the matching ``[general]`` default.
 
+Each output runs at the mode its monitor reports as preferred. A monitor
+waking from power-off can briefly offer only fallback modes, such as
+1280×720, before its EDID is readable. The WM checks the mode list again
+on every hotplug event and for several seconds after a monitor connects,
+and switches to the preferred mode once the real list appears. After a
+``wlr-output-management`` client (e.g. ``wlr-randr --mode``) sets a mode,
+the WM keeps that mode and stops following the preferred one.
+
 .. list-table::
    :header-rows: 1
    :widths: 10 8 8 74
