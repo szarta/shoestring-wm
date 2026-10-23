@@ -203,8 +203,11 @@ The remote gate reuses the existing capability-gate model end to end:
   runs as the logged-in user, so reaching the session takes an ssh login as
   that user. Other users on the served box can't connect, and the viewer's end
   of the forward is a 0600 socket too, so other users there can't ride the
-  tunnel. No new keys or passwords, matching the named-node workflow. For a
-  container see :doc:`containers`.
+  tunnel. That mode comes from ssh's default ``StreamLocalBindMask 0177``, and
+  it is the only guard on the viewer's side: the server sees every connection
+  through the tunnel as the ssh user, so leave the mask alone and don't loosen
+  the forwarded socket. No new keys or passwords, matching the named-node
+  workflow. For a container see :doc:`containers`.
 - **A locked session streams almost nothing.** While the served box is
   locked, a serve viewer sees one static dark frame, not the lock screen and
   not the windows behind it, and a graft session pauses (a new one is
