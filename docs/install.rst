@@ -236,6 +236,12 @@ To **build from source** instead, install the toolchain and libraries::
 portal; ``clang``/``libclang`` for its bindgen build come from the base
 system. Omit it only if you ``--exclude`` the portal crate from the build.)
 
+At runtime the bar, menu, notifications, and screen locker also need a font,
+and a stock FreeBSD install has none. Without one ``shoestring-lock`` exits
+before locking, so the lock command leaves the session unlocked::
+
+    pkg install dejavu
+
 For just the winit dev backend (which is the verified-working
 configuration on FreeBSD), only the first line is needed::
 

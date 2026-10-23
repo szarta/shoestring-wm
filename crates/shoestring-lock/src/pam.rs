@@ -451,6 +451,41 @@ mod tests {
         assert!(matches!(err, Error::Auth(_)), "got {err}");
     }
 
+    /// The password `$USER` logs in with, for the real-PAM tests below. Use a
+    /// throwaway account: the value sits in the environment of the test run.
+    fn test_password() -> String {
+        std::env::var("SHOESTRING_LOCK_TEST_PASSWORD")
+            .expect("set SHOESTRING_LOCK_TEST_PASSWORD to $USER's password")
+    }
+
+    /// Through the real libpam and the installed `shoestring-lock` policy:
+    /// `$USER`'s own password unlocks, auth and account checks both passing.
+    /// This is the path an unlock takes, which the wrong-password test never
+    /// reaches. Needs the policy file installed, so it is `#[ignore]`.
+    #[test]
+    #[ignore]
+    fn right_password_unlocks_through_real_pam() {
+        let user = std::env::var("USER").expect("$USER");
+        verify("shoestring-lock", &user, Secret::new(test_password()))
+            .unwrap_or_else(|err| panic!("unlock failed: {err}"));
+    }
+
+    /// Through the real libpam and the installed `shoestring-lock` policy:
+    /// naming another account fails even with `$USER`'s correct password.
+    /// The locker always passes `$USER`, but the policy must not let a caller
+    /// authenticate as anyone else, which on FreeBSD rests on
+    /// unix-selfauth-helper checking that the user matches its caller. Needs
+    /// the policy installed and SHOESTRING_LOCK_TEST_OTHER_USER naming a
+    /// second account, so it is `#[ignore]`.
+    #[test]
+    #[ignore]
+    fn another_users_name_fails_through_real_pam() {
+        let other = std::env::var("SHOESTRING_LOCK_TEST_OTHER_USER")
+            .expect("set SHOESTRING_LOCK_TEST_OTHER_USER to a second account");
+        let err = verify("shoestring-lock", &other, Secret::new(test_password())).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)), "got {err}");
+    }
+
     #[test]
     fn nul_in_password_is_rejected_before_pam() {
         let err = verify("shoestring-lock", "nobody", Secret::new("a\0b".into())).unwrap_err();

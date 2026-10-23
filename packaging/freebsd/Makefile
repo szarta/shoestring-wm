@@ -27,7 +27,11 @@ LIB_DEPENDS=	libudev.so:devel/libudev-devd \
 # unix-selfauth-helper: the setuid helper shoestring-lock's PAM policy
 # delegates to so the locker can authenticate unprivileged (see the
 # Authentication section of shoestring-lock(1)).
-RUN_DEPENDS=	mesa-dri>0:graphics/mesa-dri \
+# dejavu: the helpers draw text with a built-in font list, not fontconfig,
+# and a stock FreeBSD has no fonts. Without one shoestring-lock exits before
+# locking, so the lock command leaves the session unlocked.
+RUN_DEPENDS=	dejavu>0:x11-fonts/dejavu \
+		mesa-dri>0:graphics/mesa-dri \
 		unix-selfauth-helper>0:security/unix-selfauth-helper
 
 USES=		cargo gl localbase:ldflags pkgconfig python:build

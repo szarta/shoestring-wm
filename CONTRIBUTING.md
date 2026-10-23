@@ -201,6 +201,23 @@ measure the headless backend's CPU, wakeups, memory, stream bandwidth, and
 latency under fixed workloads (Linux only); see "Resource use" in
 `docs/running.rst`.
 
+### Screen locker against real PAM
+
+Three `#[ignore]`d tests in `crates/shoestring-lock/src/pam.rs` authenticate
+through the real libpam and the installed `shoestring-lock` policy: the right
+password unlocks, a wrong one fails, and naming another account fails even
+with the right password. On FreeBSD the last one checks that
+`unix-selfauth-helper` only authenticates its caller. Run them as a throwaway
+account, not your own, since the password goes in the environment:
+
+```sh
+# As the throwaway user, with the policy (and on FreeBSD the helper) installed.
+# A second account with the same password makes the other-user test strict.
+SHOESTRING_LOCK_TEST_PASSWORD=<its password> \
+SHOESTRING_LOCK_TEST_OTHER_USER=<second account> \
+    cargo test -p shoestring-lock -- --ignored pam::
+```
+
 ### WLCS conformance
 
 [WLCS](https://github.com/canonical/wlcs) (the Wayland Conformance Test
