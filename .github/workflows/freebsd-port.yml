@@ -54,6 +54,7 @@ jobs:
                packaging/freebsd/pkg-descr \
                packaging/freebsd/pkg-plist \
                /usr/ports/x11-wm/shoestring-wm/
+            cp -R packaging/freebsd/files /usr/ports/x11-wm/shoestring-wm/
             cd /usr/ports/x11-wm/shoestring-wm
             # Regenerate distinfo for the exact commit under test (codeload
             # serves any pushed commit), so portlint's distfile-checksum check

@@ -235,15 +235,15 @@ jobs:
   # docs/install.rst.
   #
   # The two PipeWire-linked crates (xdg-desktop-portal-shoestring and
-  # shoestring-mediad) are EXCLUDED here: on FreeBSD they're the optional
-  # SCREENCAST component of the port (packaging/freebsd gates them behind a port
-  # option, not built by default), and FreeBSD isn't on the screen-sharing /
-  # media-privacy critical path. Their pipewire-sys/libspa-sys bindgen also
-  # doesn't resolve cleanly in this bare VM (the pipewire crate can't see
-  # pw_init). The real FreeBSD build of both is validated by the port via
-  # poudriere + manual checks on a FreeBSD machine, not this gate. Everything
-  # else (WM tty backend + every other helper) compiles, so nothing else is
-  # feature-gated out.
+  # shoestring-mediad) are EXCLUDED here. FreeBSD's pipewire package renames
+  # pw_init/pw_deinit to pipewire_init/pipewire_deinit, so the unpatched
+  # pipewire crate does not compile against it. The port fixes that with
+  # packaging/freebsd/files/patch-pipewire_init and builds both crates under
+  # its SCREENCAST option (on by default); a plain cargo build like this one
+  # has no way to apply that patch. The port build is checked by hand on a
+  # FreeBSD machine (make stage && make check-plist), not by this gate.
+  # Everything else (WM tty backend + every other helper) compiles, so
+  # nothing else is feature-gated out.
   check-freebsd:
     runs-on: ubuntu-24.04
 

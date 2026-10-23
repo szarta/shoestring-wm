@@ -1,4 +1,5 @@
 bin/shoestring-bar
+bin/shoestring-clipboard
 bin/shoestring-confirm
 bin/shoestring-ctl
 bin/shoestring-kill
@@ -6,6 +7,8 @@ bin/shoestring-lock
 bin/shoestring-menu
 bin/shoestring-notify
 bin/shoestring-region
+bin/shoestring-remote-client
+bin/shoestring-remote-server
 bin/shoestring-screenshot
 bin/shoestring-tasks
 bin/shoestring-wm

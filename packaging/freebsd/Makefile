@@ -35,11 +35,14 @@ USE_GITHUB=	yes
 GH_ACCOUNT=	szarta
 USE_GL=		egl gbm
 
-# Build all eleven workspace binaries: the compositor (root crate) plus the
-# ten helper crates. The remaining members (config, ipc) are libraries
-# and produce no binary, so they are not listed here.
+# Build all fourteen workspace binaries that need no optional library: the
+# compositor (root crate) plus thirteen helper crates. The two that link
+# PipeWire are added by the SCREENCAST option below. The remaining members
+# (config, ipc, remote) are libraries and produce no binary, so they are
+# not listed here.
 CARGO_INSTALL_PATH=	. \
 			crates/shoestring-bar \
+			crates/shoestring-clipboard \
 			crates/shoestring-confirm \
 			crates/shoestring-ctl \
 			crates/shoestring-tasks \
@@ -48,6 +51,8 @@ CARGO_INSTALL_PATH=	. \
 			crates/shoestring-menu \
 			crates/shoestring-notify \
 			crates/shoestring-region \
+			crates/shoestring-remote-client \
+			crates/shoestring-remote-server \
 			crates/shoestring-screenshot
 
 OPTIONS_DEFINE=		DOCS XWAYLAND SCREENCAST
