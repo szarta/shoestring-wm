@@ -1474,16 +1474,44 @@ fn font_rank(path: &Path) -> u8 {
     }
 }
 
+/// The machine's name for the prompt title. gethostname(3) works everywhere;
+/// `/etc/hostname` is a fallback only (FreeBSD keeps the name in rc.conf and
+/// has no such file).
 fn read_hostname() -> String {
-    fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
+    system_hostname()
+        .or_else(|| {
+            fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "host".into())
+}
+
+fn system_hostname() -> Option<String> {
+    // 256 covers both HOST_NAME_MAX (64 on Linux) and MAXHOSTNAMELEN (256 on
+    // FreeBSD). Passing one byte less keeps a NUL at the end even if the name
+    // were truncated, where POSIX leaves termination unspecified.
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    let name = String::from_utf8_lossy(&buf[..len]).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostname_comes_from_the_system() {
+        let name = system_hostname().expect("gethostname");
+        assert!(!name.is_empty() && !name.contains('\0'), "{name:?}");
+        assert_eq!(read_hostname(), name);
+    }
 
     #[test]
     fn font_rank_prefers_upright_sans() {
