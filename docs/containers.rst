@@ -102,7 +102,9 @@ Who can connect
 The server accepts a connection only from a process running as the container
 user (uid 1000), and its socket is mode 0600 in a 0700 directory.
 ``--userns=keep-id:uid=1000,gid=1000`` maps your host user to that uid, so you
-can connect and other host users can't. The bind mount carries only the
+can connect and other host users can't. Without that mapping the mounted
+directory isn't owned by the container user, and the container stops at
+startup with an error that names the fix. The bind mount carries only the
 ``remote/`` directory, so the WM's own IPC socket stays inside the container.
 
 - ``:Z`` relabels the directory for SELinux; leave it off where SELinux isn't

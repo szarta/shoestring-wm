@@ -27,8 +27,17 @@ if [ -n "${SHOESTRING_REMOTE_TCP:-}" ]; then
     unset SHOESTRING_REMOTE_SOCKET
     log "WARN: remote server on TCP $SHOESTRING_REMOTE_TCP: nothing checks who connects"
 elif [ -n "${SHOESTRING_REMOTE_SOCKET:-}" ]; then
-    mkdir -p "$(dirname "$SHOESTRING_REMOTE_SOCKET")"
-    chmod 700 "$(dirname "$SHOESTRING_REMOTE_SOCKET")"
+    REMOTE_DIR=$(dirname "$SHOESTRING_REMOTE_SOCKET")
+    mkdir -p "$REMOTE_DIR"
+    # A bind mount owned by someone else means the host user isn't mapped to
+    # this container's user, so the host couldn't use the socket anyway. Say
+    # so, rather than fail on chmod with no hint.
+    if [ ! -O "$REMOTE_DIR" ]; then
+        log "ERROR: $REMOTE_DIR is owned by uid $(stat -c %u "$REMOTE_DIR"), not this container's user (uid $(id -u)), so the remote socket can't be made private to you."
+        log "Map your host user to uid $(id -u): with podman, add --userns=keep-id:uid=$(id -u),gid=$(id -g); with docker, run as host uid $(id -u). See docs/containers.rst."
+        exit 1
+    fi
+    chmod 700 "$REMOTE_DIR"
 fi
 if [ -n "${SHOESTRING_REMOTE_BIND:-}${SHOESTRING_REMOTE_PORT:-}" ]; then
     log "WARN: SHOESTRING_REMOTE_BIND/PORT are no longer supported (the remote server will refuse to start); use SHOESTRING_REMOTE_TCP=ADDR:PORT"
