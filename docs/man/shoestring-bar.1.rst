@@ -34,7 +34,9 @@ Environment
     Path to a TTF file overriding the bundled font search. The default
     search picks the first match from a hard-coded list of common
     Debian/Arch/Fedora/FreeBSD sans-serif paths (``DejaVuSans.ttf``,
-    ``LiberationSans-Regular.ttf``, ``NotoSans-Regular.ttf``).
+    ``LiberationSans-Regular.ttf``, ``NotoSans-Regular.ttf``), then any
+    ``.ttf``/``.otf`` under ``/usr/share/fonts``, ``/usr/local/share/fonts``
+    and the user's font directories (an upright sans preferred).
 
 ``RUST_LOG``
     ``tracing_subscriber`` filter; default ``info``.

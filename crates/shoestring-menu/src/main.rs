@@ -21,7 +21,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use memmap2::MmapMut;
 use shoestring_ipc::WindowSummary;
 use tracing_subscriber::EnvFilter;
@@ -79,19 +79,6 @@ const PADDING_X: i32 = 8;
 /// Prefix drawn before the user's query — gives a visual hint that this is
 /// an input field, mirroring dmenu's "$ " prompt.
 const PROMPT: &str = "> ";
-
-/// Same font candidates list as the bar. The two binaries will eventually
-/// share a tiny crate if a third project needs them too.
-const FONT_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
-    "/usr/local/share/fonts/liberation-fonts-ttf/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -211,7 +198,7 @@ fn main() -> Result<()> {
     };
     let mode = cli.mode;
 
-    let font = load_font().context("could not load any system font")?;
+    let font = shoestring_font::load(None, "", Some("SHOESTRING_MENU_FONT"))?;
 
     let conn =
         Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
@@ -607,23 +594,6 @@ fn spawn_detached(argv: &[&str]) -> Result<()> {
     }
     cmd.spawn().with_context(|| format!("spawn {prog}"))?;
     Ok(())
-}
-
-fn load_font() -> Result<Font> {
-    if let Some(path) = std::env::var_os("SHOESTRING_MENU_FONT") {
-        let bytes = fs::read(&path).context("$SHOESTRING_MENU_FONT unreadable")?;
-        return Font::from_bytes(bytes, FontSettings::default())
-            .map_err(|e| anyhow::anyhow!("font parse: {e}"));
-    }
-    for path in FONT_CANDIDATES {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            let bytes = fs::read(&p)?;
-            return Font::from_bytes(bytes, FontSettings::default())
-                .map_err(|e| anyhow::anyhow!("font parse: {e}"));
-        }
-    }
-    anyhow::bail!("no font found in candidates: {FONT_CANDIDATES:?}")
 }
 
 // ---- Drawing -------------------------------------------------------------

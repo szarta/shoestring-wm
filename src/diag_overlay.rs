@@ -21,7 +21,7 @@
 
 use std::time::{Duration, Instant};
 
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use shoestring_ipc::MetricValue;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::{
@@ -42,20 +42,6 @@ const MARGIN: i32 = 8;
 /// most once per `[diagnostics].sample_interval_ms` (default 1s), so a few
 /// hertz keeps the readout live without re-rasterizing every frame.
 const REFRESH: Duration = Duration::from_millis(200);
-
-/// Candidate system fonts, tried in order after `$SHOESTRING_WM_FONT`. Mirrors
-/// the list the client crates carry so the overlay finds a font wherever they
-/// do (Linux distros + FreeBSD pkg paths).
-const FONT_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
-    "/usr/local/share/fonts/liberation-fonts-ttf/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
-];
 
 /// Persistent state for the diagnostics overlay. Default is "off, nothing
 /// loaded" — costs nothing until first toggled on.
@@ -377,18 +363,19 @@ fn premultiply_to_bgra(buf: &mut [u8]) {
     }
 }
 
-/// Resolve a usable font: `$SHOESTRING_WM_FONT` first, then [`FONT_CANDIDATES`].
+/// Resolve a usable font: `$SHOESTRING_WM_FONT` first, then the shared
+/// system search ([`shoestring_font::find_system_font`]). Unlike the helpers,
+/// an unusable `$SHOESTRING_WM_FONT` falls through to the search (and is
+/// logged), since the overlay is diagnostic and shouldn't go blank over it.
 fn load_font() -> Option<Font> {
-    let try_path = |p: &str| -> Option<Font> {
-        let bytes = std::fs::read(p).ok()?;
-        Font::from_bytes(bytes, FontSettings::default()).ok()
-    };
-    if let Some(p) = std::env::var_os("SHOESTRING_WM_FONT") {
-        if let Some(f) = p.to_str().and_then(try_path) {
-            return Some(f);
+    match shoestring_font::load(None, "", Some("SHOESTRING_WM_FONT")) {
+        Ok(font) => Some(font),
+        Err(e @ shoestring_font::Error::Named { .. }) => {
+            tracing::warn!(error = %e, "diagnostics overlay: ignoring $SHOESTRING_WM_FONT");
+            shoestring_font::find_system_font().map(|(_, font)| font)
         }
+        Err(shoestring_font::Error::NotFound { .. }) => None,
     }
-    FONT_CANDIDATES.iter().copied().find_map(try_path)
 }
 
 impl crate::state::ShoestringWm {

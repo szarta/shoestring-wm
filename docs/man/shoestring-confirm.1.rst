@@ -33,7 +33,8 @@ Environment
 **SHOESTRING_CONFIRM_FONT**
     Path to a TrueType/OpenType font for the prompt text. When unset a
     list of common system font paths (DejaVu Sans, Liberation Sans, Noto
-    Sans) is searched.
+    Sans) is searched, then any ``.ttf``/``.otf`` under the system and
+    user font directories (an upright sans preferred).
 
 **WAYLAND_DISPLAY**
     The Wayland display to connect to.

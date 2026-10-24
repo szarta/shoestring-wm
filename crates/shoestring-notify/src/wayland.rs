@@ -8,13 +8,11 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::HashMap;
-use std::fs;
 use std::io::Write;
 use std::os::fd::AsFd;
-use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use memmap2::MmapMut;
 use rustbus::message_builder::MarshalledMessage;
 use rustbus::RpcConn;
@@ -37,7 +35,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
 };
 
-use crate::config::{Config, Position, FONT_CANDIDATES};
+use crate::config::{Config, Position};
 use crate::dbus_iface::notification_closed_signal;
 use crate::render;
 use crate::state::{CloseReason, Queue, Urgency};
@@ -94,7 +92,11 @@ pub struct State {
 }
 
 pub fn init(cfg: Config) -> Result<(Connection, EventQueue<State>, QueueHandle<State>, State)> {
-    let font = load_font(cfg.font.as_deref()).context("could not load any system font")?;
+    let font = shoestring_font::load(
+        cfg.font.as_deref(),
+        "config font",
+        Some("SHOESTRING_NOTIFY_FONT"),
+    )?;
 
     let conn =
         Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
@@ -382,29 +384,6 @@ fn send_message(rpc: &mut RpcConn, msg: &mut MarshalledMessage) -> Result<()> {
         .map_err(force_finish_on_error)
         .map_err(|e| anyhow!("write message: {e:?}"))?;
     Ok(())
-}
-
-fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
-    if let Some(p) = cfg_path {
-        let bytes =
-            fs::read(p).with_context(|| format!("config font: cannot read {}", p.display()))?;
-        return Font::from_bytes(bytes, FontSettings::default())
-            .map_err(|e| anyhow!("font parse: {e}"));
-    }
-    if let Some(path) = std::env::var_os("SHOESTRING_NOTIFY_FONT") {
-        let bytes = fs::read(&path).context("$SHOESTRING_NOTIFY_FONT unreadable")?;
-        return Font::from_bytes(bytes, FontSettings::default())
-            .map_err(|e| anyhow!("font parse: {e}"));
-    }
-    for path in FONT_CANDIDATES {
-        let p = std::path::PathBuf::from(path);
-        if p.exists() {
-            let bytes = fs::read(&p)?;
-            return Font::from_bytes(bytes, FontSettings::default())
-                .map_err(|e| anyhow!("font parse: {e}"));
-        }
-    }
-    Err(anyhow!("no font found in candidates: {FONT_CANDIDATES:?}"))
 }
 
 // ---- Wayland dispatch impls ---------------------------------------------

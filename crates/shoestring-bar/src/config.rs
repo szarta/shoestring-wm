@@ -61,7 +61,7 @@ pub struct Config {
     pub background: u32,
     pub foreground: u32,
     /// Explicit font path from config. If `None`, fall back to
-    /// $SHOESTRING_BAR_FONT and then the built-in candidate list.
+    /// $SHOESTRING_BAR_FONT and then the shared system font search.
     pub font: Option<PathBuf>,
     pub font_size: f32,
     pub clock_format: String,
@@ -269,8 +269,8 @@ background  = \"#222222\"
 foreground  = \"#ffffff\"
 
 # Path to a TTF/OTF font. If unset, the bar honors $SHOESTRING_BAR_FONT,
-# then falls back to a built-in candidate list (DejaVu / Liberation /
-# Noto, in common distro install locations).
+# then falls back to DejaVu / Liberation / Noto in common distro install
+# locations, then to any .ttf/.otf under the system font directories.
 # font      = \"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf\"
 
 # Font size in pixels. Picked to leave a couple of px of padding inside

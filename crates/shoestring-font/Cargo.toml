@@ -1,0 +1,12 @@
+[package]
+name = "shoestring-font"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Font discovery shared by shoestring-wm and its helpers."
+
+[dependencies]
+fontdue = "0.9"
+tracing = "0.1"

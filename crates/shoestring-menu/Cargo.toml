@@ -21,6 +21,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 # Software font rasterizer (pure Rust, no fontconfig/freetype). Matches bar.
 fontdue = "0.9"
+shoestring-font = { path = "../shoestring-font" }
 
 # wl_shm pool: mmap an anon tempfile, hand the fd to the compositor.
 memmap2 = "0.9"

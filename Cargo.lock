@@ -2491,6 +2491,7 @@ dependencies = [
  "rustbus",
  "serde",
  "serde_json",
+ "shoestring-font",
  "shoestring-ipc",
  "tempfile",
  "toml 0.8.23",
@@ -2531,6 +2532,7 @@ dependencies = [
  "fontdue",
  "libc",
  "memmap2",
+ "shoestring-font",
  "tempfile",
  "wayland-client",
  "wayland-protocols",
@@ -2547,6 +2549,14 @@ dependencies = [
  "serde",
  "serde_json",
  "shoestring-ipc",
+]
+
+[[package]]
+name = "shoestring-font"
+version = "0.9.1"
+dependencies = [
+ "fontdue",
+ "tracing",
 ]
 
 [[package]]
@@ -2575,6 +2585,7 @@ dependencies = [
  "fontdue",
  "libc",
  "memmap2",
+ "shoestring-font",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -2607,6 +2618,7 @@ dependencies = [
  "libc",
  "memmap2",
  "serde_json",
+ "shoestring-font",
  "shoestring-ipc",
  "tempfile",
  "tracing",
@@ -2627,6 +2639,7 @@ dependencies = [
  "memmap2",
  "rustbus",
  "serde",
+ "shoestring-font",
  "tempfile",
  "toml 0.8.23",
  "tracing",
@@ -2729,6 +2742,7 @@ dependencies = [
  "resvg",
  "serde_json",
  "shoestring-config",
+ "shoestring-font",
  "shoestring-ipc",
  "shoestring-remote",
  "smithay",

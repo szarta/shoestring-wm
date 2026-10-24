@@ -16,7 +16,8 @@
 //! ```
 //!
 //! Font resolution mirrors `shoestring-bar`: `$SHOESTRING_CONFIRM_FONT`
-//! first, then a small list of common system sans-serif paths.
+//! first, then the shared search in `shoestring-font` (common system
+//! sans-serif paths, then any font under the font directories).
 
 // Drawing primitives take (mmap, w, h, x, y, w, h, color) in positional
 // form — same pattern shoestring-bar uses; wrapping each in a struct
@@ -24,14 +25,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::{
-    env, fs,
+    env,
     os::fd::{AsFd, AsRawFd},
-    path::PathBuf,
     process::ExitCode,
 };
 
 use anyhow::{anyhow, Context, Result};
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use memmap2::MmapMut;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
@@ -85,19 +85,6 @@ const HINT_COLOR: u32 = 0xFFAAAAAA;
 const PROMPT_SIZE_PX: f32 = 18.0;
 const HINT_SIZE_PX: f32 = 14.0;
 const HINT_LINE: &str = "[Enter] confirm    [Esc] cancel";
-
-/// Font search paths. Matches shoestring-bar's set so the two binaries
-/// agree on which font shows up on a given distro.
-const FONT_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
-    "/usr/local/share/fonts/liberation-fonts-ttf/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
-];
 
 struct OutputEntry {
     output: WlOutput,
@@ -163,38 +150,9 @@ fn parse_args() -> Result<String> {
     Ok(prompt)
 }
 
-fn resolve_font_path() -> Result<PathBuf> {
-    if let Ok(p) = env::var("SHOESTRING_CONFIRM_FONT") {
-        let path = PathBuf::from(p);
-        if path.exists() {
-            return Ok(path);
-        }
-        return Err(anyhow!(
-            "SHOESTRING_CONFIRM_FONT points at {} but it doesn't exist",
-            path.display()
-        ));
-    }
-    for cand in FONT_CANDIDATES {
-        let p = PathBuf::from(cand);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    Err(anyhow!(
-        "no system font found — set SHOESTRING_CONFIRM_FONT to a .ttf/.otf"
-    ))
-}
-
-fn load_font() -> Result<Font> {
-    let path = resolve_font_path()?;
-    let bytes = fs::read(&path).with_context(|| format!("read font {}", path.display()))?;
-    Font::from_bytes(bytes, FontSettings::default())
-        .map_err(|e| anyhow!("parse font {}: {e}", path.display()))
-}
-
 fn run() -> Result<u8> {
     let prompt = parse_args()?;
-    let font = load_font()?;
+    let font = shoestring_font::load(None, "", Some("SHOESTRING_CONFIRM_FONT"))?;
 
     let conn = Connection::connect_to_env().context("connect WAYLAND_DISPLAY")?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn).context("registry init")?;

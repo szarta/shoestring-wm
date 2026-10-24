@@ -130,10 +130,18 @@ flowchart TD
     ipc --> mediad["shoestring-mediad"]
     config --> portal["xdg-desktop-portal-shoestring"]
 
-    standalone["confirm · region · screenshot<br/>lock · notify<br/><i>wayland-client only, no shared crate</i>"]
+    font["shoestring-font<br/><i>font discovery · fontdue</i>"]
+    font --> wm
+    font --> bar
+    font --> menu
+    font --> textonly["confirm · lock · notify"]
+
+    standalone["region · screenshot<br/><i>wayland-client only, no shared crate</i>"]
 ```
 
-(Arrows read *"is used by"*. `wlcs-shoestring`, the WLCS test plugin, is
+(Arrows read *"is used by"*. `shoestring-font` is a third, smaller anchor:
+the font search every binary that draws text shares, so a font found by one
+is found by all. `wlcs-shoestring`, the WLCS test plugin, is
 excluded from the workspace and depends on `shoestring-wm` itself.)
 
 ### Internal event & render loop
@@ -256,6 +264,7 @@ shoestring-wm/                  (workspace root + the WM binary)
 └── crates/
     ├── shoestring-ipc/             (wire types — serde only)
     ├── shoestring-config/          (config types — serde only)
+    ├── shoestring-font/            (font discovery — fontdue only)
     ├── shoestring-ctl/             (reference IPC client)
     ├── shoestring-bar/             (status bar; Wayland + IPC)
     ├── shoestring-menu/            (launcher)

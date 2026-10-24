@@ -21,13 +21,12 @@ use std::{
     ffi::CString,
     fs,
     os::fd::{AsFd, AsRawFd},
-    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use config::{default_config_path, default_config_toml, Config, Position};
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use memmap2::MmapMut;
 use shoestring_ipc::Event as IpcEvent;
 use shoestring_ipc::MediaState;
@@ -113,27 +112,6 @@ const WS_LIST_GAP: i32 = 12;
 /// Pixel gap between adjacent window-list entries (separator-less; the
 /// focused-entry highlight is the visual divider).
 const ENTRY_GAP: i32 = 12;
-
-/// Search paths for a default sans font. We deliberately don't pull in
-/// fontconfig — picking the first hit keeps the dep surface tiny. User
-/// override via $SHOESTRING_BAR_FONT is the universal escape hatch.
-const FONT_CANDIDATES: &[&str] = &[
-    // Debian / Ubuntu
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    // Arch / generic Linux
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    // Fedora / RHEL (the liberation package installs under
-    // `liberation-sans-fonts/`, verified on Fedora 44 — the bare
-    // `liberation-sans/` path below is older / other distros)
-    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-    "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    // FreeBSD (pkg install dejavu / liberation-fonts-ttf)
-    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
-    "/usr/local/share/fonts/liberation-fonts-ttf/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
-];
 
 struct State {
     cfg: Config,
@@ -463,7 +441,7 @@ fn run_session() -> Result<()> {
         }
     };
 
-    let font = load_font(cfg.font.as_deref()).context("could not load any system font")?;
+    let font = shoestring_font::load(cfg.font.as_deref(), "bar.font", Some("SHOESTRING_BAR_FONT"))?;
 
     let conn =
         Connection::connect_to_env().context("connect to wayland (is WAYLAND_DISPLAY set?)")?;
@@ -1166,32 +1144,6 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
         | IpcEvent::RemoteClipboard { .. }
         | IpcEvent::Metrics { .. } => {}
     }
-}
-
-/// Resolve a font in priority order: explicit config path, then
-/// $SHOESTRING_BAR_FONT, then the built-in candidate list. Returning the
-/// first one that successfully loads.
-fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
-    if let Some(p) = cfg_path {
-        let bytes =
-            fs::read(p).with_context(|| format!("bar.font: cannot read {}", p.display()))?;
-        return Font::from_bytes(bytes, FontSettings::default())
-            .map_err(|e| anyhow::anyhow!("font parse: {e}"));
-    }
-    if let Some(path) = std::env::var_os("SHOESTRING_BAR_FONT") {
-        let bytes = fs::read(&path).context("$SHOESTRING_BAR_FONT unreadable")?;
-        return Font::from_bytes(bytes, FontSettings::default())
-            .map_err(|e| anyhow::anyhow!("font parse: {e}"));
-    }
-    for path in FONT_CANDIDATES {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            let bytes = fs::read(&p)?;
-            return Font::from_bytes(bytes, FontSettings::default())
-                .map_err(|e| anyhow::anyhow!("font parse: {e}"));
-        }
-    }
-    anyhow::bail!("no font found in candidates: {FONT_CANDIDATES:?}")
 }
 
 // ---- Drawing -------------------------------------------------------------

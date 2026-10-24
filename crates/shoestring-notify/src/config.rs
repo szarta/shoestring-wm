@@ -56,7 +56,7 @@ pub struct Config {
     /// Padding inside each toast, all four sides.
     pub padding: u32,
     /// Optional font override. `None` falls through to
-    /// $SHOESTRING_NOTIFY_FONT then the built-in candidate list.
+    /// $SHOESTRING_NOTIFY_FONT then the shared system font search.
     pub font: Option<PathBuf>,
     pub summary_size: f32,
     pub body_size: f32,
@@ -227,8 +227,8 @@ gap                = 8
 padding            = 12
 
 # Path to a TTF/OTF font. If unset, the daemon honors
-# $SHOESTRING_NOTIFY_FONT then a built-in candidate list (DejaVu /
-# Liberation / Noto in common distro install locations).
+# $SHOESTRING_NOTIFY_FONT, then DejaVu / Liberation / Noto in common distro
+# install locations, then any .ttf/.otf under the system font directories.
 # font             = \"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf\"
 
 summary_size       = 15.0
@@ -260,20 +260,6 @@ pub fn parse_color(s: &str) -> Result<u32> {
     };
     Ok(argb)
 }
-
-/// Font search order: explicit config → $SHOESTRING_NOTIFY_FONT →
-/// built-in candidate list. Mirrors shoestring-bar's `FONT_CANDIDATES`
-/// so the same paths work on the same distros.
-pub const FONT_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
-    "/usr/local/share/fonts/liberation-fonts-ttf/LiberationSans-Regular.ttf",
-    "/usr/local/share/fonts/noto/NotoSans-Regular.ttf",
-];
 
 #[cfg(test)]
 mod tests {

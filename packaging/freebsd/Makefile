@@ -42,7 +42,7 @@ USE_GL=		egl gbm
 # Build all fourteen workspace binaries that need no optional library: the
 # compositor (root crate) plus thirteen helper crates. The two that link
 # PipeWire are added by the SCREENCAST option below. The remaining members
-# (config, ipc, remote) are libraries and produce no binary, so they are
+# (config, font, ipc, remote) are libraries and produce no binary, so they are
 # not listed here.
 CARGO_INSTALL_PATH=	. \
 			crates/shoestring-bar \

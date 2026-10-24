@@ -239,9 +239,10 @@ the workspace handles with a patched ``pipewire-sys`` under ``third_party/``,
 so a plain ``cargo build --workspace`` works. Omit ``pipewire`` only if you
 ``--exclude xdg-desktop-portal-shoestring --exclude shoestring-mediad``.)
 
-At runtime the bar, menu, notifications, and screen locker also need a font,
-and a stock FreeBSD install has none. Without one the locker still locks, but
-shows no prompt text, and the other helpers fail to start::
+At runtime the bar, menu, notifications, and screen locker also need a font
+(any ``.ttf``/``.otf`` under ``/usr/local/share/fonts`` will do; DejaVu is
+preferred), and a stock FreeBSD install has none. Without one the locker
+still locks, but shows no prompt text, and the other helpers fail to start::
 
     pkg install dejavu
 

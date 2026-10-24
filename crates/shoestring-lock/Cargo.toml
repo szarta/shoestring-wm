@@ -25,6 +25,7 @@ tempfile = "3"
 
 # Software-rasterized text for the prompt + status line.
 fontdue = "0.9"
+shoestring-font = { path = "../shoestring-font" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

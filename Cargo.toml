@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/shoestring-ipc",
     "crates/shoestring-config",
+    "crates/shoestring-font",
     "crates/shoestring-bar",
     "crates/shoestring-clipboard",
     "crates/shoestring-confirm",
@@ -99,6 +100,7 @@ profile-with-tracy = ["dep:tracing-tracy"]
 [dependencies]
 shoestring-ipc = { path = "crates/shoestring-ipc" }
 shoestring-config = { path = "crates/shoestring-config" }
+shoestring-font = { path = "crates/shoestring-font" }
 shoestring-remote = { path = "crates/shoestring-remote" }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }

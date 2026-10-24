@@ -29,7 +29,7 @@ version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
 out="target/sbom"
 
 # The crates whose binaries the packages install: one SBOM each. The library
-# crates (shoestring-config, -ipc, -remote) appear inside these.
+# crates (shoestring-config, -font, -ipc, -remote) appear inside these.
 binary_crates=(
     shoestring-wm
     shoestring-bar

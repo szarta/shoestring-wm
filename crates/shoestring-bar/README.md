@@ -83,7 +83,8 @@ entry; FreeBSD reads `hw.acpi.battery.{life,state,units}` via
 the indicator silently.
 
 Font resolution order: `[bar].font` → `$SHOESTRING_BAR_FONT` → built-in
-candidate paths.
+candidate paths → any `.ttf`/`.otf` under the system and user font
+directories (upright regular sans first).
 
 ## Status
 

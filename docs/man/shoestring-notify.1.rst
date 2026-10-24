@@ -98,7 +98,8 @@ Environment
 
 **SHOESTRING_NOTIFY_FONT**
     Font path, consulted after the config ``font`` key but before the
-    built-in candidates.
+    built-in search (common DejaVu/Liberation/Noto paths, then any
+    ``.ttf``/``.otf`` under the system and user font directories).
 
 **RUST_LOG**
     Tracing filter for diagnostic logging. Default ``info``.

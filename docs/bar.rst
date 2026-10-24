@@ -67,12 +67,23 @@ Environment
 Font discovery
 --------------
 
-To stay free of fontconfig, the bar walks a hard-coded list of common
-sans-serif paths and uses the first one that exists. The list covers
+To stay free of fontconfig, the bar first tries a hard-coded list of
+common sans-serif paths and uses the first one that loads. The list covers
 Debian/Ubuntu, Arch, Fedora/RHEL and FreeBSD defaults
 (``DejaVuSans.ttf``, ``LiberationSans-Regular.ttf``,
-``NotoSans-Regular.ttf``). Use ``SHOESTRING_BAR_FONT`` (or the
-``[bar].font`` config key) to point at any other TTF.
+``NotoSans-Regular.ttf``). If none of those is installed, it scans
+``/usr/share/fonts``, ``/usr/local/share/fonts`` and the user's font
+directories (``$XDG_DATA_HOME/fonts`` or ``~/.local/share/fonts``, and
+``~/.fonts``) for any ``.ttf``/``.otf``, preferring an upright regular sans
+over bold, italic, monospace or symbol faces. Use ``SHOESTRING_BAR_FONT``
+(or the ``[bar].font`` config key) to point at any other TTF; a font named
+there must load, or the bar refuses to start rather than pick another.
+
+The menu, notifications, confirm dialog, screen locker and the WM's
+diagnostics overlay search the same way, each after its own override
+(``SHOESTRING_MENU_FONT``, ``SHOESTRING_NOTIFY_FONT`` or the notify
+``font`` key, ``SHOESTRING_CONFIRM_FONT``, ``shoestring-lock --font`` or
+``SHOESTRING_LOCK_FONT``, and ``SHOESTRING_WM_FONT``).
 
 .. _bar-configuration:
 
@@ -118,7 +129,8 @@ passed. The written contents match the schema below.
 
 Colors are parsed as hex; an opaque alpha is assumed unless you spell out
 all eight digits. Font resolution order is ``[bar].font`` →
-``$SHOESTRING_BAR_FONT`` → built-in candidate paths.
+``$SHOESTRING_BAR_FONT`` → built-in candidate paths → a scan of the font
+directories (see `Font discovery`_).
 
 The clock format is passed straight to ``libc::strftime``; the two
 named aliases above are the only special-cased values.
