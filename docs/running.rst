@@ -16,7 +16,7 @@ from the environment; all can be forced with ``--backend``.
               Never auto-detected - request it explicitly with
               ``--backend headless``. The foundation for remote-desktop
               *serve mode*, and useful on its own for CI, the WLCS
-              harness, and automation. Included in the default build (it
+              harness, and automation (see :doc:`app-testing`). Included in the default build (it
               adds no dependencies the ``tty`` backend does not already
               pull), so a stock ``cargo install`` / package has it; only a
               ``--no-default-features`` build without ``headless`` omits it.
@@ -168,9 +168,9 @@ Command-line flags
     ``--backend headless``).
 
 ``-C, --command CMD``
-    Spawn ``CMD`` once the compositor is up. Defaults to
-    ``weston-terminal``. The command is split on whitespace; quoting is
-    not currently supported.
+    Spawn ``CMD`` once the compositor is up, after ``[general] autostart``.
+    Nothing is spawned without it. The command is split on whitespace;
+    quoting is not currently supported.
 
 ``--output-size WxH``
     Headless backend only: fix the virtual output's mode size in pixels

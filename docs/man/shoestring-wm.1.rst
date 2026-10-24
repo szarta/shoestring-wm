@@ -40,8 +40,8 @@ Options
     *winit* otherwise.
 
 **-C**, **--command** *CMD*
-    Spawn *CMD* once the compositor is ready. Defaults to
-    ``weston-terminal``. Split on whitespace; no shell quoting.
+    Spawn *CMD* once the compositor is ready, after ``[general] autostart``.
+    Nothing is spawned without it. Split on whitespace; no shell quoting.
 
 **--write-default-config**
     Write the bundled default config to the target path (resolved as

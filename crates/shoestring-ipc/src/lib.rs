@@ -750,8 +750,9 @@ pub enum Request {
     /// act the instant it appears. If the condition already holds when the
     /// request arrives (a match is already mapped; or, for `unmap`, none
     /// matches) the reply is immediate. A map wait resolves when the window is
-    /// actually usable — for wayland clients that is the first commit carrying
-    /// a real title/app_id, not the bare toplevel creation.
+    /// actually usable: it has its first frame and its initial placement, so
+    /// its geometry is where it is drawn. A wayland toplevel exists, and often
+    /// has its title, before either.
     ///
     /// `timeout_ms` bounds the wait; on expiry the reply carries
     /// `timed_out: true` and no window. Omit it to wait forever (until

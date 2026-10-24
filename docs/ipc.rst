@@ -403,9 +403,11 @@ Each request is a JSON object with a ``type`` discriminator:
        exactly like ``find_windows`` — independent, AND-ed, an unset filter
        matches anything. The synchronous replacement for sleep-polling
        ``windows`` in a launch script. If the condition already holds the reply
-       is immediate; a map wait resolves only once the window is actually usable
-       (for wayland clients that is the commit carrying a real title/app_id, not
-       the bare toplevel creation). ``timeout_ms`` (optional) bounds the wait; on
+       is immediate; a map wait resolves only once the window is actually usable:
+       it has its first frame and its initial placement, so the reported
+       geometry is where it is drawn and a click inside it lands. (A wayland
+       toplevel exists, and often has its title, before either.) See
+       :doc:`app-testing`. ``timeout_ms`` (optional) bounds the wait; on
        expiry the reply carries ``"timed_out": true`` and no window. Omit it to
        wait forever. Read-only and **not** gated by automation.
    * - ``{"type": "wait_ready", "xwayland": false, "timeout_ms": null}``
@@ -1519,6 +1521,10 @@ Unreleased
   locked; open ``capture_window`` streams pause until unlock.
 - An ``error`` starting ``request too large`` for a request line over
   256 MiB.
+- ``wait_window`` resolves a map wait once the window has its first frame
+  and its initial placement. It used to resolve as soon as a wayland window
+  had a matching title, which a toolkit sets before drawing, and could reply
+  with a 0×0 window not yet in its place.
 
 0.7.0
 ~~~~~

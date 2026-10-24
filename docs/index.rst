@@ -28,6 +28,7 @@ This is the user guide. For source-level architecture notes see
    containers
    remote
    ipc
+   app-testing
 
 .. toctree::
    :maxdepth: 1

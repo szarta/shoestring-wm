@@ -55,6 +55,34 @@ fn e2e_headless_renders_and_delivers_input() {
     wm.wait_pixel(centre, rgb(KEYED), "after a key");
 }
 
+/// A `wait_window` sent before the client starts resolves only once the
+/// window has its first buffer and its place, not on the earlier commit that
+/// set its title, so a click at the reported geometry lands on the window.
+#[test]
+#[ignore]
+fn e2e_wait_window_returns_a_placed_window() {
+    let wm = Wm::start();
+    let mut wait = wm.connect_ipc();
+    let request =
+        json!({"type": "wait_window", "title": format!("^{TITLE}$"), "timeout_ms": 10_000});
+    writeln!(wait, "{request}").expect("write wait_window");
+
+    let _client = TestClient::map(&wm);
+    let reply = read_line(&mut wait);
+    assert_eq!(reply["timed_out"], false, "{reply}");
+    let g = &reply["window"]["geometry"];
+    assert_eq!(
+        (g["w"].as_u64(), g["h"].as_u64()),
+        (Some(WINDOW_W as u64), Some(WINDOW_H as u64)),
+        "wait_window resolved before the first buffer: {reply}"
+    );
+    let placed = wm.ipc_ok(json!({"type": "windows"}))["windows"][0]["geometry"].clone();
+    assert_eq!(
+        *g, placed,
+        "wait_window resolved before the window was placed"
+    );
+}
+
 /// A serve-mode viewer sees the output and drives the window with its input.
 #[test]
 #[ignore]

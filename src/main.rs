@@ -38,8 +38,8 @@ struct Cli {
     #[arg(short, long, value_enum)]
     backend: Option<BackendKind>,
 
-    /// Optional client command to spawn once the compositor is up.
-    /// Defaults to `weston-terminal` if available.
+    /// Optional client command to spawn once the compositor is up, after
+    /// `[general] autostart`. Nothing is spawned without it.
     #[arg(short = 'C', long = "command")]
     command: Option<String>,
 

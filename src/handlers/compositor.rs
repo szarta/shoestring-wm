@@ -167,6 +167,9 @@ impl CompositorHandler for ShoestringWm {
                     self.mark_window_capture_dirty(&window);
                 }
             }
+            // A window's first buffer and placement land on a commit, which
+            // is when a `wait_window` for it can resolve.
+            self.resolve_map_waiters();
         }
 
         // Catch a surface that maps (its first buffer commit) while an idle

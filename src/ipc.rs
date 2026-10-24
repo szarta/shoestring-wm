@@ -1824,6 +1824,30 @@ fn collect_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
         .collect()
 }
 
+/// The windows a `wait_window` map wait may resolve with: those that have
+/// their first buffer (a non-zero size) and their initial placement. A
+/// wayland toplevel is listed from creation, and a toolkit commits its title
+/// before any buffer, so without this a wait would hand back a 0×0 window
+/// that a click can't hit yet. One kept off the active workspace never gets
+/// the centering pass, so placement isn't awaited for it.
+fn ready_windows(state: &ShoestringWm) -> Vec<WindowSummary> {
+    let unready: HashSet<String> = state
+        .foreign_toplevels
+        .iter()
+        .filter(|(window, _)| {
+            let size = window.geometry().size;
+            let unplaced = state.pending_initial_center.contains(*window)
+                && state.space.element_location(window).is_some();
+            size.w <= 0 || size.h <= 0 || unplaced
+        })
+        .map(|(_, handle)| handle.identifier())
+        .collect();
+    collect_windows(state)
+        .into_iter()
+        .filter(|w| !unready.contains(&w.id))
+        .collect()
+}
+
 /// Resolve a foreign-toplevel identifier (as reported in [`WindowSummary::id`])
 /// to its [`Window`]. Iterates `foreign_toplevels`, which holds *every* window
 /// regardless of workspace or mapped state — so graft capture/injection can
@@ -2270,8 +2294,14 @@ impl ShoestringWm {
         };
 
         // Snapshot the windows matching right now. Borrows of the regexes end
-        // at `.collect()`, so they can move into the pending entry below.
-        let current: Vec<WindowSummary> = collect_windows(self)
+        // at `.collect()`, so they can move into the pending entry below. An
+        // unmap wait watches every listed match; a map wait only ready ones.
+        let listed = if unmap {
+            collect_windows(self)
+        } else {
+            ready_windows(self)
+        };
+        let current: Vec<WindowSummary> = listed
             .into_iter()
             .filter(|w| {
                 title_re.as_ref().is_none_or(|re| re.is_match(&w.title))
@@ -2454,13 +2484,15 @@ impl ShoestringWm {
     }
 
     /// Re-evaluate every `map` waiter against the current window set; resolve
-    /// (reply + close) any whose filter now matches a mapped window. Called on
-    /// every WindowOpened / WindowTitleChanged.
-    fn resolve_map_waiters(&mut self) {
+    /// (reply + close) any whose filter now matches a ready window (see
+    /// [`ready_windows`]). Called on every WindowOpened / WindowTitleChanged,
+    /// and after each window commit, which is where a window gets its first
+    /// buffer and placement.
+    pub(crate) fn resolve_map_waiters(&mut self) {
         if !self.pending_wait_windows.iter().any(|p| !p.unmap) {
             return;
         }
-        let current = collect_windows(self);
+        let current = ready_windows(self);
         let mut finished: Vec<(PendingWaitWindow, WindowSummary)> = Vec::new();
         let mut i = 0;
         while i < self.pending_wait_windows.len() {
