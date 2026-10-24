@@ -9,7 +9,8 @@ application-specific problem, please report it (see
 :ref:`reporting-compat` below) so it can be captured here.
 
 For *what protocols* the compositor implements (the capability list behind
-this compatibility), see :doc:`overview`. For tuning an individual app's
+this compatibility), see :doc:`overview`. For GPUs, monitors, suspend and
+other hardware, see :doc:`hardware`. For tuning an individual app's
 placement, see the window-rules section of :doc:`configuration`.
 
 Wayland-native applications

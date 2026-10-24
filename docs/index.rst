@@ -25,6 +25,7 @@ This is the user guide. For source-level architecture notes see
    bindings
    portals
    compatibility
+   hardware
    containers
    remote
    ipc
