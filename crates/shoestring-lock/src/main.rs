@@ -312,7 +312,8 @@ struct State {
     xkb_keymap: Option<xkb::Keymap>,
     xkb_state: Option<xkb::State>,
 
-    font: Font,
+    /// `None` when no font loaded: the lock still holds, without the prompt.
+    font: Option<Font>,
     font_size: f32,
     /// What the user has typed so far. Held in memory until verify;
     /// zeroed on each verify attempt.
@@ -348,7 +349,15 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let font = load_font(cli.font.as_deref())?;
+    // Lock even without a font: a lock screen with no prompt text beats
+    // leaving the session open. Typing and unlocking work the same.
+    let font = match load_font(cli.font.as_deref()) {
+        Ok(font) => Some(font),
+        Err(e) => {
+            tracing::warn!(error = %e, "no usable font; locking without the prompt text");
+            None
+        }
+    };
     let pam_service = cli
         .pam_service
         .unwrap_or_else(|| DEFAULT_PAM_SERVICE.to_string());
@@ -1101,8 +1110,8 @@ fn redraw(
         if let Some(anim) = entry.anim.as_ref() {
             draw_maze(&mut t, anim);
         }
-        if let Some(layout) = prompt.as_ref() {
-            draw_prompt(&mut t, &state.font, layout);
+        if let (Some(layout), Some(font)) = (prompt.as_ref(), state.font.as_ref()) {
+            draw_prompt(&mut t, font, layout);
         }
     }
     canvas.prompt_box = prompt.map(|l| l.bbox);
@@ -1129,7 +1138,8 @@ fn present_leftovers(state: &mut State, qh: &QueueHandle<State>) {
     }
 }
 
-/// Where the password prompt goes on output `idx`, or `None` while hidden.
+/// Where the password prompt goes on output `idx`, or `None` while hidden or
+/// when there is no font to draw it with.
 struct PromptLayout {
     lines: [String; 3],
     font_px: f32,
@@ -1143,6 +1153,7 @@ fn prompt_layout(state: &State, idx: usize) -> Option<PromptLayout> {
     if !state.prompt_visible {
         return None;
     }
+    let font = state.font.as_ref()?;
     let entry = &state.outputs[idx];
     let (w, h) = entry.size?;
     let scale = entry.scale;
@@ -1156,21 +1167,19 @@ fn prompt_layout(state: &State, idx: usize) -> Option<PromptLayout> {
     let prompt = format!("Password: {masked}");
     let lines = [title, prompt, state.status.clone()];
     let font_px = state.font_size * scale as f32;
-    let line_metrics =
-        state
-            .font
-            .horizontal_line_metrics(font_px)
-            .unwrap_or(fontdue::LineMetrics {
-                ascent: font_px * 0.8,
-                descent: -font_px * 0.2,
-                line_gap: font_px * 0.2,
-                new_line_size: font_px * 1.2,
-            });
+    let line_metrics = font
+        .horizontal_line_metrics(font_px)
+        .unwrap_or(fontdue::LineMetrics {
+            ascent: font_px * 0.8,
+            descent: -font_px * 0.2,
+            line_gap: font_px * 0.2,
+            new_line_size: font_px * 1.2,
+        });
     let line_h = (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).max(font_px);
     let total_h = line_h * lines.len() as f32;
     let max_text_w = lines
         .iter()
-        .map(|l| measure_text(&state.font, font_px, l))
+        .map(|l| measure_text(font, font_px, l))
         .max()
         .unwrap_or(0);
     let pad_x = (font_px * 1.5).round() as i32;
@@ -1359,7 +1368,110 @@ fn load_font(cfg_path: Option<&Path>) -> Result<Font> {
                 .map_err(|e| anyhow!("font parse: {e}"));
         }
     }
-    anyhow::bail!("no font found in candidates: {FONT_CANDIDATES:?}")
+    if let Some((path, font)) = scan_system_fonts() {
+        tracing::info!(path = %path.display(), "no listed font; using one found on the system");
+        return Ok(font);
+    }
+    anyhow::bail!(
+        "no font found in candidates: {FONT_CANDIDATES:?}, nor any .ttf/.otf on the system"
+    )
+}
+
+/// Font directories searched when no listed candidate exists.
+fn system_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+    ];
+    match std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        Some(d) => dirs.push(Path::new(&d).join("fonts")),
+        None => {
+            if let Some(home) = std::env::var_os("HOME") {
+                dirs.push(Path::new(&home).join(".local/share/fonts"));
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(Path::new(&home).join(".fonts"));
+    }
+    dirs
+}
+
+/// How deep [`scan_system_fonts`] descends, and how many files it will try to
+/// parse, so a large font tree can't hold up the lock.
+const FONT_SCAN_DEPTH: usize = 6;
+const FONT_SCAN_TRIES: usize = 64;
+
+/// Any `.ttf`/`.otf` under the system font directories, best first by
+/// [`font_rank`], returning the first that parses.
+fn scan_system_fonts() -> Option<(PathBuf, Font)> {
+    let mut found = Vec::new();
+    for dir in system_font_dirs() {
+        collect_font_files(&dir, FONT_SCAN_DEPTH, &mut found);
+    }
+    found.sort_by(|a, b| font_rank(a).cmp(&font_rank(b)).then_with(|| a.cmp(b)));
+    found.into_iter().take(FONT_SCAN_TRIES).find_map(|p| {
+        let bytes = fs::read(&p).ok()?;
+        let font = Font::from_bytes(bytes, FontSettings::default()).ok()?;
+        Some((p, font))
+    })
+}
+
+fn collect_font_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if depth > 0 {
+                collect_font_files(&path, depth - 1, out);
+            }
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Lower is better: an upright regular sans for the prompt, then other
+/// upright text faces, then styled ones, and last the faces that may lack
+/// Latin letters or the bullet the masked password uses.
+fn font_rank(path: &Path) -> u8 {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    if has(&["emoji", "symbol", "math", "icon", "awesome", "dingbat"]) {
+        return 4;
+    }
+    let styled = has(&[
+        "bold",
+        "italic",
+        "oblique",
+        "light",
+        "thin",
+        "black",
+        "medium",
+        "semi",
+        "extra",
+        "demi",
+        "condensed",
+    ]);
+    match (styled, has(&["sans"]) && !has(&["mono"])) {
+        (false, true) => 0,
+        (false, false) => 1,
+        (true, true) => 2,
+        (true, false) => 3,
+    }
 }
 
 fn read_hostname() -> String {
@@ -1372,6 +1484,43 @@ fn read_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_rank_prefers_upright_sans() {
+        let order = [
+            "/f/NotoSans-Regular.ttf",
+            "/f/NotoSerif-Regular.ttf",
+            "/f/NotoSansMono-Regular.ttf",
+            "/f/NotoSans-Medium.ttf",
+            "/f/NotoSans-SemiBold.ttf",
+            "/f/NotoSans-Bold.ttf",
+            "/f/NotoSerif-Italic.ttf",
+            "/f/NotoColorEmoji.ttf",
+        ];
+        let ranks: Vec<u8> = order.iter().map(|p| font_rank(Path::new(p))).collect();
+        assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{ranks:?}");
+        assert_eq!(ranks[0], 0);
+        assert_eq!(ranks[3], 2, "Medium is a weight, not the regular face");
+        assert_eq!(ranks[7], 4);
+    }
+
+    #[test]
+    fn collect_font_files_finds_ttf_and_otf_only() {
+        let dir = std::env::temp_dir().join(format!("sw-lock-fonts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        for f in ["a/One.ttf", "a/b/Two.OTF", "a/Three.ttc", "a/readme.txt"] {
+            fs::write(dir.join(f), b"").unwrap();
+        }
+        let mut found = Vec::new();
+        collect_font_files(&dir, FONT_SCAN_DEPTH, &mut found);
+        found.sort();
+        assert_eq!(found, vec![dir.join("a/One.ttf"), dir.join("a/b/Two.OTF")]);
+        let mut shallow = Vec::new();
+        collect_font_files(&dir, 0, &mut shallow);
+        assert!(shallow.is_empty(), "depth 0 must not descend: {shallow:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Paint `region` of a `w`×`h` frame the way [`redraw`] does, minus the
     /// prompt.

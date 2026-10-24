@@ -45,6 +45,49 @@ pub struct LockState {
     pub saved_focus: Option<crate::focus::KeyboardFocusTarget>,
 }
 
+/// The lock command the WM spawned, tracked until it exits.
+pub struct LockChild {
+    pub pid: i32,
+    pub command: String,
+    /// Set once any client locks the session after the spawn.
+    pub locked: bool,
+}
+
+impl ShoestringWm {
+    /// Route a reaped child: `true` if it was the lock command. A lock
+    /// command that exits while no lock ever began left the session open.
+    pub fn note_lock_reaped(&mut self, pid: i32, status: std::process::ExitStatus) -> bool {
+        if self.lock_child.as_ref().map(|c| c.pid) != Some(pid) {
+            return false;
+        }
+        let Some(child) = self.lock_child.take() else {
+            return false;
+        };
+        if !child.locked && !self.is_locked() {
+            use std::os::unix::process::ExitStatusExt;
+            self.lock_failed(&child.command, status.code(), status.signal());
+        }
+        true
+    }
+
+    /// The session did not lock: log it and tell IPC subscribers (the bar
+    /// turns this into an alert), since the user may walk away believing
+    /// the screen is locked.
+    pub fn lock_failed(&mut self, command: &str, exit_code: Option<i32>, signal: Option<i32>) {
+        tracing::error!(
+            command,
+            exit_code,
+            signal,
+            "lock: the lock command ended without locking; the session is NOT locked"
+        );
+        self.emit_ipc(shoestring_ipc::Event::LockFailed {
+            command: command.to_owned(),
+            exit_code,
+            signal,
+        });
+    }
+}
+
 impl SessionLockHandler for ShoestringWm {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
         &mut self.session_lock_state
@@ -71,6 +114,9 @@ impl SessionLockHandler for ShoestringWm {
         // An in-flight window picker would otherwise stay armed across
         // the lock; resolve it as cancelled so the client can move on.
         self.finish_picker(None);
+        if let Some(child) = self.lock_child.as_mut() {
+            child.locked = true;
+        }
         self.lock_session = Some(LockState {
             since: std::time::Instant::now(),
             pending: Some(confirmation),

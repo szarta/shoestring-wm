@@ -35,8 +35,12 @@ Options
 
 **--font** *PATH*
     TrueType/OpenType font for the prompt text. Falls back to
-    ``$SHOESTRING_LOCK_FONT`` and then a list of common system font
-    paths.
+    ``$SHOESTRING_LOCK_FONT``, then a list of common system font paths,
+    then any ``.ttf``/``.otf`` under ``/usr/share/fonts``,
+    ``/usr/local/share/fonts`` and the user's font directories (an
+    upright sans preferred). With no usable font the screen still locks,
+    without the prompt text; typing the password and Enter unlock as
+    usual.
 
 **--font-size** *PX*
     Prompt text size in pixels. Default ``28``.
@@ -97,7 +101,7 @@ Exit status
 
 **1**
     Initialization or PAM failure (no Wayland connection, missing
-    protocol, font load error, ...). A message is printed to standard
+    protocol, ...). A message is printed to standard
     error.
 
 See also

@@ -378,6 +378,49 @@ fn e2e_idle_lock_after_inactivity() {
     );
 }
 
+/// Send `lock` on a WM whose `lock_command` never locks, and return the
+/// `lock_failed` event it broadcasts.
+fn lock_and_expect_failure(lock_command: &str) -> serde_json::Value {
+    let wm = Wm::start_with(WmOptions {
+        lock_command: Some(lock_command.into()),
+        ..WmOptions::default()
+    });
+    let mut events = wm.connect_ipc();
+    writeln!(events, "{}", json!({"type": "event_stream"})).unwrap();
+    assert_eq!(read_line(&mut events)["type"], "ok");
+    wm.ipc_ok(json!({"type": "lock"}));
+    let event = loop {
+        let event = read_line(&mut events);
+        if event["type"] == "lock_failed" {
+            break event;
+        }
+    };
+    let info = wm.ipc_ok(json!({"type": "server_info"}));
+    assert_eq!(info["locked"], false, "{info}");
+    event
+}
+
+/// A lock command that exits before locking leaves the session open; the WM
+/// says so with `lock_failed`, carrying the exit status.
+#[test]
+#[ignore]
+fn e2e_lock_command_exiting_unlocked_reports_failure() {
+    let event = lock_and_expect_failure("false");
+    assert_eq!(event["command"], "false", "{event}");
+    assert_eq!(event["exit_code"], 1, "{event}");
+    assert!(event["signal"].is_null(), "{event}");
+}
+
+/// A lock command that can't be spawned is reported the same way, with no
+/// exit status.
+#[test]
+#[ignore]
+fn e2e_lock_command_missing_reports_failure() {
+    let event = lock_and_expect_failure("shoestring-no-such-locker");
+    assert!(event["exit_code"].is_null(), "{event}");
+    assert!(event["signal"].is_null(), "{event}");
+}
+
 /// After input while locked, a viewer sees the live lock screen (so it can
 /// watch the password prompt) for `[general] lock_preview_secs`, then the
 /// static frame again.

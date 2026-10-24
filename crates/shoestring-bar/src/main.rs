@@ -286,6 +286,12 @@ struct State {
     /// logical coords (or `None` when `show_control = false`). Hit-tested to
     /// open the control menu.
     control_rect: Option<(i32, i32)>,
+    /// The WM reported a lock command that ended without locking: the screen
+    /// the user thinks is locked isn't. Shown as a red chip until clicked.
+    lock_failed: bool,
+    /// `(x_start, width)` of that chip from the last redraw, in logical
+    /// coords. A click dismisses it.
+    lock_failed_rect: Option<(i32, i32)>,
     /// The open context menu, if any (tray *or* control — see `menu_is_control`).
     menu: Option<menu::Menu>,
     /// True when [`Self::menu`] is the control menu (gate toggles + lock/logout)
@@ -618,6 +624,8 @@ fn run_session() -> Result<()> {
         pointer_menu_level: None,
         tray_icon_rects: Vec::new(),
         control_rect: None,
+        lock_failed: false,
+        lock_failed_rect: None,
         menu: None,
         menu_is_control: false,
         pending_open_control: false,
@@ -1091,6 +1099,10 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
                 state.dirty = true;
             }
         }
+        IpcEvent::LockFailed { .. } => {
+            state.lock_failed = true;
+            state.dirty = true;
+        }
         IpcEvent::ScreenCaptured { .. } => {
             // Refresh the live "capturing now" indicator; the event-loop tick
             // clears it once captures stop (see CAPTURE_DOT_TTL).
@@ -1288,6 +1300,48 @@ fn redraw(
         state.control_rect = None;
         None
     };
+
+    // Lock-failure alert: the WM's lock command ended without locking, so the
+    // session the user may believe is locked is open. Red, first in the
+    // indicator cluster, and kept until clicked: nothing tells the bar when a
+    // later lock succeeds, and a timeout could clear it before anyone looks.
+    let alert_left = if state.lock_failed {
+        const LABEL: &str = "LOCK FAILED";
+        let pad = s(4);
+        let gap = s(8);
+        let label_w = measure_text(&state.font, font_px, LABEL);
+        let chip_w = label_w + pad * 2;
+        let chip_left = control_left.unwrap_or(clock_x) - gap - chip_w;
+        fill_rect(
+            &mut mmap,
+            pw,
+            ph,
+            chip_left,
+            s(2),
+            chip_w,
+            ph as i32 - s(4),
+            CAPTURE_ACTIVE,
+        );
+        draw_text(
+            &mut mmap,
+            pw,
+            ph,
+            &state.font,
+            font_px,
+            chip_left + pad,
+            LABEL,
+            fg,
+        );
+        let lx = ((chip_left as f64) / scale).round() as i32;
+        let lw = ((chip_w as f64) / scale).round() as i32;
+        state.lock_failed_rect = Some((lx, lw));
+        Some(chip_left)
+    } else {
+        state.lock_failed_rect = None;
+        None
+    };
+    // The rest of the cluster lines up left of the alert when it shows.
+    let control_left = alert_left.or(control_left);
 
     // Automation indicator chip: drawn immediately left of the clock when
     // the WM's automation gate is ON. Hidden when off — the user should
@@ -2410,6 +2464,15 @@ fn primary_press(state: &mut State, qh: &QueueHandle<State>) {
         return;
     };
     let xi = x.floor() as i32;
+
+    // Lock-failure alert: a click acknowledges and hides it.
+    if let Some((ax, aw)) = state.lock_failed_rect {
+        if xi >= ax && xi < ax + aw {
+            state.lock_failed = false;
+            state.dirty = true;
+            return;
+        }
+    }
 
     // Control applet: a hit opens the control menu (gate toggles +
     // lock/logout). Checked before the tray since it sits left of

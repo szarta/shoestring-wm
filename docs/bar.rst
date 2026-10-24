@@ -123,6 +123,15 @@ all eight digits. Font resolution order is ``[bar].font`` →
 The clock format is passed straight to ``libc::strftime``; the two
 named aliases above are the only special-cased values.
 
+Lock-failure alert
+------------------
+
+When the WM reports ``lock_failed`` (its lock command ended without the
+session ever locking), a red ``LOCK FAILED`` chip appears first in the
+indicator cluster, left of the control applet. The screen you may believe
+is locked is not. The chip stays until you click it, since the bar is not
+told when a later lock succeeds.
+
 Battery indicator
 -----------------
 

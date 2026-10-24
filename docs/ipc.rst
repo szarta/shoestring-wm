@@ -531,6 +531,8 @@ Each request is a JSON object with a ``type`` discriminator:
    * - ``{"type": "lock"}``
      - Spawn ``[general].lock_command``. Replies ``ok`` immediately;
        the locker drives the ``ext-session-lock-v1`` handshake itself.
+       ``ok`` does not mean locked: watch ``server_info``'s ``locked``, or
+       the ``lock_failed`` event if the locker gives up before locking.
    * - ``{"type": "quit"}``
      - Exit the WM, via the same ``confirm_action`` dialog as the
        ``Super+Shift+Q`` keybind — the WM only quits on the user's *Yes*.
@@ -1364,6 +1366,15 @@ Each event is tagged by ``type``.
     ``{"type": "config_reloaded"}``. Fired after a successful config
     re-read (file-watcher or explicit ``reload_config`` trigger).
     Subscribers should re-query anything derived from the config.
+
+``lock_failed``
+    ``{"type": "lock_failed", "command": "<lock_command>", "exit_code":
+    <i32|null>, "signal": <i32|null>}``. The lock command the WM spawned
+    (``lock`` action, idle timeout, or the ``lock`` request) is empty, failed
+    to spawn (both fields null), or exited before any session lock began
+    (``exit_code`` or ``signal`` set). The session is **not** locked;
+    subscribers should make this loud. ``shoestring-bar`` shows a
+    ``LOCK FAILED`` chip.
 
 ``metrics``
     ``{"type": "metrics", "ts_ms": <u64>, "metrics": {...}}``. One

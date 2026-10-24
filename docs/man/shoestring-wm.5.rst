@@ -74,7 +74,10 @@ Generate a starter file with ``shoestring-wm --write-default-config``.
 
 **lock_command** (string, default ``"shoestring-lock"``)
     Command spawned by the ``lock`` action and the ``lock`` IPC
-    request. Whitespace-split into argv.
+    request. Whitespace-split into argv. If it is empty, fails to spawn,
+    or exits before the session locks, the WM logs an error and
+    broadcasts ``lock_failed``; the bar shows ``LOCK FAILED``. A command
+    that backgrounds itself must lock before its first process exits.
 
 **autostart** (array of strings, default ``["shoestring-bar"]``)
     Commands spawned once at WM startup, after the wayland socket is

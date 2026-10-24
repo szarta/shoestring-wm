@@ -1542,6 +1542,16 @@ pub enum Event {
     /// mirrors the active keybind set). The event carries no payload; a
     /// subscriber that wants the new state should re-query.
     ConfigReloaded,
+    /// The lock command the WM spawned (keybind, idle timeout, or the
+    /// [`Request::Lock`] request) exited without the session ever locking,
+    /// so the screen is **not** locked. `exit_code` is set when it exited,
+    /// `signal` when a signal killed it. Subscribers should make this loud
+    /// (the bar shows an alert); the WM also logs it.
+    LockFailed {
+        command: String,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    },
     /// One diagnostics sample, pushed to [`Request::MetricsStream`]
     /// subscribers. Same payload shape as [`Response::Metrics`].
     Metrics {
@@ -2464,6 +2474,20 @@ mod tests {
         assert_eq!(s, r#"{"type":"reload_config"}"#);
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Request::ReloadConfig));
+    }
+
+    #[test]
+    fn event_lock_failed_shape() {
+        let e = Event::LockFailed {
+            command: "shoestring-lock".into(),
+            exit_code: Some(1),
+            signal: None,
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"lock_failed","command":"shoestring-lock","exit_code":1,"signal":null}"#
+        );
     }
 
     #[test]

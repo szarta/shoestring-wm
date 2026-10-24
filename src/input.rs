@@ -299,7 +299,10 @@ impl ShoestringWm {
     }
 
     /// Spawn the configured `lock_command`. The child binds
-    /// ext-session-lock-v1 itself; the WM doesn't wait for it. No-op
+    /// ext-session-lock-v1 itself; the WM doesn't wait for it, but watches
+    /// for it exiting before any lock began (see
+    /// [`Self::note_lock_reaped`]). An empty or unspawnable command is
+    /// reported the same way. No-op
     /// when already locked (a second locker would just get `finished`
     /// from the manager filter anyway, but skipping the spawn keeps the
     /// process tree clean).
@@ -311,7 +314,7 @@ impl ShoestringWm {
         let cmd_line = self.config.general.lock_command.clone();
         let mut parts = cmd_line.split_whitespace();
         let Some(program) = parts.next() else {
-            tracing::warn!("lock: lock_command is empty");
+            self.lock_failed(&cmd_line, None, None);
             return;
         };
         let args: Vec<&str> = parts.collect();
@@ -324,8 +327,16 @@ impl ShoestringWm {
             Ok(child) => {
                 let pid = crate::child_reaper::track(child);
                 tracing::info!(pid, %cmd_line, "spawned lock");
+                self.lock_child = Some(crate::handlers::session_lock::LockChild {
+                    pid,
+                    command: cmd_line,
+                    locked: false,
+                });
             }
-            Err(e) => tracing::warn!(%cmd_line, error = %e, "spawn lock failed"),
+            Err(e) => {
+                tracing::warn!(%cmd_line, error = %e, "spawn lock failed");
+                self.lock_failed(&cmd_line, None, None);
+            }
         }
     }
 

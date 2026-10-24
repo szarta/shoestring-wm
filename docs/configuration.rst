@@ -86,8 +86,12 @@ The ``[general]`` section
      - Command spawned by the ``lock`` action and the ``lock`` IPC
        request. Split on whitespace (first token = executable, rest =
        args). The binary itself drives ``ext-session-lock-v1`` and
-       reports unlock; if it's missing or fails to spawn the session
-       just stays unlocked (logged).
+       reports unlock. If it is empty, fails to spawn, or exits before
+       the session locks, the session stays unlocked: the WM logs an
+       error, broadcasts ``lock_failed`` over IPC, and the bar shows a
+       red ``LOCK FAILED`` chip. A command that backgrounds itself must
+       lock before its first process exits (``swaylock -f`` does), or
+       every lock reports as failed.
    * - ``lock_preview_secs``
      - integer
      - ``8``

@@ -235,6 +235,9 @@ pub struct ShoestringWm {
     /// `Some` while a session lock is active. See
     /// [`crate::handlers::session_lock`] for the protocol wiring.
     pub lock_session: Option<crate::handlers::session_lock::LockState>,
+    /// The lock command we spawned, until it exits. If it exits before any
+    /// lock began, the screen never locked and we say so loudly.
+    pub lock_child: Option<crate::handlers::session_lock::LockChild>,
 
     pub seat: Seat<Self>,
     /// Output association for touch devices, keyed by libinput device name and
@@ -902,6 +905,7 @@ impl ShoestringWm {
             idle_inhibit_manager,
             idle_inhibitors: Vec::new(),
             lock_session: None,
+            lock_child: None,
             seat,
             touch_output_by_device: HashMap::new(),
             pointer_constraints,
@@ -977,9 +981,11 @@ impl ShoestringWm {
     /// menus, ...) match nothing and are simply dropped — they only needed
     /// reaping to avoid zombies.
     pub fn note_child_reaped(&mut self, pid: i32, status: std::process::ExitStatus) {
-        // Short-circuit: try screenshots first, then commands; a child that
-        // matches neither is a fire-and-forget helper we just let go.
-        let _ = self.note_screenshot_reaped(pid, status) || self.note_command_reaped(pid, status);
+        // Short-circuit: try screenshots, then commands, then the lock command;
+        // a child that matches none is a fire-and-forget helper we just let go.
+        let _ = self.note_screenshot_reaped(pid, status)
+            || self.note_command_reaped(pid, status)
+            || self.note_lock_reaped(pid, status);
     }
 
     /// Clean teardown for the IPC `Shutdown` request. Signals the process group
