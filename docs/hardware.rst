@@ -96,7 +96,7 @@ mean the check fails.
        application checks not yet recorded.
        **Suspend and resume, monitor hotplug, mixed output scales, input
        method:** not yet recorded.
-   * - **FreeBSD 15.1.** shoestring-wm from ``main`` after 0.9.1.
+   * - **FreeBSD 15.1.** shoestring-wm 0.10.0.
      - The nested ``winit`` backend runs (see :doc:`install`), and the
        ``headless`` backend passes the end-to-end tests on its software
        renderer, which exercises no hardware. **Every check on this page,

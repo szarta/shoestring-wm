@@ -30,7 +30,7 @@ members = [
 exclude = ["crates/wlcs-shoestring"]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 # Minimum supported Rust version, checked by the `msrv` CI job. The floor is
 # set by dependencies (darling, instability); raise it deliberately.
