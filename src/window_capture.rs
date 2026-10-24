@@ -47,7 +47,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use shoestring_remote::{PixelFormat, ServerMessage, Tile};
+use shoestring_remote::{PeerInfo, PixelFormat, ServerMessage, Tile};
 
 use crate::capture_stream::{clamp_to_buffer, readback, tile_for_region};
 use crate::drawing::OutputRenderElements;
@@ -371,6 +371,7 @@ where
             height: ph as u32,
             scale,
             format: PixelFormat::Argb8888,
+            peer: PeerInfo::ours(),
         });
     } else if size_changed {
         messages.push(ServerMessage::Resize {

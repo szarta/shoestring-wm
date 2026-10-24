@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use shoestring_remote::{
-    apply_tile, framebuffer_len, read_framed, write_framed, ClientMessage, ServerMessage,
+    apply_tile, framebuffer_len, read_framed, write_framed, ClientMessage, Message, PeerInfo,
+    ServerMessage,
 };
 use wayland_client::{
     protocol::{
@@ -485,13 +486,28 @@ pub struct Viewer {
     pub height: u32,
     framebuffer: Vec<u8>,
     pub meta: Option<(String, String)>,
+    /// The version information from the server's `Ready`.
+    pub server: Option<PeerInfo>,
+    /// The reason from a `Refused`, sent instead of `Ready`.
+    pub refused: Option<String>,
     ended: Option<End>,
 }
 
 impl Viewer {
     pub fn connect(wm: &Wm, first: ClientMessage) -> Viewer {
+        let mut payload = Vec::new();
+        first.encode(&mut payload);
+        Viewer::connect_raw(wm, &payload)
+    }
+
+    /// Connect with a hand-built first message payload (unframed), such as
+    /// the `Hello` of a release from before the version exchange.
+    pub fn connect_raw(wm: &Wm, first: &[u8]) -> Viewer {
         let mut stream = UnixStream::connect(wm.remote_socket()).expect("connect to remote server");
-        write_framed(&mut stream, &first).expect("send first message");
+        stream
+            .write_all(&(first.len() as u32).to_le_bytes())
+            .and_then(|()| stream.write_all(first))
+            .expect("send first message");
         stream.flush().unwrap();
         let received = Arc::new(AtomicU64::new(0));
         let mut reader = CountingReader {
@@ -518,6 +534,8 @@ impl Viewer {
             height: 0,
             framebuffer: Vec::new(),
             meta: None,
+            server: None,
+            refused: None,
             ended: None,
         }
     }
@@ -533,6 +551,7 @@ impl Viewer {
             width: OUTPUT_W,
             height: OUTPUT_H,
             scale: 1.0,
+            peer: PeerInfo::ours(),
         };
         let mut v = Viewer::connect(wm, hello);
         v.wait_first_frame();
@@ -546,6 +565,7 @@ impl Viewer {
             wm,
             ClientMessage::Graft {
                 selector: selector.into(),
+                peer: PeerInfo::ours(),
             },
         );
         v.wait_first_frame();
@@ -580,7 +600,14 @@ impl Viewer {
             Err(RecvTimeoutError::Timeout) => return false,
             Err(RecvTimeoutError::Disconnected) => Err(End::Closed),
         };
+        if let Ok(ServerMessage::Ready { peer, .. }) = &msg {
+            self.server = Some(peer.clone());
+        }
         match msg {
+            Ok(ServerMessage::Refused { reason }) => {
+                self.refused = Some(reason);
+                false
+            }
             Ok(
                 ServerMessage::Ready { width, height, .. }
                 | ServerMessage::Resize { width, height, .. },
@@ -666,6 +693,15 @@ impl Viewer {
 
     pub fn send(&mut self, msg: ClientMessage) {
         write_framed(&mut self.stream, &msg).expect("send to server");
+        self.stream.flush().unwrap();
+    }
+
+    /// Send a hand-built message payload (unframed).
+    pub fn send_raw(&mut self, payload: &[u8]) {
+        self.stream
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .and_then(|()| self.stream.write_all(payload))
+            .expect("send to server");
         self.stream.flush().unwrap();
     }
 

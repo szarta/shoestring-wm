@@ -118,6 +118,41 @@ gate / event / bar-chip pattern), and the machine-axis nav + raw-passthrough
 input mode. The wire protocol and tile/zlib codec live in the shared,
 low-dependency ``shoestring-remote`` crate (in the spirit of ``shoestring-ipc``).
 
+Versions and compatibility
+--------------------------
+
+The served machine and the viewer are often on different releases, so the
+handshake says which protocol each side speaks. The client's first message
+(``Hello`` or ``Graft``) and the server's ``Ready`` end with three fields:
+
+- **protocol** - a number that changes only when the wire format changes
+  incompatibly. Today it is 1.
+- **capabilities** - a bitset of optional features. Each side uses only the
+  features both report and ignores bits it doesn't know, so a new optional
+  feature adds a bit instead of a protocol version. None are defined yet.
+- **software** - the release (``0.10.0``), for messages and logs.
+
+Releases up to 0.9.1 send none of these. Decoders ignore bytes past the fields
+they know, so those releases read the new messages unchanged, and a message
+without the fields counts as protocol 1 with no capabilities.
+
+When the protocols differ, the server answers with ``Refused`` instead of
+``Ready`` and closes the connection. The reason names both sides and says
+which one to upgrade, and the client prints it and exits non-zero::
+
+    the server refused: shoestring-remote-server (0.11.0) speaks remote protocol 2,
+    but shoestring-remote-client (0.10.0) speaks protocol 1; upgrade the client
+    so both match
+
+The server logs the same reason. A client checks the server's ``Ready`` the
+same way, so a newer client facing an older server explains the mismatch too.
+A client from 0.9.1 or earlier can't read ``Refused``; it just sees the connection
+close, and only the server's log says why.
+
+After the handshake, either side skips a whole message whose type it doesn't
+know, instead of ending the session, so an addition that an older peer can do
+without never disconnects it.
+
 Streaming design
 ----------------
 

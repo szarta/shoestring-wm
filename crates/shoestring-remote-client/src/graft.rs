@@ -265,28 +265,27 @@ pub fn run(cli: Cli, selector: String) -> Result<()> {
         &mut stream,
         &ClientMessage::Graft {
             selector: selector.clone(),
+            peer: shoestring_remote::PeerInfo::ours(),
         },
     )
     .map_err(|e| anyhow::anyhow!("send Graft: {e}"))?;
 
     let mut init_title = selector.clone();
-    let (rw, rh, rscale) = loop {
-        match shoestring_remote::read_framed::<_, ServerMessage>(&mut stream)
-            .map_err(|e| anyhow::anyhow!("awaiting Ready: {e}"))?
-        {
-            ServerMessage::Ready {
-                width,
-                height,
-                scale,
-                ..
-            } => break (width, height, scale),
-            ServerMessage::Meta { app_id, title } => {
-                init_title = pick_title(&title, &app_id, &selector);
-            }
-            ServerMessage::Bye => anyhow::bail!("server closed before Ready (no such window?)"),
-            other => tracing::debug!(?other, "ignoring pre-Ready message"),
+    let mut closed = false;
+    let (rw, rh, rscale) = crate::net::await_ready(&mut stream, |msg| match msg {
+        ServerMessage::Meta { app_id, title } => {
+            init_title = pick_title(&title, &app_id, &selector);
         }
-    };
+        ServerMessage::Bye => closed = true,
+        other => tracing::debug!(?other, "ignoring pre-Ready message"),
+    })
+    .map_err(|e| {
+        if closed {
+            anyhow::anyhow!("server closed before Ready (no such window?)")
+        } else {
+            e
+        }
+    })?;
     tracing::info!(rw, rh, rscale, "remote window ready");
     state.resize_fb(rw, rh, rscale)?;
 
@@ -429,6 +428,8 @@ fn drain_outbox(state: &mut State, net: &mut Net) {
 fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
     while let Some(msg) = net.next_message()? {
         match msg {
+            // Only ever the handshake's reply; nothing to do mid-session.
+            ServerMessage::Refused { .. } => {}
             ServerMessage::Ready {
                 width,
                 height,

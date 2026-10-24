@@ -41,7 +41,7 @@ use smithay::{
 };
 
 use shoestring_remote::{
-    encode_tile, PixelFormat, Rect as RemoteRect, ServerMessage, Tile, TileEncoding,
+    encode_tile, PeerInfo, PixelFormat, Rect as RemoteRect, ServerMessage, Tile, TileEncoding,
 };
 
 use crate::ipc::{Client, ClientId};
@@ -279,6 +279,7 @@ pub fn push_capture<R>(
                 height: h as u32,
                 scale,
                 format: PixelFormat::Argb8888,
+                peer: PeerInfo::ours(),
             });
         } else if size_changed {
             messages.push(ServerMessage::Resize {

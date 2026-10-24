@@ -23,7 +23,9 @@ use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
 use shoestring_remote::transport::Stream;
-use shoestring_remote::{ClientMessage, Message, ServerMessage, MAX_MESSAGE_LEN};
+use shoestring_remote::{
+    incompatibility, ClientMessage, Error, Message, PeerInfo, ServerMessage, MAX_MESSAGE_LEN,
+};
 
 /// Most bytes one [`Net::fill`] reads. The rest waits for the next pass of the
 /// poll loop (which stays readable), after the caller has parsed these.
@@ -131,9 +133,23 @@ impl Net {
     }
 
     /// Peel the next complete framed [`ServerMessage`] out of `in_buf`, or
-    /// `None` if a whole frame isn't buffered yet. Decode errors (corrupt frame,
-    /// oversize length) surface as `Err`.
+    /// `None` if a whole frame isn't buffered yet. A message with a tag this
+    /// build doesn't know (from a newer server) is skipped; other decode errors
+    /// (corrupt frame, oversize length) surface as `Err`.
     pub fn next_message(&mut self) -> Result<Option<ServerMessage>> {
+        loop {
+            match self.next_frame()? {
+                None => return Ok(None),
+                Some(Err(Error::UnknownMessage { tag, .. })) => {
+                    tracing::debug!(tag, "skipping a server message this build doesn't know");
+                }
+                Some(Err(e)) => anyhow::bail!("decode frame: {e}"),
+                Some(Ok(msg)) => return Ok(Some(msg)),
+            }
+        }
+    }
+
+    fn next_frame(&mut self) -> Result<Option<shoestring_remote::Result<ServerMessage>>> {
         if self.in_buf.len() < 4 {
             return Ok(None);
         }
@@ -147,9 +163,42 @@ impl Net {
         let payload = self.in_buf[4..4 + len].to_vec();
         self.in_buf.drain(..4 + len);
         self.validated_to = self.validated_to.saturating_sub(4 + len);
-        let msg =
-            ServerMessage::decode(&payload).map_err(|e| anyhow::anyhow!("decode frame: {e}"))?;
-        Ok(Some(msg))
+        Ok(Some(ServerMessage::decode(&payload)))
+    }
+}
+
+/// Read the handshake reply: the server's `Ready` (checked against our
+/// protocol version) or `Refused`. Every other message before it goes to
+/// `early`. Blocking; for the handshake only.
+pub fn await_ready(
+    stream: &mut Stream,
+    mut early: impl FnMut(ServerMessage),
+) -> Result<(u32, u32, f64)> {
+    loop {
+        let msg = match shoestring_remote::read_framed::<_, ServerMessage>(stream) {
+            Err(Error::UnknownMessage { tag, .. }) => {
+                tracing::debug!(tag, "skipping a server message this build doesn't know");
+                continue;
+            }
+            other => other.map_err(|e| anyhow::anyhow!("awaiting Ready: {e}"))?,
+        };
+        match msg {
+            ServerMessage::Ready {
+                width,
+                height,
+                scale,
+                peer,
+                ..
+            } => {
+                if let Some(why) = incompatibility(&peer, &PeerInfo::ours()) {
+                    anyhow::bail!("{why}");
+                }
+                tracing::info!(server = %peer.software, protocol = peer.protocol, "server version");
+                return Ok((width, height, scale));
+            }
+            ServerMessage::Refused { reason } => anyhow::bail!("the server refused: {reason}"),
+            other => early(other),
+        }
     }
 }
 
@@ -181,6 +230,7 @@ mod tests {
             height: 1080,
             scale: 1.0,
             format: shoestring_remote::PixelFormat::Argb8888,
+            peer: PeerInfo::ours(),
         };
         let b = ServerMessage::Cursor(CursorUpdate::Shape {
             x: 10,

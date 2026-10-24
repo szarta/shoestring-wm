@@ -19,7 +19,9 @@
 //! ```
 //!
 //! The payload's first byte is the variant tag; the rest is the variant's
-//! fields. A reader pulls exactly one message's bytes off the stream, then
+//! fields. Decoders ignore bytes past the fields they know, which is how the
+//! handshake's version information reaches older peers harmlessly (see
+//! [`PeerInfo`]). A reader pulls exactly one message's bytes off the stream, then
 //! decodes. The two directions carry different message types — the client
 //! writes [`ClientMessage`] and reads [`ServerMessage`]; the server does the
 //! reverse — but the framing is identical, so [`read_framed`]/[`write_framed`]
@@ -42,12 +44,14 @@
 mod codec;
 mod message;
 pub mod transport;
+mod version;
 
 pub use codec::{apply_tile, encode_tile, extract_tiles};
 pub use message::{
     ClientMessage, CursorUpdate, PixelFormat, Rect, ServerMessage, Tile, TileEncoding,
     BYTES_PER_PIXEL,
 };
+pub use version::{incompatibility, PeerInfo, CAPABILITIES, LEGACY_PROTOCOL, PROTOCOL_VERSION};
 
 use std::io::{Read, Write};
 
@@ -97,8 +101,12 @@ pub fn check_scale(scale: f64) -> Result<f64> {
 pub enum Error {
     /// The buffer ended mid-field while decoding.
     UnexpectedEof,
-    /// An unknown variant tag for the named message type.
+    /// An unknown variant tag inside a message (a pixel format, a tile
+    /// encoding, ...): the message itself is malformed.
     BadTag { kind: &'static str, tag: u8 },
+    /// A whole message with a tag this build doesn't know, likely one a
+    /// newer peer added. The framing is intact, so a session can skip it.
+    UnknownMessage { kind: &'static str, tag: u8 },
     /// A `bool` byte that was neither 0 nor 1.
     BadBool(u8),
     /// A string field held invalid UTF-8.
@@ -120,6 +128,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::UnexpectedEof => write!(f, "unexpected end of buffer while decoding"),
             Error::BadTag { kind, tag } => write!(f, "invalid {kind} tag: {tag}"),
+            Error::UnknownMessage { kind, tag } => write!(f, "unknown {kind} tag: {tag}"),
             Error::BadBool(b) => write!(f, "invalid bool byte: {b}"),
             Error::Utf8 => write!(f, "invalid UTF-8 in string field"),
             Error::TooLarge(n) => write!(f, "framed message too large: {n} bytes"),
@@ -225,6 +234,11 @@ pub(crate) struct Reader<'a> {
 impl<'a> Reader<'a> {
     pub(crate) fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
+    }
+
+    /// Nothing left to read: an older peer's message ends here.
+    pub(crate) fn is_at_end(&self) -> bool {
+        self.pos >= self.buf.len()
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
@@ -335,6 +349,7 @@ mod tests {
             width: 2560,
             height: 1440,
             scale: 1.5,
+            peer: PeerInfo::ours(),
         };
         let b = ClientMessage::Key {
             keycode: 30,

@@ -425,25 +425,24 @@ fn run(cli: Cli) -> Result<()> {
             width: hello_w,
             height: hello_h,
             scale: hello_scale,
+            peer: shoestring_remote::PeerInfo::ours(),
         },
     )
     .map_err(|e| anyhow::anyhow!("send Hello: {e}"))?;
 
     // Read until Ready (a well-behaved server sends it first).
-    let (rw, rh, rscale) = loop {
-        match shoestring_remote::read_framed::<_, ServerMessage>(&mut stream)
-            .map_err(|e| anyhow::anyhow!("awaiting Ready: {e}"))?
-        {
-            ServerMessage::Ready {
-                width,
-                height,
-                scale,
-                ..
-            } => break (width, height, scale),
-            ServerMessage::Bye => anyhow::bail!("server closed before Ready"),
-            other => tracing::debug!(?other, "ignoring pre-Ready message"),
+    let mut closed = false;
+    let (rw, rh, rscale) = crate::net::await_ready(&mut stream, |msg| match msg {
+        ServerMessage::Bye => closed = true,
+        other => tracing::debug!(?other, "ignoring pre-Ready message"),
+    })
+    .map_err(|e| {
+        if closed {
+            anyhow::anyhow!("server closed before Ready")
+        } else {
+            e
         }
-    };
+    })?;
     tracing::info!(rw, rh, rscale, "remote ready");
     state.resize_fb(rw, rh)?;
 
@@ -580,6 +579,8 @@ fn event_loop(
 fn drain_server_messages(state: &mut State, net: &mut Net) -> Result<bool> {
     while let Some(msg) = net.next_message()? {
         match msg {
+            // Only ever the handshake's reply; nothing to do mid-session.
+            ServerMessage::Refused { .. } => {}
             ServerMessage::Ready { width, height, .. } => {
                 // A late Ready (shouldn't happen post-handshake) just resizes.
                 if (width, height) != (state.fb_w, state.fb_h) {

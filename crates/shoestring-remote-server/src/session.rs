@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 use shoestring_ipc::RawInput;
 use shoestring_remote::transport::Stream;
-use shoestring_remote::{read_framed, write_framed, ClientMessage, ServerMessage};
+use shoestring_remote::{
+    incompatibility, read_framed, write_framed, ClientMessage, Error, PeerInfo, ServerMessage,
+};
 
 use crate::holds::{Held, Holds};
 use crate::viewers::Viewers;
@@ -79,25 +81,8 @@ pub fn serve(
     // Once the session is up, reads block for as long as the viewer is idle.
     net.set_read_timeout(None)
         .context("clear handshake timeout")?;
-    let (wm_capture, graft_id) = match first {
-        Ok(ClientMessage::Hello {
-            width,
-            height,
-            scale,
-        }) => {
-            tracing::info!(%peer, width, height, scale, "client hello (serve mode)");
-            let (cap, _leftover) =
-                wm::open_capture_stream(output).context("opening WM capture stream for client")?;
-            (cap, None)
-        }
-        Ok(ClientMessage::Graft { selector }) => {
-            tracing::info!(%peer, %selector, "client graft request");
-            let id = wm::resolve_window(&selector).context("resolving graft selector")?;
-            let cap = wm::open_window_capture_stream(&id)
-                .context("opening WM window-capture stream for client")?;
-            (cap, Some(id))
-        }
-        Ok(other) => bail!("expected Hello or Graft first, got {other:?}"),
+    let first = match first {
+        Ok(msg) => msg,
         Err(shoestring_remote::Error::Io(e))
             if matches!(
                 e.kind(),
@@ -107,6 +92,49 @@ pub fn serve(
             bail!("no Hello or Graft within {HANDSHAKE_TIMEOUT:?}")
         }
         Err(e) => bail!("reading first message: {e}"),
+    };
+    // Refuse a client on another protocol version with a reason it can show,
+    // before opening anything on the WM.
+    let client = match &first {
+        ClientMessage::Hello { peer, .. } | ClientMessage::Graft { peer, .. } => peer.clone(),
+        other => bail!("expected Hello or Graft first, got {other:?}"),
+    };
+    if let Some(reason) = incompatibility(&PeerInfo::ours(), &client) {
+        tracing::warn!(%peer, %reason, "refusing client");
+        let mut out = net.try_clone().context("clone net for refusal")?;
+        let _ = write_framed(&mut out, &ServerMessage::Refused { reason }).and_then(|()| {
+            out.flush()?;
+            Ok(())
+        });
+        return Ok(());
+    }
+    tracing::info!(
+        %peer,
+        client = %client.software,
+        protocol = client.protocol,
+        legacy = client.is_legacy(),
+        "client version"
+    );
+    let (wm_capture, graft_id) = match first {
+        ClientMessage::Hello {
+            width,
+            height,
+            scale,
+            ..
+        } => {
+            tracing::info!(%peer, width, height, scale, "client hello (serve mode)");
+            let (cap, _leftover) =
+                wm::open_capture_stream(output).context("opening WM capture stream for client")?;
+            (cap, None)
+        }
+        ClientMessage::Graft { selector, .. } => {
+            tracing::info!(%peer, %selector, "client graft request");
+            let id = wm::resolve_window(&selector).context("resolving graft selector")?;
+            let cap = wm::open_window_capture_stream(&id)
+                .context("opening WM window-capture stream for client")?;
+            (cap, Some(id))
+        }
+        _ => unreachable!("checked above"),
     };
 
     let teardown = Arc::new(Teardown {
@@ -154,8 +182,22 @@ pub fn serve(
 fn forward_frames(wm_capture: UnixStream, net_out: SharedNet, teardown: &Teardown) {
     let mut wm_in = BufReader::new(wm_capture);
     // Read ends the loop on EOF / shutdown / decode error: the capture stream is
-    // done (gate off, WM exit, or client gone).
-    while let Ok(msg) = read_framed::<_, ServerMessage>(&mut wm_in) {
+    // done (gate off, WM exit, or client gone). A message this build doesn't
+    // know (a newer WM) is skipped.
+    loop {
+        let mut msg = match read_framed::<_, ServerMessage>(&mut wm_in) {
+            Ok(msg) => msg,
+            Err(Error::UnknownMessage { tag, .. }) => {
+                tracing::debug!(tag, "skipping a WM capture message this build doesn't know");
+                continue;
+            }
+            Err(_) => break,
+        };
+        // The WM builds Ready; the client is talking to us, so it gets our
+        // version information.
+        if let ServerMessage::Ready { peer, .. } = &mut msg {
+            *peer = PeerInfo::ours();
+        }
         let is_bye = matches!(msg, ServerMessage::Bye);
         // Flush each frame so it isn't stuck in the BufWriter waiting on the
         // next one — an idle desktop may send nothing more for a while. The lock
@@ -181,8 +223,17 @@ fn forward_input(
     holds: &Holds,
 ) -> Result<()> {
     let mut mine = holds.session();
-    // Read ends the loop on EOF / shutdown / malformed.
-    while let Ok(msg) = read_framed::<_, ClientMessage>(&mut net_in) {
+    // Read ends the loop on EOF / shutdown / malformed. A message this build
+    // doesn't know (a newer client) is skipped.
+    loop {
+        let msg = match read_framed::<_, ClientMessage>(&mut net_in) {
+            Ok(msg) => msg,
+            Err(Error::UnknownMessage { tag, .. }) => {
+                tracing::debug!(tag, "skipping a client message this build doesn't know");
+                continue;
+            }
+            Err(_) => break,
+        };
         match msg {
             ClientMessage::Bye => break,
             // Viewer Pull: read our WM's selection and ship it back to this one
@@ -356,7 +407,8 @@ mod tests {
             to_raw_input(&ClientMessage::Hello {
                 width: 1,
                 height: 2,
-                scale: 1.0
+                scale: 1.0,
+                peer: PeerInfo::ours(),
             }),
             None
         );

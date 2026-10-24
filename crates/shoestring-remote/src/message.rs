@@ -3,10 +3,14 @@
 //! Each variant begins with a `u8` tag; fields follow in declaration order
 //! using the little-endian primitives in the crate root. Adding a variant is
 //! append-only (new tag at the end) so old and new peers stay compatible for
-//! the variants they share.
+//! the variants they share, and a session skips a whole message whose tag it
+//! doesn't know ([`Error::UnknownMessage`]). A field may be appended to the
+//! end of a variant, as the handshake's [`PeerInfo`] was, since decoders
+//! ignore trailing bytes.
 
 use crate::{
-    put_bool, put_bytes, put_f64, put_str, put_u16, put_u32, put_u8, Error, Message, Reader, Result,
+    put_bool, put_bytes, put_f64, put_str, put_u16, put_u32, put_u8, Error, Message, PeerInfo,
+    Reader, Result,
 };
 
 /// Bytes per pixel for every [`PixelFormat`] the protocol carries today.
@@ -188,16 +192,22 @@ impl CursorUpdate {
 pub enum ClientMessage {
     /// First message of a **serve-mode** session: the client's output pixel
     /// size and scale. Advisory for now: the server streams its virtual output
-    /// at the size it was started with, and the viewer scales it.
-    Hello { width: u32, height: u32, scale: f64 },
+    /// at the size it was started with, and the viewer scales it. `peer` is the
+    /// client's version information ([`PeerInfo::legacy`] from an older one).
+    Hello {
+        width: u32,
+        height: u32,
+        scale: f64,
+        peer: PeerInfo,
+    },
     /// First message of a **graft-mode** session, sent instead of
     /// [`ClientMessage::Hello`]: rather than serving the whole output, stream
     /// the single remote window matching `selector` (an exact foreign-toplevel
     /// id or app_id, or a substring of an app_id or title). The server resolves
     /// it against the WM's `windows` list and, on a match, streams that window
     /// as if it were the output — `Ready`/`Frame`/`Resize` carry window-local
-    /// pixels. A `Graft` after `Hello` is ignored.
-    Graft { selector: String },
+    /// pixels. A `Graft` after `Hello` is ignored. `peer` as for `Hello`.
+    Graft { selector: String, peer: PeerInfo },
     /// A key transition. `keycode` is a Linux/evdev keycode (the value before
     /// XKB's `+8` offset); `pressed` is down vs up.
     Key { keycode: u32, pressed: bool },
@@ -232,11 +242,13 @@ impl Message for ClientMessage {
                 width,
                 height,
                 scale,
+                peer,
             } => {
                 put_u8(out, 0);
                 put_u32(out, *width);
                 put_u32(out, *height);
                 put_f64(out, *scale);
+                peer.encode(out);
             }
             ClientMessage::Key { keycode, pressed } => {
                 put_u8(out, 1);
@@ -276,9 +288,10 @@ impl Message for ClientMessage {
                 put_bytes(out, data);
             }
             ClientMessage::Bye => put_u8(out, 5),
-            ClientMessage::Graft { selector } => {
+            ClientMessage::Graft { selector, peer } => {
                 put_u8(out, 8);
                 put_str(out, selector);
+                peer.encode(out);
             }
         }
     }
@@ -290,6 +303,7 @@ impl Message for ClientMessage {
                 width: r.u32()?,
                 height: r.u32()?,
                 scale: r.f64()?,
+                peer: PeerInfo::decode_trailing(&mut r)?,
             },
             1 => ClientMessage::Key {
                 keycode: r.u32()?,
@@ -316,9 +330,10 @@ impl Message for ClientMessage {
             },
             8 => ClientMessage::Graft {
                 selector: r.string()?,
+                peer: PeerInfo::decode_trailing(&mut r)?,
             },
             t => {
-                return Err(Error::BadTag {
+                return Err(Error::UnknownMessage {
                     kind: "ClientMessage",
                     tag: t,
                 })
@@ -333,12 +348,14 @@ impl Message for ClientMessage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
     /// Sent once after [`ClientMessage::Hello`]: the size, scale, and pixel
-    /// format the server actually serves (normally echoing the client's Hello).
+    /// format the server actually serves (normally echoing the client's Hello),
+    /// and the server's version information.
     Ready {
         width: u32,
         height: u32,
         scale: f64,
         format: PixelFormat,
+        peer: PeerInfo,
     },
     /// A frame: the tiles that changed since the previous frame. `seq`
     /// increments per frame (for logging / loss detection). An empty `tiles`
@@ -366,6 +383,10 @@ pub enum ServerMessage {
     },
     /// The server is shutting the session down.
     Bye,
+    /// Sent instead of [`ServerMessage::Ready`] when the client's protocol
+    /// version doesn't match; the server closes after it. `reason` is meant
+    /// for the user (see [`crate::incompatibility`]).
+    Refused { reason: String },
 }
 
 impl Message for ServerMessage {
@@ -376,12 +397,14 @@ impl Message for ServerMessage {
                 height,
                 scale,
                 format,
+                peer,
             } => {
                 put_u8(out, 0);
                 put_u32(out, *width);
                 put_u32(out, *height);
                 put_f64(out, *scale);
                 put_u8(out, format.tag());
+                peer.encode(out);
             }
             ServerMessage::Frame { seq, tiles } => {
                 put_u8(out, 1);
@@ -421,6 +444,10 @@ impl Message for ServerMessage {
                 put_str(out, app_id);
                 put_str(out, title);
             }
+            ServerMessage::Refused { reason } => {
+                put_u8(out, 7);
+                put_str(out, reason);
+            }
         }
     }
 
@@ -432,6 +459,7 @@ impl Message for ServerMessage {
                 height: r.u32()?,
                 scale: r.f64()?,
                 format: PixelFormat::from_tag(r.u8()?)?,
+                peer: PeerInfo::decode_trailing(&mut r)?,
             },
             1 => {
                 let seq = r.u32()?;
@@ -458,8 +486,11 @@ impl Message for ServerMessage {
                 app_id: r.string()?,
                 title: r.string()?,
             },
+            7 => ServerMessage::Refused {
+                reason: r.string()?,
+            },
             t => {
-                return Err(Error::BadTag {
+                return Err(Error::UnknownMessage {
                     kind: "ServerMessage",
                     tag: t,
                 })
@@ -487,6 +518,7 @@ mod tests {
             width: 1920,
             height: 1080,
             scale: 2.0,
+            peer: PeerInfo::ours(),
         });
         roundtrip(ClientMessage::Key {
             keycode: 16,
@@ -509,9 +541,11 @@ mod tests {
         });
         roundtrip(ClientMessage::Graft {
             selector: "firefox".to_string(),
+            peer: PeerInfo::ours(),
         });
         roundtrip(ClientMessage::Graft {
             selector: String::new(),
+            peer: PeerInfo::ours(),
         });
         roundtrip(ClientMessage::Bye);
     }
@@ -523,6 +557,10 @@ mod tests {
             height: 900,
             scale: 1.0,
             format: PixelFormat::Argb8888,
+            peer: PeerInfo::ours(),
+        });
+        roundtrip(ServerMessage::Refused {
+            reason: "upgrade the client".to_string(),
         });
         roundtrip(ServerMessage::Frame {
             seq: 42,
@@ -576,15 +614,99 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tag_is_rejected() {
+    fn unknown_tag_is_an_unknown_message() {
         let err = ClientMessage::decode(&[99]).unwrap_err();
         assert!(matches!(
             err,
-            Error::BadTag {
+            Error::UnknownMessage {
                 kind: "ClientMessage",
                 tag: 99
             }
         ));
+        let err = ServerMessage::decode(&[99, 1, 2, 3]).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::UnknownMessage {
+                kind: "ServerMessage",
+                tag: 99
+            }
+        ));
+    }
+
+    /// The bytes a release from before the version exchange sends: the same
+    /// fields, without the trailing [`PeerInfo`].
+    fn without_peer<M: Message>(msg: &M) -> Vec<u8> {
+        let mut new = Vec::new();
+        msg.encode(&mut new);
+        let mut peer = Vec::new();
+        PeerInfo::ours().encode(&mut peer);
+        new.truncate(new.len() - peer.len());
+        new
+    }
+
+    #[test]
+    fn a_legacy_handshake_decodes_as_protocol_1() {
+        let hello = ClientMessage::Hello {
+            width: 800,
+            height: 600,
+            scale: 1.0,
+            peer: PeerInfo::ours(),
+        };
+        let ClientMessage::Hello { width, peer, .. } =
+            ClientMessage::decode(&without_peer(&hello)).unwrap()
+        else {
+            panic!("not a Hello");
+        };
+        assert_eq!(width, 800);
+        assert!(peer.is_legacy());
+        assert_eq!(peer.protocol, crate::LEGACY_PROTOCOL);
+
+        let graft = ClientMessage::Graft {
+            selector: "foot".to_string(),
+            peer: PeerInfo::ours(),
+        };
+        let back = ClientMessage::decode(&without_peer(&graft)).unwrap();
+        assert_eq!(
+            back,
+            ClientMessage::Graft {
+                selector: "foot".to_string(),
+                peer: PeerInfo::legacy(),
+            }
+        );
+
+        let ready = ServerMessage::Ready {
+            width: 800,
+            height: 600,
+            scale: 1.0,
+            format: PixelFormat::Argb8888,
+            peer: PeerInfo::ours(),
+        };
+        let ServerMessage::Ready { peer, .. } =
+            ServerMessage::decode(&without_peer(&ready)).unwrap()
+        else {
+            panic!("not a Ready");
+        };
+        assert!(peer.is_legacy());
+    }
+
+    /// An older peer reads a new handshake by its own field layout and stops
+    /// there: the fields it knows come out the same.
+    #[test]
+    fn the_old_layout_still_reads_a_new_handshake() {
+        let mut new = Vec::new();
+        ClientMessage::Hello {
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+            peer: PeerInfo::ours(),
+        }
+        .encode(&mut new);
+        let mut r = Reader::new(&new);
+        assert_eq!(r.u8().unwrap(), 0);
+        assert_eq!(r.u32().unwrap(), 2560);
+        assert_eq!(r.u32().unwrap(), 1440);
+        assert_eq!(r.f64().unwrap(), 1.5);
+        assert!(!r.is_at_end(), "the version fields follow");
     }
 
     #[test]

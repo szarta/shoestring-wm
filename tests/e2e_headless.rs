@@ -93,6 +93,81 @@ fn e2e_remote_serve_streams_and_drives() {
     wm.wait_viewers(0);
 }
 
+/// A client from before the version exchange sends a `Hello` without version
+/// fields; the server treats it as protocol 1 and serves it, and its `Ready`
+/// carries the server's own version.
+#[test]
+#[ignore]
+fn e2e_remote_serves_a_client_without_version_fields() {
+    let mut wm = Wm::start();
+    let _client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.start_remote_server();
+
+    // Tag 0 (Hello), width, height, scale: the whole message, as 0.9.1 sends it.
+    let mut hello = vec![0u8];
+    hello.extend_from_slice(&OUTPUT_W.to_le_bytes());
+    hello.extend_from_slice(&OUTPUT_H.to_le_bytes());
+    hello.extend_from_slice(&1.0f64.to_le_bytes());
+    let mut viewer = Viewer::connect_raw(&wm, &hello);
+    viewer.wait_first_frame();
+    viewer.wait_pixel(centre, rgb(IDLE), "streamed window");
+    let server = viewer.server.clone().expect("Ready");
+    assert_eq!(server, shoestring_remote::PeerInfo::ours());
+}
+
+/// A client on another protocol version is refused with a reason naming both
+/// sides, before any session starts.
+#[test]
+#[ignore]
+fn e2e_remote_refuses_another_protocol_version() {
+    let mut wm = Wm::start();
+    wm.start_remote_server();
+    let mut viewer = Viewer::connect(
+        &wm,
+        ClientMessage::Hello {
+            width: OUTPUT_W,
+            height: OUTPUT_H,
+            scale: 1.0,
+            peer: shoestring_remote::PeerInfo {
+                protocol: 99,
+                capabilities: 0,
+                software: "9.9.9".into(),
+            },
+        },
+    );
+    assert_eq!(viewer.wait_end(), End::Closed);
+    let reason = viewer.refused.clone().expect("a Refused before the close");
+    assert!(reason.contains("(9.9.9) speaks protocol 99"), "{reason}");
+    assert!(reason.contains("upgrade the server"), "{reason}");
+    assert_eq!(viewer.width, 0, "a session started anyway");
+    wm.wait_viewers(0);
+}
+
+/// A message the server doesn't know (from a newer client) is skipped, and
+/// the session carries on.
+#[test]
+#[ignore]
+fn e2e_remote_skips_an_unknown_client_message() {
+    let mut wm = Wm::start();
+    let _client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+    viewer.wait_pixel(centre, rgb(IDLE), "streamed window");
+
+    viewer.send_raw(&[200, 1, 2, 3, 4]);
+    viewer.click(centre);
+    // Off the window, so the cursor sprite doesn't cover the probe.
+    viewer.send(ClientMessage::PointerMotion {
+        x: (OUTPUT_W - 1) as f64,
+        y: (OUTPUT_H - 1) as f64,
+    });
+    viewer.wait_pixel(centre, rgb(CLICKED), "window after input that followed");
+    wm.wait_viewers(1);
+}
+
 /// Viewers can leave and come back, and turning the gate off ends the session
 /// and closes the listener until it is turned on again.
 #[test]
@@ -214,6 +289,7 @@ fn e2e_remote_respects_the_session_lock() {
         &wm,
         ClientMessage::Graft {
             selector: id.clone(),
+            peer: shoestring_remote::PeerInfo::ours(),
         },
     );
     refused.wait_end();
