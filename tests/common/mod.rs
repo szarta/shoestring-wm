@@ -68,6 +68,10 @@ pub const LOCK: u32 = 0xff60_2080;
 /// Not a colour: [`TestClient::paint`] with this draws [`pattern_pixels`]
 /// instead, a translucent gradient that exercises blending.
 pub const PATTERN: u32 = 0;
+/// Not a colour either: [`TestClient::paint`] with this draws fresh noise
+/// every time, which zlib can't shrink, so each frame streams the window's
+/// full size and a viewer that stops reading backs up quickly.
+pub const NOISE: u32 = 1;
 
 pub const BTN_LEFT: u32 = 0x110;
 /// evdev `KEY_A`.
@@ -482,6 +486,11 @@ pub struct Viewer {
     messages: Receiver<Result<ServerMessage, End>>,
     /// Bytes read off the socket so far, framing included.
     received: Arc<AtomicU64>,
+    /// How the reader thread reads: see [`Viewer::stop_reading`] and
+    /// [`Viewer::read_slowly`].
+    pace: Arc<AtomicU64>,
+    /// Frames applied so far.
+    pub frames: usize,
     pub width: u32,
     pub height: u32,
     framebuffer: Vec<u8>,
@@ -503,19 +512,33 @@ impl Viewer {
     /// Connect with a hand-built first message payload (unframed), such as
     /// the `Hello` of a release from before the version exchange.
     pub fn connect_raw(wm: &Wm, first: &[u8]) -> Viewer {
-        let mut stream = UnixStream::connect(wm.remote_socket()).expect("connect to remote server");
-        stream
-            .write_all(&(first.len() as u32).to_le_bytes())
-            .and_then(|()| stream.write_all(first))
-            .expect("send first message");
-        stream.flush().unwrap();
+        Viewer::try_connect_raw(wm, first).expect("connect to remote server")
+    }
+
+    /// [`Viewer::connect_raw`], or the error when the server can't be reached
+    /// (no listener while the gate is off) or hangs up during the send.
+    pub fn try_connect_raw(wm: &Wm, first: &[u8]) -> std::io::Result<Viewer> {
+        let mut stream = UnixStream::connect(wm.remote_socket())?;
+        stream.write_all(&(first.len() as u32).to_le_bytes())?;
+        stream.write_all(first)?;
+        stream.flush()?;
         let received = Arc::new(AtomicU64::new(0));
         let mut reader = CountingReader {
             inner: stream.try_clone().unwrap(),
             count: Arc::clone(&received),
         };
         let (tx, messages) = mpsc::channel();
+        let pace = Arc::new(AtomicU64::new(0));
+        let reader_pace = Arc::clone(&pace);
         std::thread::spawn(move || loop {
+            match reader_pace.load(Ordering::Relaxed) {
+                0 => {}
+                STOPPED => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                ms => std::thread::sleep(Duration::from_millis(ms)),
+            }
             let msg = match read_framed::<_, ServerMessage>(&mut reader) {
                 Ok(ServerMessage::Bye) => Err(End::Bye),
                 Ok(m) => Ok(m),
@@ -526,10 +549,12 @@ impl Viewer {
                 return;
             }
         });
-        Viewer {
+        Ok(Viewer {
             stream,
             messages,
             received,
+            pace,
+            frames: 0,
             width: 0,
             height: 0,
             framebuffer: Vec::new(),
@@ -537,7 +562,25 @@ impl Viewer {
             server: None,
             refused: None,
             ended: None,
-        }
+        })
+    }
+
+    /// Stop taking data off the socket (after the message being read now), as
+    /// a viewer on a stalled link would, until [`Viewer::read_normally`].
+    pub fn stop_reading(&self) {
+        self.pace.store(STOPPED, Ordering::Relaxed);
+    }
+
+    /// Wait `delay` before reading each message, as a viewer on a slow link.
+    pub fn read_slowly(&self, delay: Duration) {
+        self.pace.store(
+            (delay.as_millis() as u64).clamp(1, STOPPED - 1),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn read_normally(&self) {
+        self.pace.store(0, Ordering::Relaxed);
     }
 
     /// Bytes received from the server so far, framing included.
@@ -556,6 +599,27 @@ impl Viewer {
         let mut v = Viewer::connect(wm, hello);
         v.wait_first_frame();
         v
+    }
+
+    /// [`Viewer::serve`], or `None` if the server can't be reached or the
+    /// session ends before its first frame (the gate closed meanwhile, say).
+    pub fn try_serve(wm: &Wm) -> Option<Viewer> {
+        let mut payload = Vec::new();
+        ClientMessage::Hello {
+            width: OUTPUT_W,
+            height: OUTPUT_H,
+            scale: 1.0,
+            peer: PeerInfo::ours(),
+        }
+        .encode(&mut payload);
+        let mut v = Viewer::try_connect_raw(wm, &payload).ok()?;
+        let deadline = Instant::now() + TIMEOUT;
+        while !v.pump_one(deadline) {
+            if v.ended.is_some() || Instant::now() >= deadline {
+                return None;
+            }
+        }
+        Some(v)
     }
 
     /// A graft-mode viewer of the window matching `selector`, after its first
@@ -623,6 +687,7 @@ impl Viewer {
                     apply_tile(&mut self.framebuffer, self.width, self.height, tile)
                         .expect("apply tile");
                 }
+                self.frames += 1;
                 true
             }
             Ok(ServerMessage::Meta { app_id, title }) => {
@@ -728,12 +793,21 @@ impl Viewer {
         self.send(ClientMessage::Bye);
     }
 
+    /// Say `Bye` if the session is still open; one the server already ended
+    /// (the gate closed meanwhile) just goes.
+    pub fn try_bye(mut self) {
+        let _ = write_framed(&mut self.stream, &ClientMessage::Bye);
+    }
+
     /// Drop the connection without a `Bye`, as a viewer whose network or
     /// process died would.
     pub fn hang_up(self) {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
+
+/// [`Viewer::pace`] for a reader that has stopped.
+const STOPPED: u64 = u64::MAX;
 
 /// Counts the bytes that pass through a reader.
 struct CountingReader<R> {
@@ -912,6 +986,10 @@ pub fn client_main(
         match cmds.try_recv() {
             Ok(Cmd::Paint(argb)) => {
                 // Paint on the next pass, then acknowledge once it is flushed.
+                // Noise differs every time, so it always repaints.
+                if argb == NOISE {
+                    state.painted = !NOISE;
+                }
                 state.colour = argb;
                 pending_paint_ack = true;
                 continue;
@@ -1057,6 +1135,20 @@ pub fn pattern_pixels(width: u32, height: u32) -> Vec<u8> {
     px
 }
 
+/// `width`×`height` opaque pixels of xorshift noise, different on every call.
+pub fn noise_pixels(width: u32, height: u32) -> Vec<u8> {
+    let mut x = 0x9e37_79b9_7f4a_7c15_u64 ^ (next_id() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for _ in 0..width * height {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let [b, g, r, ..] = x.to_le_bytes();
+        px.extend_from_slice(&[b, g, r, 0xff]);
+    }
+    px
+}
+
 pub fn solid_buffer(
     state: &ClientState,
     qh: &QueueHandle<ClientState>,
@@ -1078,6 +1170,8 @@ pub fn solid_buffer(
     std::fs::remove_file(&path).expect("unlink shm file");
     let pixels = if argb == PATTERN {
         pattern_pixels(width, height)
+    } else if argb == NOISE {
+        noise_pixels(width, height)
     } else {
         argb.to_le_bytes().repeat(len / 4)
     };

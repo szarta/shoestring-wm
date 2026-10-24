@@ -228,6 +228,13 @@ The remote gate reuses the existing capability-gate model end to end:
   viewer holds. Closing the remote gate, or the server exiting or crashing,
   closes the automation gate, and the WM then releases everything injection
   held itself, since injection is refused from that point.
+- **Closing the gate ends every session**, a stalled one included. Each viewer
+  gets a ``Bye`` and the connection closes. A viewer that has stopped reading
+  (a frozen client, a link that went quiet) can't take that ``Bye``, so after
+  half a second the server closes its connection anyway rather than keep it,
+  and its session slot, open past the consent. Such a viewer never slows the
+  WM or the other viewers either: the WM skips frames for it and sends one
+  full frame once it reads again.
 - A **"being viewed / controlled" indicator** lights while a client is connected
   - a bar chip alongside MUTE/MIC/CAM, the same privacy-opt-in pattern as the
   capture indicator: never silent, always visible.

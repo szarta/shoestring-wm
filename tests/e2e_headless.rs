@@ -1007,6 +1007,198 @@ fn e2e_remote_viewer_count_survives_a_gate_cycle() {
     wm.wait_viewers(0);
 }
 
+/// A window whose frames of [`NOISE`] (170 KiB each) soon outgrow every
+/// socket buffer between the WM and a viewer, yet stay cheap enough to encode
+/// for every viewer of a debug build that the IPC latency measures backpressure,
+/// not compression.
+const NOISY_WINDOW: (u32, u32) = (240, 180);
+
+/// Rounds of noise the tests stream: several MiB, well past what the buffers
+/// hold.
+const BACKLOG_ROUNDS: usize = 16;
+
+/// The most sessions the remote server serves at once (its `MAX_SESSIONS`).
+const SERVER_SESSIONS: usize = 8;
+
+/// The longest an unrelated IPC query may take while viewers misbehave.
+const RESPONSIVE: Duration = Duration::from_millis(500);
+
+fn assert_responsive(wm: &Wm, when: &str) {
+    let latency = query_latency(wm);
+    assert!(latency < RESPONSIVE, "outputs took {latency:?} {when}");
+}
+
+/// Render [`BACKLOG_ROUNDS`] frames of noise, each confirmed on the output
+/// before the next, so every viewer that isn't reading falls far behind.
+/// Checks the WM stays responsive throughout, and ends on `last`.
+fn back_up(wm: &Wm, client: &TestClient, centre: (i32, i32), last: u32) {
+    for _ in 0..BACKLOG_ROUNDS {
+        client.paint(IDLE);
+        wm.wait_pixel(centre, rgb(IDLE), "a solid frame between the noise");
+        client.paint(NOISE);
+        wait_for("a frame of noise on the output", || {
+            (wm.pixel(centre) != rgb(IDLE)).then_some(())
+        });
+        assert_responsive(wm, "while viewers fell behind");
+    }
+    client.paint(last);
+    wm.wait_pixel(centre, rgb(last), "the final colour on the output");
+}
+
+/// A viewer that stops reading, or reads slowly, holds back only its own
+/// session: the WM keeps answering IPC and keeps streaming to a viewer that
+/// reads, the stalled one catches up with a full frame once it reads again
+/// (without being sent every frame it missed), and the slow one gets there.
+#[test]
+#[ignore]
+fn e2e_remote_stalled_and_slow_viewers_hold_back_only_themselves() {
+    let mut wm = Wm::start();
+    let client = TestClient::map_sized(&wm, NOISY_WINDOW);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+
+    let mut stalled = Viewer::serve(&wm);
+    let mut slow = Viewer::serve(&wm);
+    let mut reading = Viewer::serve(&wm);
+    wm.wait_viewers(3);
+    stalled.stop_reading();
+    slow.read_slowly(Duration::from_millis(40));
+
+    let colours = [CLICKED, KEYED];
+    for (round, colour) in colours.iter().cycle().take(BACKLOG_ROUNDS).enumerate() {
+        client.paint(NOISE);
+        client.paint(*colour);
+        reading.wait_pixel(
+            centre,
+            rgb(*colour),
+            &format!("the reading viewer, round {round}"),
+        );
+        assert_responsive(&wm, "while a viewer was stalled and another slow");
+    }
+    let last = colours[(BACKLOG_ROUNDS - 1) % 2];
+
+    slow.wait_pixel(centre, rgb(last), "the slow viewer");
+    let before = stalled.frames;
+    stalled.read_normally();
+    stalled.wait_pixel(centre, rgb(last), "the stalled viewer once it reads");
+    let caught_up_in = stalled.frames - before;
+    assert!(
+        caught_up_in < BACKLOG_ROUNDS,
+        "the stalled viewer was sent {caught_up_in} frames to catch up; \
+         the WM should skip what it can't take and resync"
+    );
+    wm.wait_viewers(3);
+}
+
+/// Turning the gate off ends every session, even those whose viewers stopped
+/// reading with frames queued for them. None outlives the consent: a viewer
+/// that reads again gets only what was captured before, then the end. And
+/// none keeps one of the server's session slots, so once the gate reopens a
+/// new viewer gets in although every slot was taken by a stalled one.
+#[test]
+#[ignore]
+fn e2e_remote_gate_revocation_ends_stalled_sessions() {
+    let mut wm = Wm::start();
+    let client = TestClient::map_sized(&wm, NOISY_WINDOW);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+
+    let mut stalled: Vec<Viewer> = (0..SERVER_SESSIONS).map(|_| Viewer::serve(&wm)).collect();
+    wm.wait_viewers(SERVER_SESSIONS as u64);
+    for viewer in &stalled {
+        viewer.stop_reading();
+    }
+    back_up(&wm, &client, centre, CLICKED);
+
+    wm.set_remote(false);
+    assert_responsive(&wm, "right after revoking a backed-up gate");
+    wm.wait_viewers(0);
+    // Painted after the revocation: no viewer may ever see it. (Closing the
+    // remote gate closed the automation gate the pixel probe needs.)
+    wm.ipc_ok(json!({"type": "set_automation", "enabled": true}));
+    client.paint(KEYED);
+    wm.wait_pixel(centre, rgb(KEYED), "the colour painted after revocation");
+
+    wm.set_remote(true);
+    let mut fresh = wait_for(
+        "a new viewer to get a session after the gate reopened",
+        || Viewer::try_serve(&wm),
+    );
+    fresh.wait_pixel(centre, rgb(KEYED), "the new viewer");
+    wm.wait_viewers(1);
+
+    for (i, viewer) in stalled.iter_mut().enumerate() {
+        viewer.read_normally();
+        viewer.wait_end();
+        assert_ne!(
+            viewer.pixel(centre),
+            rgb(KEYED),
+            "stalled viewer {i} saw a frame captured after the gate closed"
+        );
+    }
+    assert_responsive(&wm, "after the stalled viewers drained");
+    wm.wait_viewers(1);
+}
+
+/// Viewers connecting and leaving from several threads while the gate flips
+/// on and off: the WM keeps answering throughout, and once it settles the
+/// count is back to zero and a new viewer gets a working session.
+#[test]
+#[ignore]
+fn e2e_remote_viewer_churn_across_gate_flips() {
+    const CHURNERS: usize = 4;
+    const FLIPS: usize = 10;
+    let mut wm = Wm::start();
+    let client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let sessions = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for i in 0..CHURNERS {
+            let (wm, stop, sessions) = (&wm, &stop, &sessions);
+            s.spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    match Viewer::try_serve(wm) {
+                        Some(viewer) => {
+                            sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i % 2 == 0 {
+                                viewer.try_bye();
+                            } else {
+                                viewer.hang_up();
+                            }
+                        }
+                        None => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            });
+        }
+        for _ in 0..FLIPS {
+            std::thread::sleep(Duration::from_millis(100));
+            wm.set_remote(false);
+            assert_responsive(&wm, "just after the gate closed under churn");
+            std::thread::sleep(Duration::from_millis(30));
+            wm.set_remote(true);
+            assert_responsive(&wm, "just after the gate opened under churn");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    assert!(
+        sessions.into_inner() >= FLIPS,
+        "too few sessions got going for the churn to mean anything"
+    );
+
+    wm.wait_viewers(0);
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    client.paint(CLICKED);
+    viewer.wait_pixel(centre, rgb(CLICKED), "a viewer after the churn");
+}
+
 /// Whether `pid` is still a live process (not gone, not a zombie).
 fn process_alive(pid: u32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {

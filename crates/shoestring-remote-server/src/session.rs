@@ -18,7 +18,8 @@ use std::io::{BufReader, BufWriter, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use shoestring_ipc::RawInput;
@@ -34,7 +35,7 @@ use crate::wm;
 /// How long a new connection has to send its first message (`Hello` or
 /// `Graft`) before the session gives up on it, so a client that connects and
 /// says nothing doesn't hold a session thread forever.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shutdown handles + a one-shot flag so the first loop to finish can unblock
 /// the other by closing both sockets.
@@ -42,6 +43,52 @@ struct Teardown {
     net: Stream,
     wm_capture: UnixStream,
     done: AtomicBool,
+}
+
+/// The live sessions, so closing the gate can end those that don't end on
+/// their own.
+///
+/// A healthy session ends by itself once the WM closes its capture stream,
+/// passing the WM's `Bye` on to its viewer. One whose viewer has stopped
+/// reading can't: its frames thread is blocked writing to the viewer, so it
+/// never reads the end of the capture stream, and its input loop is blocked
+/// reading a viewer with nothing to say. Shutting both sockets down unblocks
+/// the two.
+#[derive(Default)]
+pub struct Sessions {
+    live: Mutex<Vec<Weak<Teardown>>>,
+}
+
+impl Sessions {
+    fn add(&self, teardown: &Arc<Teardown>) {
+        let mut live = self.live.lock().unwrap();
+        live.retain(|t| t.strong_count() > 0);
+        live.push(Arc::downgrade(teardown));
+    }
+
+    fn any_live(&self) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|t| t.strong_count() > 0)
+    }
+
+    /// Give the live sessions `grace` to end on their own, then end the rest;
+    /// returns how many had to be ended.
+    pub fn end_all(&self, grace: Duration) -> usize {
+        let deadline = Instant::now() + grace;
+        while self.any_live() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let live = std::mem::take(&mut *self.live.lock().unwrap());
+        let mut ended = 0;
+        for teardown in live.iter().filter_map(Weak::upgrade) {
+            teardown.stop();
+            ended += 1;
+        }
+        ended
+    }
 }
 
 /// The network writer, shared between the frames thread and the input loop.
@@ -68,6 +115,7 @@ pub fn serve(
     output: Option<String>,
     viewers: Arc<Viewers>,
     holds: Arc<Holds>,
+    sessions: Arc<Sessions>,
 ) -> Result<()> {
     // The client's first message discriminates the mode:
     // - `Hello` → **serve mode**: stream a whole output. Hello carries the
@@ -144,6 +192,7 @@ pub fn serve(
             .context("clone wm capture for teardown")?,
         done: AtomicBool::new(false),
     });
+    sessions.add(&teardown);
 
     // This client now counts as a viewer (lights the WM's "being viewed" chip)
     // until the guard drops, which an early error below can't skip.
@@ -362,6 +411,52 @@ fn to_raw_input(msg: &ClientMessage) -> Option<RawInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn teardown() -> (Arc<Teardown>, UnixStream, UnixStream) {
+        let (net, viewer) = UnixStream::pair().unwrap();
+        let (wm_capture, wm) = UnixStream::pair().unwrap();
+        let teardown = Arc::new(Teardown {
+            net: Stream::Unix(net),
+            wm_capture,
+            done: AtomicBool::new(false),
+        });
+        (teardown, viewer, wm)
+    }
+
+    #[test]
+    fn end_all_unblocks_a_write_to_a_viewer_that_stopped_reading() {
+        let sessions = Sessions::default();
+        let (live, _viewer, _wm) = teardown();
+        sessions.add(&live);
+        let (gone, _, _) = teardown();
+        sessions.add(&gone);
+        drop(gone);
+
+        // Fill the socket to a viewer that never reads; the write blocks.
+        let mut out = live.net.try_clone().unwrap();
+        let writer = std::thread::spawn(move || {
+            let chunk = [0u8; 64 * 1024];
+            loop {
+                if let Err(e) = out.write_all(&chunk) {
+                    return e.kind();
+                }
+            }
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!writer.is_finished(), "the write should be blocked");
+
+        assert_eq!(
+            sessions.end_all(Duration::from_millis(50)),
+            1,
+            "only the live session counts"
+        );
+        assert_eq!(writer.join().unwrap(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            sessions.end_all(Duration::ZERO),
+            0,
+            "end_all forgets what it ended"
+        );
+    }
 
     #[test]
     fn input_messages_map_to_raw_events() {

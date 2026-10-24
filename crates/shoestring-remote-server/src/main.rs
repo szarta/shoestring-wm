@@ -40,12 +40,18 @@ use tracing_subscriber::Layer as _;
 
 use holds::Holds;
 use listen::{Endpoint, Listener};
+use session::Sessions;
 use viewers::Viewers;
 
 /// Most sessions served at once. Each holds a thread, two WM connections and
 /// a capture stream; a real setup has one or two viewers, so this only stops
 /// a runaway client from exhausting the box.
 const MAX_SESSIONS: usize = 8;
+
+/// How long sessions get to end on their own when the gate closes before the
+/// server ends them. A healthy one ends within milliseconds, passing on the
+/// WM's `Bye`; only one whose viewer stopped reading waits this out.
+const SESSION_END_GRACE: Duration = Duration::from_millis(500);
 
 /// Counts a live session; the count drops when its thread ends.
 struct SessionSlot(Arc<AtomicUsize>);
@@ -246,6 +252,7 @@ fn run_supervisor(
     holds: &Arc<Holds>,
 ) -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
+    let sessions = Arc::new(Sessions::default());
     loop {
         if gate.wait_enabled() {
             tracing::info!("shutting down");
@@ -284,6 +291,7 @@ fn run_supervisor(
                     tracing::info!(peer = %accepted.peer, "client connected");
                     let viewers = Arc::clone(viewers);
                     let holds = Arc::clone(holds);
+                    let sessions = Arc::clone(&sessions);
                     let output = cfg.output.clone();
                     std::thread::Builder::new()
                         .name("session".into())
@@ -295,6 +303,7 @@ fn run_supervisor(
                                 output,
                                 viewers,
                                 holds,
+                                sessions,
                             ) {
                                 tracing::warn!(error = %e, "session error");
                             }
@@ -312,15 +321,24 @@ fn run_supervisor(
         }
 
         // Gate off (or accept died): drop the listener so the socket goes. With
-        // the gate off, live sessions end on their own when the WM tears down
-        // their capture subscriptions, and the WM has released the keys they
-        // held, so the viewer chip clears now and the count and holds start a
-        // new generation. After a failed accept the sessions are still live and
-        // keep both.
+        // the gate off, the WM has released the keys the sessions held, so the
+        // viewer chip clears now and the count and holds start a new
+        // generation. The sessions end as the WM closes their capture streams,
+        // except one whose viewer stopped reading: it would never see that and
+        // would keep its slot and its connection past the consent, so after a
+        // grace the server ends what is left. After a failed accept the
+        // sessions are still live and keep all of it.
         drop(listener);
         if !gate.snapshot().0 {
             viewers.reset();
             holds.reset();
+            let ended = sessions.end_all(SESSION_END_GRACE);
+            if ended > 0 {
+                tracing::info!(
+                    sessions = ended,
+                    "ended sessions whose viewers stopped reading (remote gate off)"
+                );
+            }
         }
         tracing::info!("listener closed (remote gate off)");
 
