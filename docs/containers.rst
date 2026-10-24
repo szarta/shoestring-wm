@@ -12,7 +12,7 @@ This page explains why the headless backend is container-friendly, the
 serve-mode topology that lets you view and drive a containerized session, and
 the "desktop per container" pattern it enables. A ready-to-run ``Dockerfile``
 ships in `packaging/docker/
-<https://github.com/barrendo/shoestring-wm/tree/main/packaging/docker>`_; see
+<https://github.com/szarta/shoestring-wm/tree/main/packaging/docker>`_; see
 its ``README.md`` for the full build/run reference.
 
 .. note::

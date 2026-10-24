@@ -5,7 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 license = "MIT"
 description = "A lightweight dmenu-style launcher for shoestring-wm (commands and bookmarks)."
-repository = "https://github.com/szarta/shoestring-menu"
+repository.workspace = true
 
 [[bin]]
 name = "shoestring-menu"

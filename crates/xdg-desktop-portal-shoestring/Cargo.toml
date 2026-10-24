@@ -5,7 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 license = "MIT"
 description = "Native xdg-desktop-portal ScreenCast backend for shoestring-wm: per-consumer dmabuf+shm PipeWire screencast over zwlr_screencopy_v1."
-repository = "https://github.com/barrendo/shoestring-wm"
+repository.workspace = true
 
 [[bin]]
 name = "xdg-desktop-portal-shoestring"

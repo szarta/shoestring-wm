@@ -36,7 +36,7 @@ edition = "2021"
 # set by dependencies (darling, instability); raise it deliberately.
 rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/barrendo/shoestring-wm"
+repository = "https://github.com/szarta/shoestring-wm"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

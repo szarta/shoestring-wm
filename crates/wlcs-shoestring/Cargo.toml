@@ -13,7 +13,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/barrendo/shoestring-wm"
+repository = "https://github.com/szarta/shoestring-wm"
 description = "WLCS conformance-test plugin for shoestring-wm."
 publish = false
 
