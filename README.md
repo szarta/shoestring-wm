@@ -6,6 +6,30 @@ Openbox/X11 desktop with floating windows, half-tile snaps,
 configurable global workspaces (default 16), multi-monitor, TOML config,
 and JSON IPC. The bar and desktop helpers run as separate processes.
 
+## Trust boundary
+
+shoestring-wm trusts every process that runs as you. Its JSON IPC socket
+(mode 0600, in your private `$XDG_RUNTIME_DIR`) drives and observes the
+whole session, and any process that can connect to it has full control,
+including the switches for every gate.
+
+- The automation, screen-capture, and remote gates keep input synthesis,
+  capture, and remote access off until someone turns them on, and the bar
+  shows when they are on. They prevent accidents and unnoticed
+  observation. They do not stop hostile code running as you, which can
+  turn them on itself.
+- Any Wayland client can synthesize input through the virtual-pointer and
+  virtual-keyboard protocols, whatever the automation gate says, because
+  `wlrctl`, `ydotool`, and input methods depend on them.
+- Neither the gates nor the privacy switches (audio and mic mute, the
+  camera indicator) sandbox an application. To isolate one you do not
+  trust, run it where it cannot reach your session: as another user, or in
+  a container or sandbox without your `$XDG_RUNTIME_DIR`.
+
+The [trust model in the IPC docs](docs/ipc.rst#trust-model) lists what
+each gate holds back and what any process can still do, and
+[ADR 0005](docs/adr/0005-ipc-socket-access-is-full-trust.md) records why.
+
 ## In-repo binaries
 
 The workspace ships the WM plus every helper and desktop sibling it
