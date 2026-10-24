@@ -171,6 +171,30 @@ fn locked_tile(w: i32, h: i32) -> Tile {
     encode_tile(to_remote_rect(region), raw, TileEncoding::Zlib)
 }
 
+/// The tiles one render has encoded, by region, so subscribers that need the
+/// same region share one readback and one encode instead of paying for each.
+/// A failed readback is remembered too, so it isn't retried per subscriber.
+#[derive(Default)]
+struct TileCache {
+    tiles: Vec<(Rectangle<i32, BufferCoord>, Option<Tile>)>,
+}
+
+impl TileCache {
+    /// The tile for `region`, from `encode` the first time it is asked for.
+    fn get(
+        &mut self,
+        region: Rectangle<i32, BufferCoord>,
+        encode: impl FnOnce() -> Option<Tile>,
+    ) -> Option<Tile> {
+        if let Some((_, tile)) = self.tiles.iter().find(|(r, _)| *r == region) {
+            return tile.clone();
+        }
+        let tile = encode();
+        self.tiles.push((region, tile.clone()));
+        tile
+    }
+}
+
 /// Push a damage frame to every capture subscriber of `output`, reading back
 /// the changed regions from the just-rendered `framebuffer`. Call once per
 /// render, after `render_output`, while the framebuffer is still bound.
@@ -211,6 +235,9 @@ pub fn push_capture<R>(
 
     let mut to_drop: Vec<ClientId> = Vec::new();
     let mut any_pushed = false;
+    // Viewers of one output mostly want the same regions this render: the
+    // damage, or the whole output when fresh, resized or resyncing.
+    let mut cache = TileCache::default();
     // Static frame while locked, unless the lock preview is open.
     let locked = state.is_locked() && !state.lock_preview_active();
 
@@ -288,12 +315,18 @@ pub fn push_capture<R>(
                 scale,
             });
         }
+        // `locked` holds for every subscriber in this render, so the locked
+        // tile and a whole-output readback never share a cache entry.
         let tiles: Vec<Tile> = if locked {
-            vec![locked_tile(w, h)]
+            let whole = Rectangle::new(Point::from((0, 0)), Size::from((w, h)));
+            cache
+                .get(whole, || Some(locked_tile(w, h)))
+                .into_iter()
+                .collect()
         } else {
             regions
                 .into_iter()
-                .filter_map(|r| tile_for_region(renderer, framebuffer, r))
+                .filter_map(|r| cache.get(r, || tile_for_region(renderer, framebuffer, r)))
                 .collect()
         };
         let next_seq = seq.wrapping_add(1);
@@ -342,5 +375,51 @@ impl ShoestringWm {
             let _ = client.borrow_mut().queue_frames(&[ServerMessage::Bye]);
             self.drop_ipc_client(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn region(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, BufferCoord> {
+        Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+    }
+
+    fn tile(r: Rectangle<i32, BufferCoord>) -> Tile {
+        let raw = vec![0x7f; (r.size.w * r.size.h * 4) as usize];
+        encode_tile(to_remote_rect(r), raw, TileEncoding::Zlib)
+    }
+
+    #[test]
+    fn tile_cache_encodes_each_region_once() {
+        let mut cache = TileCache::default();
+        let mut encodes = 0;
+        let (a, b) = (region(0, 0, 8, 8), region(8, 0, 4, 4));
+        for r in [a, b, a, b, a] {
+            let got = cache.get(r, || {
+                encodes += 1;
+                Some(tile(r))
+            });
+            assert_eq!(got, Some(tile(r)), "{r:?}");
+        }
+        assert_eq!(encodes, 2);
+    }
+
+    #[test]
+    fn tile_cache_remembers_a_failed_readback() {
+        let mut cache = TileCache::default();
+        let mut attempts = 0;
+        for _ in 0..3 {
+            let got = cache.get(region(0, 0, 8, 8), || {
+                attempts += 1;
+                None
+            });
+            assert_eq!(got, None);
+        }
+        assert_eq!(
+            attempts, 1,
+            "a failed readback must not be retried per subscriber"
+        );
     }
 }

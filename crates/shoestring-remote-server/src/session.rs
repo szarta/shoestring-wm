@@ -324,18 +324,23 @@ fn forward_input(
                 let Some(event) = to_raw_input(&other) else {
                     continue;
                 };
-                // Key and button transitions pass only when they change what
-                // the viewers hold as a whole (see holds.rs).
-                if let Some((held, pressed)) = held_transition(event) {
-                    if !holds.transition(&mut mine, held, pressed) {
-                        continue;
-                    }
-                }
                 // Graft mode targets the grafted window; serve mode drives the
                 // global seat.
-                let result = match &graft_id {
+                let inject = || match &graft_id {
                     Some(id) => wm::inject_to_window(id, event),
                     None => wm::inject(event, true),
+                };
+                // Key and button transitions pass only when they change what
+                // the viewers hold as a whole, and are delivered in the order
+                // they were counted (see holds.rs).
+                let delivered = match held_transition(event) {
+                    Some((held, pressed)) => {
+                        holds.transition_then(&mut mine, held, pressed, inject)
+                    }
+                    None => Some(inject()),
+                };
+                let Some(result) = delivered else {
+                    continue;
                 };
                 if let Err(e) = result {
                     // The gate likely flipped off mid-session; stop cleanly.
@@ -346,7 +351,9 @@ fn forward_input(
         }
     }
     teardown.stop();
-    release_held(holds.end(&mut mine), graft_id.is_none());
+    holds.end_then(&mut mine, |released| {
+        release_held(released, graft_id.is_none())
+    });
     Ok(())
 }
 

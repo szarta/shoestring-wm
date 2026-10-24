@@ -9,6 +9,13 @@
 //! releases those no other viewer holds, so they don't stay pressed on the
 //! served seat while everyone else keeps working.
 //!
+//! A transition is delivered to the WM while the counts are still locked
+//! ([`Holds::transition_then`], [`Holds::end_then`]), so the WM sees them in
+//! the order the counts changed. Otherwise one viewer's Super could be
+//! counted, then overtaken by another viewer's L, and the WM would see a
+//! plain L; or a leaving viewer's release could land after another viewer's
+//! new press of the same key and leave it up while that viewer holds it.
+//!
 //! The WM covers the cases the server can't: when the automation gate closes
 //! (the remote gate going off, or this server exiting or crashing) it releases
 //! everything injection holds itself. The server then starts a new generation
@@ -61,8 +68,27 @@ impl Holds {
     /// the first press of something no other session holds, or the release of
     /// the last hold. A repeated press, a stray release, or anything from a
     /// session of an earlier generation returns `false`.
+    #[cfg(test)]
     pub fn transition(&self, mine: &mut SessionHolds, held: Held, pressed: bool) -> bool {
+        self.transition_then(mine, held, pressed, || ()).is_some()
+    }
+
+    /// Record a session's transition and, when it should reach the WM (see
+    /// [`Holds::transition`]), `deliver` it before another session's
+    /// transition can be counted. Returns what `deliver` returned, or `None`
+    /// when the transition stays with the server.
+    pub fn transition_then<T>(
+        &self,
+        mine: &mut SessionHolds,
+        held: Held,
+        pressed: bool,
+        deliver: impl FnOnce() -> T,
+    ) -> Option<T> {
         let mut inner = self.inner.lock().unwrap();
+        Self::record(&mut inner, mine, held, pressed).then(deliver)
+    }
+
+    fn record(inner: &mut Counts, mine: &mut SessionHolds, held: Held, pressed: bool) -> bool {
         if mine.generation != inner.generation {
             return false;
         }
@@ -84,15 +110,24 @@ impl Holds {
     /// A session ended: forget everything it held and return what now has no
     /// holder at all, for the caller to release. Nothing, for a session of an
     /// earlier generation: the WM already released its keys.
+    #[cfg(test)]
     pub fn end(&self, mine: &mut SessionHolds) -> Vec<Held> {
+        self.end_then(mine, |released| released)
+    }
+
+    /// [`Holds::end`], handing what to release to `release` before another
+    /// session's transition can be counted.
+    pub fn end_then<T>(&self, mine: &mut SessionHolds, release: impl FnOnce(Vec<Held>) -> T) -> T {
         let mut inner = self.inner.lock().unwrap();
         let held = std::mem::take(&mut mine.held);
-        if mine.generation != inner.generation {
-            return Vec::new();
-        }
-        held.into_iter()
-            .filter(|&h| Self::drop_one(&mut inner.counts, h))
-            .collect()
+        let released = if mine.generation == inner.generation {
+            held.into_iter()
+                .filter(|&h| Self::drop_one(&mut inner.counts, h))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        release(released)
     }
 
     /// The gate closed: every session is ending and the WM has released what
@@ -161,6 +196,53 @@ mod tests {
         // Nothing is left: a new press is the first again.
         let mut c = holds.session();
         assert!(holds.transition(&mut c, SHIFT, true));
+    }
+
+    /// Press `held` for `session` on its own thread, logging `name` when the
+    /// press is delivered, `pause` after it was counted.
+    fn press_on_thread(
+        holds: &std::sync::Arc<Holds>,
+        log: &std::sync::Arc<Mutex<Vec<&'static str>>>,
+        mut session: SessionHolds,
+        held: Held,
+        name: &'static str,
+        pause: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let (holds, log) = (holds.clone(), log.clone());
+        std::thread::spawn(move || {
+            holds.transition_then(&mut session, held, true, || {
+                std::thread::sleep(pause);
+                log.lock().unwrap().push(name);
+            });
+        })
+    }
+
+    #[test]
+    fn a_counted_press_is_delivered_before_a_later_one() {
+        let holds = std::sync::Arc::new(Holds::new());
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (a, b) = (holds.session(), holds.session());
+        // a's Super is counted first but slow to deliver; b's L follows.
+        let super_down = press_on_thread(
+            &holds,
+            &log,
+            a,
+            Held::Key(125),
+            "super",
+            std::time::Duration::from_millis(100),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let l_down = press_on_thread(
+            &holds,
+            &log,
+            b,
+            Held::Key(38),
+            "l",
+            std::time::Duration::ZERO,
+        );
+        super_down.join().unwrap();
+        l_down.join().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["super", "l"]);
     }
 
     #[test]
