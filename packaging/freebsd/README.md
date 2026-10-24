@@ -17,7 +17,6 @@ that is a 1.0 task (it goes through Bugzilla review).
 | `distinfo`       | generated    | SHA256 + size of the source tarball and every crate   |
 | `pkg-plist`      | yes          | Exact list of installed files                         |
 | `pkg-descr`      | yes          | Package description                                    |
-| `files/patch-*`  | yes          | Patches applied to the source and vendored crates      |
 
 ## Regenerating the generated files
 
@@ -60,9 +59,9 @@ ports-tree submission.
   on FreeBSD).
 - **The locker PAM policy** is `resources/pam/shoestring-lock.freebsd`
   (delegates to `security/unix-selfauth-helper`), installed as a `@sample`.
-- **PipeWire bindings** are patched (`files/patch-pipewire_init`). FreeBSD's
-  pipewire package renames `pw_init`/`pw_deinit` to `pipewire_init`/
-  `pipewire_deinit` to avoid a clash with libutil, which the vendored
-  `pipewire`/`pipewire-sys` crates don't expect. Other Rust ports that use
-  PipeWire (niri, helvum) carry the same patch. When `Cargo.lock` moves to a
-  new `pipewire` version, rename the crate directories in the patch to match.
+- **PipeWire bindings** need no port patch. FreeBSD's pipewire package
+  renames `pw_init`/`pw_deinit` to `pipewire_init`/`pipewire_deinit`; other
+  Rust ports (niri, helvum) patch the vendored crates for that, but this
+  repository carries a patched `pipewire-sys` under `third_party/` (see its
+  `PATCH.md`), so the source builds as-is. Like every `[patch.crates-io]`
+  crate, it is left out of `Makefile.crates` and `distinfo`.

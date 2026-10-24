@@ -233,12 +233,15 @@ To **build from source** instead, install the toolchain and libraries::
         pipewire
 
 (``pipewire`` provides ``libpipewire-0.3``/``libspa-0.2`` for the screencast
-portal; ``clang``/``libclang`` for its bindgen build come from the base
-system. Omit it only if you ``--exclude`` the portal crate from the build.)
+portal and ``shoestring-mediad``; ``clang``/``libclang`` for their bindgen
+build come from the base system. FreeBSD's pipewire renames ``pw_init``, which
+the workspace handles with a patched ``pipewire-sys`` under ``third_party/``,
+so a plain ``cargo build --workspace`` works. Omit ``pipewire`` only if you
+``--exclude xdg-desktop-portal-shoestring --exclude shoestring-mediad``.)
 
 At runtime the bar, menu, notifications, and screen locker also need a font,
-and a stock FreeBSD install has none. Without one ``shoestring-lock`` exits
-before locking, so the lock command leaves the session unlocked::
+and a stock FreeBSD install has none. Without one the locker still locks, but
+shows no prompt text, and the other helpers fail to start::
 
     pkg install dejavu
 

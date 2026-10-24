@@ -234,16 +234,11 @@ jobs:
   # against OpenPAM's return codes. Deps mirror the FreeBSD list in
   # docs/install.rst.
   #
-  # The two PipeWire-linked crates (xdg-desktop-portal-shoestring and
-  # shoestring-mediad) are EXCLUDED here. FreeBSD's pipewire package renames
-  # pw_init/pw_deinit to pipewire_init/pipewire_deinit, so the unpatched
-  # pipewire crate does not compile against it. The port fixes that with
-  # packaging/freebsd/files/patch-pipewire_init and builds both crates under
-  # its SCREENCAST option (on by default); a plain cargo build like this one
-  # has no way to apply that patch. The port build is checked by hand on a
-  # FreeBSD machine (make stage && make check-plist), not by this gate.
-  # Everything else (WM tty backend + every other helper) compiles, so
-  # nothing else is feature-gated out.
+  # Every crate builds here, the two PipeWire-linked ones included:
+  # FreeBSD's pipewire package renames pw_init/pw_deinit, and the patched
+  # third_party/pipewire-sys (ADR 0002) binds the new names. The port build
+  # itself is checked by hand on a FreeBSD machine (make stage && make
+  # check-plist), not by this gate.
   check-freebsd:
     runs-on: ubuntu-24.04
 
@@ -264,17 +259,14 @@ jobs:
               wayland libxkbcommon \
               libdrm mesa-libs \
               libudev-devd libinput \
-              seatd libdisplay-info pixman
+              seatd libdisplay-info pixman pipewire
           # pkg installs libs under /usr/local/lib, which base ld(1) does not
           # search — point the linker at it (matches docs/install.rst).
-          # --exclude the screencast portal (see the comment on this job):
-          # it's the port's optional SCREENCAST component, built elsewhere.
           run: |
             set -e
             export RUSTFLAGS="-L/usr/local/lib"
             export CARGO_TERM_COLOR=always
-            EXCLUDE="--exclude xdg-desktop-portal-shoestring --exclude shoestring-mediad"
             cargo fmt --all -- --check
-            cargo clippy --workspace $EXCLUDE --all-targets -- -D warnings
-            cargo test --workspace $EXCLUDE
-            cargo build --workspace $EXCLUDE --release
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo test --workspace
+            cargo build --workspace --release

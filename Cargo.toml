@@ -334,3 +334,4 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable", "stagi
 libdisplay-info = { path = "third_party/libdisplay-info-rs/libdisplay-info" }
 libdisplay-info-sys = { path = "third_party/libdisplay-info-rs/libdisplay-info-sys" }
 libdisplay-info-derive = { path = "third_party/libdisplay-info-rs/libdisplay-info-derive" }
+pipewire-sys = { path = "third_party/pipewire-sys" }
