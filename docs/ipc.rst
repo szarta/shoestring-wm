@@ -1536,6 +1536,13 @@ Unreleased
   locked; open ``capture_window`` streams pause until unlock.
 - An ``error`` starting ``request too large`` for a request line over
   256 MiB.
+- A reply larger than the socket buffer, such as a large ``clipboard``, is
+  queued and arrives whole; it used to be cut off partway. A streaming
+  subscriber may now fall up to 1 MiB behind before it is dropped.
+- A ``capture_stream`` or ``capture_window`` render whose damage is too big
+  for one message arrives as several ``Frame`` messages, each with its own
+  ``seq``. It used to end the stream. Only frames near the 8192×8192 limit
+  are affected.
 - ``wait_window`` resolves a map wait once the window has its first frame
   and its initial placement. It used to resolve as soon as a wayland window
   had a matching title, which a toolkit sets before drawing, and could reply

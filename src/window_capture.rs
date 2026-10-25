@@ -47,9 +47,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use shoestring_remote::{PeerInfo, PixelFormat, ServerMessage, Tile};
+use shoestring_remote::{frame_messages, PeerInfo, PixelFormat, ServerMessage, Tile};
 
-use crate::capture_stream::{clamp_to_buffer, readback, tile_for_region};
+use crate::capture_stream::{bands, clamp_to_buffer, readback, tile_for_region};
 use crate::drawing::OutputRenderElements;
 use crate::ipc::{write_response, Client, ClientId};
 use crate::state::ShoestringWm;
@@ -399,6 +399,7 @@ where
         damage
             .iter()
             .filter_map(|r| clamp_to_buffer(*r, pw, ph))
+            .flat_map(bands)
             .filter_map(|region| tile_for_region(renderer, &fb, region))
             .collect()
     };
@@ -409,11 +410,8 @@ where
         return true;
     }
 
-    let next_seq = sub.seq.wrapping_add(1);
-    messages.push(ServerMessage::Frame {
-        seq: next_seq,
-        tiles,
-    });
+    let (frames, next_seq) = frame_messages(sub.seq, tiles);
+    messages.extend(frames);
 
     if c.queue_frames(&messages).is_err() {
         return false;

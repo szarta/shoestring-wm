@@ -41,7 +41,8 @@ use smithay::{
 };
 
 use shoestring_remote::{
-    encode_tile, PeerInfo, PixelFormat, Rect as RemoteRect, ServerMessage, Tile, TileEncoding,
+    band_rows, encode_tile, frame_messages, PeerInfo, PixelFormat, Rect as RemoteRect,
+    ServerMessage, Tile, TileEncoding,
 };
 
 use crate::ipc::{Client, ClientId};
@@ -106,6 +107,23 @@ pub(crate) fn clamp_to_buffer(
         Point::from((x0, y0)),
         Size::from((x1 - x0, y1 - y0)),
     ))
+}
+
+/// `region` cut into horizontal bands of at most [`band_rows`] rows, so each
+/// becomes a tile well under the wire's message cap. Nearly every region is
+/// one band.
+pub(crate) fn bands(
+    region: Rectangle<i32, BufferCoord>,
+) -> impl Iterator<Item = Rectangle<i32, BufferCoord>> {
+    let rows = band_rows(region.size.w.max(0) as u32).min(i32::MAX as u32) as i32;
+    (region.loc.y..region.loc.y + region.size.h)
+        .step_by(rows as usize)
+        .map(move |y| {
+            Rectangle::new(
+                Point::from((region.loc.x, y)),
+                Size::from((region.size.w, rows.min(region.loc.y + region.size.h - y))),
+            )
+        })
 }
 
 fn to_remote_rect(r: Rectangle<i32, BufferCoord>) -> RemoteRect {
@@ -326,14 +344,12 @@ pub fn push_capture<R>(
         } else {
             regions
                 .into_iter()
+                .flat_map(bands)
                 .filter_map(|r| cache.get(r, || tile_for_region(renderer, framebuffer, r)))
                 .collect()
         };
-        let next_seq = seq.wrapping_add(1);
-        messages.push(ServerMessage::Frame {
-            seq: next_seq,
-            tiles,
-        });
+        let (frames, next_seq) = frame_messages(seq, tiles);
+        messages.extend(frames);
 
         // Queue the frames; only a real I/O failure drops the subscriber.
         let wrote = client.borrow_mut().queue_frames(&messages);
@@ -384,6 +400,30 @@ mod tests {
 
     fn region(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, BufferCoord> {
         Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+    }
+
+    #[test]
+    fn an_ordinary_region_is_one_band() {
+        let r = region(10, 20, 3840, 2160);
+        assert_eq!(bands(r).collect::<Vec<_>>(), vec![r]);
+    }
+
+    /// A region too big for one tile is cut into full-width bands that cover
+    /// it exactly, top to bottom.
+    #[test]
+    fn a_huge_region_is_cut_into_covering_bands() {
+        let r = region(0, 5, 8192, 8192);
+        let rows = band_rows(8192) as i32;
+        let cut: Vec<_> = bands(r).collect();
+        assert!(cut.len() > 1);
+        let mut y = r.loc.y;
+        for band in &cut {
+            assert_eq!((band.loc.x, band.size.w), (0, 8192));
+            assert_eq!(band.loc.y, y);
+            assert!(band.size.h <= rows);
+            y += band.size.h;
+        }
+        assert_eq!(y, r.loc.y + r.size.h);
     }
 
     fn tile(r: Rectangle<i32, BufferCoord>) -> Tile {

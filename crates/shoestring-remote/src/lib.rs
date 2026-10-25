@@ -60,12 +60,60 @@ use std::io::{Read, Write};
 /// covers a full-screen 8K raw frame (≈132 MiB) with headroom.
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024 * 1024;
 
+/// Largest pixel payload, uncompressed, a sender puts in one tile. A larger
+/// damaged region goes out as horizontal bands (see [`band_rows`]), so no
+/// tile comes near [`MAX_MESSAGE_LEN`], even one zlib can't shrink.
+pub const MAX_TILE_BYTES: usize = 32 * 1024 * 1024;
+
+/// The most rows of a `width`-pixel-wide region one tile carries under
+/// [`MAX_TILE_BYTES`]; at least one.
+pub fn band_rows(width: u32) -> u32 {
+    let row = width.max(1) as usize * BYTES_PER_PIXEL;
+    (MAX_TILE_BYTES / row).clamp(1, u32::MAX as usize) as u32
+}
+
+/// What a [`ServerMessage::Frame`] takes besides its tiles: the message tag,
+/// `seq` and the tile count.
+const FRAME_HEADER_LEN: usize = 1 + 4 + 4;
+
+/// Pack one render's `tiles` into as few [`ServerMessage::Frame`]s as keep
+/// each encoded message within [`MAX_MESSAGE_LEN`], numbered on from
+/// `last_seq`. Returns the frames and the last `seq` used. Damage that fits,
+/// which is nearly all of it, is one frame; at least one is always returned,
+/// so a render with no readable tiles still sends its (empty) frame. A viewer
+/// applies each frame's tiles as they come, so a split frame needs nothing new
+/// from it.
+pub fn frame_messages(last_seq: u32, tiles: Vec<Tile>) -> (Vec<ServerMessage>, u32) {
+    let mut frames = Vec::new();
+    let mut seq = last_seq;
+    let mut batch: Vec<Tile> = Vec::new();
+    let mut len = FRAME_HEADER_LEN;
+    for tile in tiles {
+        let tile_len = tile.encoded_len();
+        if !batch.is_empty() && len + tile_len > MAX_MESSAGE_LEN {
+            seq = seq.wrapping_add(1);
+            frames.push(ServerMessage::Frame {
+                seq,
+                tiles: std::mem::take(&mut batch),
+            });
+            len = FRAME_HEADER_LEN;
+        }
+        len += tile_len;
+        batch.push(tile);
+    }
+    seq = seq.wrapping_add(1);
+    frames.push(ServerMessage::Frame { seq, tiles: batch });
+    (frames, seq)
+}
+
 /// Largest width or height a peer may announce for a frame (`Ready` /
 /// `Resize`): twice 8K, beyond any real output.
 pub const MAX_FRAME_DIMENSION: u32 = 16384;
 
 /// Largest pixel count a viewer will allocate a framebuffer for: 8192×8192,
-/// so a full 4-byte frame stays within [`MAX_MESSAGE_LEN`].
+/// whose 4-byte pixels fill exactly [`MAX_MESSAGE_LEN`]. A whole frame that
+/// size can't fit one message with its headers, so senders band and split it
+/// (see [`frame_messages`]).
 pub const MAX_FRAME_PIXELS: u64 = 8192 * 8192;
 
 /// Largest output scale a peer may announce.
@@ -280,6 +328,84 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw_tile(y: u16, h: u16, w: u16) -> Tile {
+        Tile {
+            rect: Rect::new(0, y, w, h),
+            encoding: TileEncoding::Raw,
+            data: vec![0; w as usize * h as usize * BYTES_PER_PIXEL],
+        }
+    }
+
+    fn encoded_len(msg: &ServerMessage) -> usize {
+        let mut out = Vec::new();
+        msg.encode(&mut out);
+        out.len()
+    }
+
+    #[test]
+    fn tile_and_frame_lengths_match_the_encoder() {
+        let tiles = vec![raw_tile(0, 3, 5), raw_tile(3, 2, 5)];
+        let want = FRAME_HEADER_LEN + tiles.iter().map(Tile::encoded_len).sum::<usize>();
+        let (frames, _) = frame_messages(0, tiles);
+        assert_eq!(encoded_len(&frames[0]), want);
+    }
+
+    #[test]
+    fn ordinary_damage_is_one_frame() {
+        let (frames, seq) = frame_messages(41, vec![raw_tile(0, 10, 10), raw_tile(10, 10, 10)]);
+        assert_eq!(seq, 42);
+        assert!(
+            matches!(&frames[..], [ServerMessage::Frame { seq: 42, tiles }] if tiles.len() == 2)
+        );
+        let (frames, seq) = frame_messages(u32::MAX, Vec::new());
+        assert_eq!(seq, 0, "seq wraps");
+        assert!(matches!(&frames[..], [ServerMessage::Frame { tiles, .. }] if tiles.is_empty()));
+    }
+
+    /// Full damage of incompressible pixels on the largest framebuffer a
+    /// viewer accepts: banded and packed, every message fits the cap, and the
+    /// tiles cover the frame exactly once, in order.
+    #[test]
+    fn a_full_frame_at_the_pixel_limit_fits_the_message_cap() {
+        let (w, h) = (8192u32, 8192u32);
+        assert_eq!(framebuffer_len(w, h).unwrap(), MAX_MESSAGE_LEN);
+        let rows = band_rows(w);
+        assert!(rows as usize * w as usize * BYTES_PER_PIXEL <= MAX_TILE_BYTES);
+        let tiles: Vec<Tile> = (0..h)
+            .step_by(rows as usize)
+            .map(|y| raw_tile(y as u16, rows.min(h - y) as u16, w as u16))
+            .collect();
+        let (frames, seq) = frame_messages(0, tiles);
+        assert_eq!(seq as usize, frames.len());
+        assert!(
+            frames.len() > 1,
+            "a full max-size frame can't be one message"
+        );
+        let mut next_row = 0u32;
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(
+                encoded_len(frame) <= MAX_MESSAGE_LEN,
+                "frame {i} is over the cap"
+            );
+            let ServerMessage::Frame { seq, tiles } = frame else {
+                panic!("not a frame");
+            };
+            assert_eq!(*seq as usize, i + 1);
+            for tile in tiles {
+                assert_eq!(u32::from(tile.rect.y), next_row);
+                next_row += u32::from(tile.rect.h);
+            }
+        }
+        assert_eq!(next_row, h);
+    }
+
+    #[test]
+    fn band_rows_is_at_least_one() {
+        assert_eq!(band_rows(0), (MAX_TILE_BYTES / BYTES_PER_PIXEL) as u32);
+        assert_eq!(band_rows(1920), (MAX_TILE_BYTES / (1920 * 4)) as u32);
+        assert!(band_rows(u32::MAX) >= 1);
+    }
 
     #[test]
     fn framebuffer_len_bounds_what_a_peer_can_make_us_allocate() {

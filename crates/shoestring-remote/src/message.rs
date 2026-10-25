@@ -126,6 +126,12 @@ pub struct Tile {
 }
 
 impl Tile {
+    /// The bytes this tile takes in an encoded [`ServerMessage::Frame`]: the
+    /// rect, the encoding tag, and the length-prefixed data.
+    pub(crate) fn encoded_len(&self) -> usize {
+        8 + 1 + 4 + self.data.len()
+    }
+
     fn encode(&self, out: &mut Vec<u8>) {
         self.rect.encode(out);
         put_u8(out, self.encoding.tag());
@@ -360,7 +366,9 @@ pub enum ServerMessage {
     /// A frame: the tiles that changed since the previous frame. `seq`
     /// increments per frame (for logging / loss detection). An empty `tiles`
     /// is a valid heartbeat — but an idle desktop ideally sends no frame at
-    /// all.
+    /// all. One render's damage can span several frames, when it is too big
+    /// for one message (see [`crate::frame_messages`]); each frame's tiles
+    /// apply on their own.
     Frame { seq: u32, tiles: Vec<Tile> },
     /// The cursor moved or changed shape.
     Cursor(CursorUpdate),
