@@ -1522,11 +1522,14 @@ fn dispatch_remote(
                 let _ = write_response(client, &Response::Error { message });
                 return true;
             }
-            let changed = state.remote_enabled != enabled;
+            let was_enabled = state.remote_enabled;
+            let was_automation = state.automation_enabled;
+            let was_capture = state.screen_capture_enabled;
             let had_lease = state.remote_lease.is_some();
             // Couples the automation + capture gates on/off, and drops any
             // earlier lease.
-            let (auto_changed, capture_changed) = state.set_remote(enabled);
+            state.set_remote(enabled);
+            let mut armed = true;
             if enabled {
                 let lease = crate::remote_lease::Lease::new(
                     Instant::now(),
@@ -1537,9 +1540,24 @@ fn dispatch_remote(
                 if lease.is_some() {
                     tracing::info!(?for_secs, ?idle_secs, "remote gate leased");
                 }
-                state.set_remote_lease(lease);
+                armed = state.set_remote_lease(lease);
             }
-            let _ = write_response(client, &remote_response(state));
+            if armed {
+                let _ = write_response(client, &remote_response(state));
+            } else {
+                // Nothing would end this lease, so don't share at all.
+                state.set_remote(false);
+                let message = "set_remote: could not arm the lease timer; the remote gate is off";
+                let _ = write_response(
+                    client,
+                    &Response::Error {
+                        message: message.into(),
+                    },
+                );
+            }
+            let changed = state.remote_enabled != was_enabled;
+            let auto_changed = state.automation_enabled != was_automation;
+            let capture_changed = state.screen_capture_enabled != was_capture;
             // Setting, replacing or dropping a lease is news even when the
             // gate was already on.
             let lease_changed = had_lease || state.remote_lease.is_some();
@@ -1556,8 +1574,7 @@ fn dispatch_remote(
             let changed = state.remote_viewers != viewers;
             state.remote_viewers = viewers;
             let _ = write_response(client, &Response::Ok);
-            if changed {
-                state.remote_lease_viewers_changed();
+            if changed && !state.remote_lease_viewers_changed() {
                 state.emit_remote_changed();
             }
             true

@@ -666,7 +666,9 @@ Each request is a JSON object with a ``type`` discriminator:
        comes first. Each ``set_remote`` replaces the lease, and one without
        either field keeps the gate on until it is turned off. Zero, more than
        30 days (2592000 seconds), or either field with ``"enabled": false``,
-       is refused with ``error``.
+       is refused with ``error``. If the WM can't set the timer that ends a lease,
+       it fails closed: the gate is turned off and the reply is ``error``,
+       and a later failure to re-arm it turns the gate off too.
    * - ``{"type": "remote_status"}``
      - Read the remote-gate state without changing it. Reply is ``remote``
        (``enabled`` / ``server_available`` / ``viewers`` / ``endpoint`` /
@@ -1580,6 +1582,8 @@ Unreleased
 - ``remote_changed`` carries the lease in an optional ``lease``, and is also
   sent when ``set_remote`` sets, replaces or drops a lease with the gate
   already on, so subscribers needn't poll ``remote_status`` for it.
+- A lease whose timer can't be registered turns the remote gate off instead
+  of leaving it on with nothing to end it.
 - ``shoestring-remote-server`` refuses ``--tcp`` on an address other than
   loopback unless ``--tcp-any-host`` (or ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``)
   is also given.

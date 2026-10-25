@@ -9,7 +9,9 @@
 //! the same path as turning the gate off over IPC, so sessions end, the
 //! coupled capture and automation gates close, held input is released, and
 //! subscribers hear about it. One calloop timer is due at the earlier of the
-//! two deadlines and is re-armed whenever the viewer count changes.
+//! two deadlines and is re-armed whenever the viewer count changes. Nothing
+//! else watches the deadline, so a lease whose timer can't be registered
+//! fails closed: the gate turns off rather than stay on unbounded.
 
 use std::time::{Duration, Instant};
 
@@ -88,9 +90,12 @@ fn secs_ceil(d: Duration) -> u64 {
 
 impl ShoestringWm {
     /// Replace the lease (`None` keeps the gate on) and arm its timer.
-    pub fn set_remote_lease(&mut self, lease: Option<Lease>) {
+    /// Returns false if the timer couldn't be registered; the caller must
+    /// then turn the gate off, since nothing would end the lease.
+    #[must_use]
+    pub fn set_remote_lease(&mut self, lease: Option<Lease>) -> bool {
         self.remote_lease = lease;
-        self.arm_remote_lease();
+        self.arm_remote_lease()
     }
 
     /// The lease as `remote_status` and `remote_changed` report it.
@@ -99,21 +104,29 @@ impl ShoestringWm {
         self.remote_lease.as_ref().map(|lease| lease.status(now))
     }
 
-    /// Follow a new viewer count with the idle clock.
-    pub fn remote_lease_viewers_changed(&mut self) {
-        if let Some(lease) = self.remote_lease.as_mut() {
-            lease.viewers_changed(Instant::now(), self.remote_viewers);
-            self.arm_remote_lease();
+    /// Follow a new viewer count with the idle clock. Returns true if the
+    /// timer couldn't be re-armed and the gate was turned off (and announced)
+    /// instead.
+    pub fn remote_lease_viewers_changed(&mut self) -> bool {
+        let Some(lease) = self.remote_lease.as_mut() else {
+            return false;
+        };
+        lease.viewers_changed(Instant::now(), self.remote_viewers);
+        if self.arm_remote_lease() {
+            return false;
         }
+        self.remote_lease_fail_closed();
+        true
     }
 
-    /// Set the timer for the lease's current deadline, or remove it.
-    fn arm_remote_lease(&mut self) {
+    /// Set the timer for the lease's current deadline, or remove it. Returns
+    /// false only when a deadline needed a timer and registering it failed.
+    fn arm_remote_lease(&mut self) -> bool {
         if let Some(token) = self.remote_lease_timer.take() {
             self.loop_handle.remove(token);
         }
         let Some(deadline) = self.remote_lease.as_ref().and_then(Lease::deadline) else {
-            return;
+            return true;
         };
         let inserted =
             self.loop_handle
@@ -123,9 +136,21 @@ impl ShoestringWm {
                     TimeoutAction::Drop
                 });
         match inserted {
-            Ok(token) => self.remote_lease_timer = Some(token),
-            Err(e) => tracing::warn!(error = %e, "remote lease: timer insert failed"),
+            Ok(token) => {
+                self.remote_lease_timer = Some(token);
+                true
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "remote lease: timer insert failed");
+                false
+            }
         }
+    }
+
+    /// Turn the gate off because its lease can't be enforced.
+    fn remote_lease_fail_closed(&mut self) {
+        tracing::error!("remote lease has no timer; turning the remote gate off");
+        self.turn_remote(false);
     }
 
     fn remote_lease_tick(&mut self) {
@@ -133,7 +158,9 @@ impl ShoestringWm {
             return;
         };
         if Instant::now() < deadline {
-            self.arm_remote_lease();
+            if !self.arm_remote_lease() {
+                self.remote_lease_fail_closed();
+            }
             return;
         }
         tracing::info!("remote lease ended; turning the remote gate off");

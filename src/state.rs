@@ -1955,8 +1955,9 @@ impl ShoestringWm {
     pub fn set_remote(&mut self, enabled: bool) -> (bool, bool) {
         self.remote_enabled = enabled;
         // A lease belongs to the `set_remote` that made it; the caller sets a
-        // new one after turning the gate on.
-        self.set_remote_lease(None);
+        // new one after turning the gate on. Clearing one needs no timer, so
+        // it can't fail.
+        let _ = self.set_remote_lease(None);
         let auto_before = self.automation_enabled;
         let capture_changed = self.set_automation(enabled);
         let auto_changed = self.automation_enabled != auto_before;
