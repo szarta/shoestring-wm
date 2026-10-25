@@ -335,6 +335,9 @@ fn e2e_remote_lease_refuses_nonsense() {
         json!({"type": "set_remote", "enabled": true, "for_secs": 0}),
         json!({"type": "set_remote", "enabled": true, "idle_secs": 0}),
         json!({"type": "set_remote", "enabled": false, "for_secs": 60}),
+        json!({"type": "set_remote", "enabled": true, "for_secs": 30 * 86_400 + 1}),
+        json!({"type": "set_remote", "enabled": true, "for_secs": u64::MAX}),
+        json!({"type": "set_remote", "enabled": true, "idle_secs": u64::MAX}),
     ] {
         let reply = wm.ipc(request.clone());
         assert_eq!(reply["type"], "error", "{request} -> {reply}");

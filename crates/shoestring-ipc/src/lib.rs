@@ -332,7 +332,8 @@ pub enum Request {
     /// turns it off once no viewer has been connected for that long (counting
     /// from now if none is). With both, whichever comes first. Without either
     /// the gate stays on until turned off. Each `set_remote` replaces the
-    /// lease; both must be positive, and are refused with `enabled: false`.
+    /// lease; both must be positive and at most [`REMOTE_LEASE_MAX_SECS`],
+    /// and are refused with `enabled: false`.
     SetRemote {
         enabled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -910,6 +911,11 @@ pub enum MetricValue {
 /// bounded — pathological commands (`yes`, accidentally tailed logs)
 /// can't OOM the WM or wedge it on JSON serialisation.
 pub const RUN_COMMAND_OUTPUT_CAP: usize = 64 * 1024;
+
+/// The longest lease [`Request::SetRemote`] accepts for `for_secs` or
+/// `idle_secs`: 30 days. A longer stay needs no lease at all, and the bound
+/// keeps the deadline well inside what a clock can represent.
+pub const REMOTE_LEASE_MAX_SECS: u64 = 30 * 86_400;
 
 /// Rectangle for [`Request::Screenshot`], in the target output's logical
 /// pixel coords. All fields are positive; `w` and `h` must be > 0.

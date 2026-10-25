@@ -1469,6 +1469,12 @@ fn check_remote_lease(
     if for_secs == Some(0) || idle_secs == Some(0) {
         return Err("set_remote: for_secs and idle_secs must be positive".into());
     }
+    let max = shoestring_ipc::REMOTE_LEASE_MAX_SECS;
+    if for_secs.max(idle_secs).is_some_and(|secs| secs > max) {
+        return Err(format!(
+            "set_remote: for_secs and idle_secs must be at most {max} (30 days)"
+        ));
+    }
     Ok(())
 }
 
@@ -3003,6 +3009,27 @@ impl ShoestringWm {
 mod tests {
     use super::*;
     use shoestring_remote::{read_framed, Rect, ServerMessage, Tile, TileEncoding};
+
+    #[test]
+    fn remote_lease_bounds() {
+        let max = shoestring_ipc::REMOTE_LEASE_MAX_SECS;
+        assert!(check_remote_lease(true, None, None).is_ok());
+        assert!(check_remote_lease(true, Some(1), Some(max)).is_ok());
+        for (for_secs, idle_secs) in [
+            (Some(0), None),
+            (None, Some(0)),
+            (Some(max + 1), None),
+            (Some(60), Some(max + 1)),
+            (Some(u64::MAX), None),
+            (None, Some(u64::MAX)),
+        ] {
+            assert!(
+                check_remote_lease(true, for_secs, idle_secs).is_err(),
+                "{for_secs:?} {idle_secs:?}"
+            );
+        }
+        assert!(check_remote_lease(false, Some(60), None).is_err());
+    }
 
     fn client_on(stream: UnixStream) -> Client {
         stream.set_nonblocking(true).unwrap();

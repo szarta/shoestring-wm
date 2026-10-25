@@ -549,7 +549,7 @@ enum RemoteAction {
     /// turned off; with them the WM turns it off itself.
     On {
         /// Turn the gate off after this long, viewers or not. A number of
-        /// seconds, or with units: 90s, 10m, 2h, 1h30m.
+        /// seconds, or with units: 90s, 10m, 2h, 1h30m, 1d. At most 30 days.
         #[arg(long = "for", value_name = "DURATION")]
         limit: Option<String>,
         /// Turn the gate off once nobody has been connected for this long,
@@ -989,6 +989,16 @@ fn parse_env_kv(s: &str) -> Result<(String, String)> {
 /// bare number of seconds, or numbers each followed by `s`, `m`, `h` or `d`
 /// (`90s`, `10m`, `1h30m`). Zero is refused.
 fn parse_secs(s: &str) -> Result<u64> {
+    let secs = parse_duration(s)?;
+    let max = shoestring_ipc::REMOTE_LEASE_MAX_SECS;
+    anyhow::ensure!(
+        secs <= max,
+        "a duration must be at most 30 days ({max}s; got {s:?})"
+    );
+    Ok(secs)
+}
+
+fn parse_duration(s: &str) -> Result<u64> {
     let bad = || anyhow::anyhow!("expected a duration such as 90, 10m or 1h30m (got {s:?})");
     if let Ok(secs) = s.parse::<u64>() {
         anyhow::ensure!(secs > 0, "a duration must be positive (got {s:?})");
@@ -1078,7 +1088,21 @@ mod tests {
         assert_eq!(parse_secs("2h").unwrap(), 7200);
         assert_eq!(parse_secs("1h30m").unwrap(), 5400);
         assert_eq!(parse_secs("1d").unwrap(), 86_400);
-        for bad in ["", "0", "0m", "m", "10x", "1h30", "-5", "1.5h"] {
+        assert_eq!(parse_secs("30d").unwrap(), 30 * 86_400);
+        for bad in [
+            "",
+            "0",
+            "0m",
+            "m",
+            "10x",
+            "1h30",
+            "-5",
+            "1.5h",
+            "30d1s",
+            "2592001",
+            "18446744073709551615",
+            "99999999999999999999d",
+        ] {
             assert!(parse_secs(bad).is_err(), "{bad:?} parsed");
         }
     }

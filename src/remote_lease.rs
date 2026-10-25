@@ -40,6 +40,10 @@ impl Lease {
         if limit.is_none() && idle.is_none() {
             return None;
         }
+        // `set_remote` refuses longer leases; clamping here as well keeps
+        // `Instant` arithmetic from overflowing, which would panic.
+        let max = Duration::from_secs(shoestring_ipc::REMOTE_LEASE_MAX_SECS);
+        let (limit, idle) = (limit.map(|d| d.min(max)), idle.map(|d| d.min(max)));
         Some(Lease {
             until: limit.map(|d| now + d),
             idle,
@@ -187,6 +191,18 @@ mod tests {
         assert_eq!(lease.deadline(), Some(now + MIN));
         lease.viewers_changed(now, 1);
         assert_eq!(lease.deadline(), Some(now + 10 * MIN));
+    }
+
+    #[test]
+    fn an_overlong_lease_is_clamped_not_a_panic() {
+        let now = Instant::now();
+        let huge = Some(Duration::from_secs(u64::MAX));
+        let mut lease = Lease::new(now, huge, huge, 0).unwrap();
+        let max = Duration::from_secs(shoestring_ipc::REMOTE_LEASE_MAX_SECS);
+        assert_eq!(lease.deadline(), Some(now + max));
+        lease.viewers_changed(now + MIN, 1);
+        lease.viewers_changed(now + 2 * MIN, 0);
+        assert_eq!(lease.deadline(), Some(now + max));
     }
 
     #[test]

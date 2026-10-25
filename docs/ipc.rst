@@ -664,8 +664,9 @@ Each request is a JSON object with a ``type`` discriminator:
        ``"idle_secs": N`` turns it off once no viewer has been connected for N
        seconds, counting from the request if nobody is. With both, whichever
        comes first. Each ``set_remote`` replaces the lease, and one without
-       either field keeps the gate on until it is turned off. Zero, or either
-       field with ``"enabled": false``, is refused with ``error``.
+       either field keeps the gate on until it is turned off. Zero, more than
+       30 days (2592000 seconds), or either field with ``"enabled": false``,
+       is refused with ``error``.
    * - ``{"type": "remote_status"}``
      - Read the remote-gate state without changing it. Reply is ``remote``
        (``enabled`` / ``server_available`` / ``viewers`` / ``endpoint`` /
@@ -1572,7 +1573,8 @@ Unreleased
   workspaces. The remote client sends the steps, so a serve-mode viewer's
   wheel works there as a local one does.
 - ``set_remote`` takes optional ``for_secs`` and ``idle_secs`` to lease the
-  remote gate, and the ``remote`` reply reports the lease in ``lease``.
+  remote gate, and the ``remote`` reply reports the lease in ``lease``. Each
+  is at most 30 days.
 - ``shoestring-remote-server`` refuses ``--tcp`` on an address other than
   loopback unless ``--tcp-any-host`` (or ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``)
   is also given.

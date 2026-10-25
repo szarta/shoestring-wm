@@ -245,7 +245,7 @@ The remote gate reuses the existing capability-gate model end to end:
   instead: ``shoestring-ctl remote on --for 2h`` turns it off after two
   hours, and ``--until-idle 10m`` once nobody has been connected for ten
   minutes, counting from now if nobody is yet. Both together end it at
-  whichever comes first. When the lease ends, the WM turns the gate off as
+  whichever comes first, and each is at most 30 days. When the lease ends, the WM turns the gate off as
   ``remote off`` would: sessions end, the capture and automation gates
   close, and held keys are released. ``shoestring-ctl remote status`` shows
   the time left. There is no config default, since the gate is never turned
