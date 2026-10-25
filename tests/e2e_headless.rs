@@ -254,6 +254,96 @@ fn e2e_remote_reconnect_and_gate_revocation() {
     wm.wait_viewers(1);
 }
 
+/// Wait for the WM to turn the remote gate off by itself, then check it went
+/// the whole way: listener gone, coupled automation gate off, no lease left.
+fn wait_remote_off(wm: &Wm) {
+    wait_for("the lease to turn the remote gate off", || {
+        (wm.remote_status()["enabled"] == false).then_some(())
+    });
+    let socket = wm.remote_socket();
+    wait_for("the listener to close", || (!socket.exists()).then_some(()));
+    assert_eq!(
+        wm.ipc(json!({"type": "automation_status"}))["enabled"],
+        false
+    );
+    assert!(wm.remote_status().get("lease").is_none());
+}
+
+/// A time limit ends the gate with a viewer connected: the session ends as
+/// if the gate had been turned off by hand.
+#[test]
+#[ignore]
+fn e2e_remote_lease_time_limit_ends_a_session() {
+    let mut wm = Wm::start();
+    let _client = TestClient::map(&wm);
+    wm.park_pointer();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+
+    let reply = wm.ipc_ok(json!({"type": "set_remote", "enabled": true, "for_secs": 1}));
+    assert_eq!(reply["lease"], json!({"expires_in_secs": 1}), "{reply}");
+    viewer.wait_end();
+    wait_remote_off(&wm);
+}
+
+/// An idle lease waits while someone is connected, ends the gate once the
+/// last viewer has been gone for the period, and ends it when nobody
+/// connects at all.
+#[test]
+#[ignore]
+fn e2e_remote_idle_lease_follows_the_viewers() {
+    let mut wm = Wm::start();
+    let client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+
+    // Connected: the idle clock doesn't run, so the gate outlives the period.
+    let reply = wm.ipc_ok(json!({"type": "set_remote", "enabled": true, "idle_secs": 1}));
+    assert_eq!(reply["lease"], json!({"idle_secs": 1}), "{reply}");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(wm.remote_status()["enabled"], true);
+    client.paint(KEYED);
+    viewer.wait_pixel(centre, rgb(KEYED), "the viewer, past the idle period");
+
+    // The viewer leaves: the clock starts, and the gate goes.
+    viewer.bye();
+    wm.wait_viewers(0);
+    wait_remote_off(&wm);
+
+    // Nobody connects at all.
+    wm.set_remote(true);
+    wm.ipc_ok(json!({"type": "set_remote", "enabled": true, "idle_secs": 1}));
+    wait_remote_off(&wm);
+
+    // Turning the gate on again without a lease keeps it on.
+    wm.set_remote(true);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(wm.remote_status()["enabled"], true);
+}
+
+/// A lease that can't mean anything is refused, and changes nothing.
+#[test]
+#[ignore]
+fn e2e_remote_lease_refuses_nonsense() {
+    let mut wm = Wm::start();
+    wm.start_remote_server();
+    for request in [
+        json!({"type": "set_remote", "enabled": true, "for_secs": 0}),
+        json!({"type": "set_remote", "enabled": true, "idle_secs": 0}),
+        json!({"type": "set_remote", "enabled": false, "for_secs": 60}),
+    ] {
+        let reply = wm.ipc(request.clone());
+        assert_eq!(reply["type"], "error", "{request} -> {reply}");
+    }
+    let status = wm.remote_status();
+    assert_eq!(status["enabled"], true);
+    assert!(status.get("lease").is_none(), "{status}");
+}
+
 /// [`shoestring_wm::capture_stream::LOCKED_FILL`] as RGB.
 fn locked_fill() -> [u8; 3] {
     let [b, g, r, _] = shoestring_wm::capture_stream::LOCKED_FILL;

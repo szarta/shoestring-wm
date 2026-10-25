@@ -227,6 +227,17 @@ The remote gate reuses the existing capability-gate model end to end:
   registered**. Flip it from the bar chip, with ``shoestring-ctl remote on``,
   or - for a headless box or container - from the entrypoint. See
   :doc:`ipc` for ``set_remote`` / ``remote_status`` / ``remote_changed``.
+- **Sharing can end itself.** By default the gate stays on until someone
+  turns it off, which suits containers and always-on serve boxes. On a
+  headless box with no bar to show the "being viewed" chip, give it a lease
+  instead: ``shoestring-ctl remote on --for 2h`` turns it off after two
+  hours, and ``--until-idle 10m`` once nobody has been connected for ten
+  minutes, counting from now if nobody is yet. Both together end it at
+  whichever comes first. When the lease ends, the WM turns the gate off as
+  ``remote off`` would: sessions end, the capture and automation gates
+  close, and held keys are released. ``shoestring-ctl remote status`` shows
+  the time left. There is no config default, since the gate is never turned
+  on from the config either; the command that turns it on sets the lease.
 - **Nothing a viewer held outlives it.** The server tracks which keys and
   buttons each session holds. When a session ends with some still down (a
   dropped connection mid-chord or mid-drag), it releases the ones no other

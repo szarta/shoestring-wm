@@ -437,6 +437,11 @@ pub struct ShoestringWm {
     /// ([`shoestring_ipc::Request::ReportRemoteViewers`]). Drives the bar's
     /// "being viewed / controlled" chip; `> 0` means someone is watching.
     pub remote_viewers: u32,
+    /// The remote gate's optional lease, set by `set_remote` and cleared
+    /// whenever the gate changes (see [`crate::remote_lease`]).
+    pub remote_lease: Option<crate::remote_lease::Lease>,
+    /// The timer due at [`Self::remote_lease`]'s deadline.
+    pub remote_lease_timer: Option<smithay::reexports::calloop::RegistrationToken>,
 
     /// The **machine-axis** — the viewer-box half of remote desktop. Each
     /// registered [`crate::remote::RemoteClient`] is a viewable machine
@@ -947,6 +952,8 @@ impl ShoestringWm {
             remote_server: None,
             remote_endpoint: None,
             remote_viewers: 0,
+            remote_lease: None,
+            remote_lease_timer: None,
             remote_clients: Vec::new(),
             view_index: 0,
             remote_pointer: (0.0, 0.0),
@@ -1947,6 +1954,9 @@ impl ShoestringWm {
     /// has decided whether the value actually moved.
     pub fn set_remote(&mut self, enabled: bool) -> (bool, bool) {
         self.remote_enabled = enabled;
+        // A lease belongs to the `set_remote` that made it; the caller sets a
+        // new one after turning the gate on.
+        self.set_remote_lease(None);
         let auto_before = self.automation_enabled;
         let capture_changed = self.set_automation(enabled);
         let auto_changed = self.automation_enabled != auto_before;
@@ -1955,6 +1965,35 @@ impl ShoestringWm {
             self.remote_viewers = 0;
         }
         (auto_changed, capture_changed)
+    }
+
+    /// [`Self::set_remote`], then tell subscribers what changed: the coupled
+    /// gates, and the remote gate itself. Returns whether the remote gate
+    /// changed.
+    pub fn turn_remote(&mut self, enabled: bool) -> bool {
+        let changed = self.remote_enabled != enabled;
+        let (auto_changed, capture_changed) = self.set_remote(enabled);
+        self.announce_remote(changed, auto_changed, capture_changed);
+        changed
+    }
+
+    /// Emit the events for a [`Self::set_remote`] that changed what the flags
+    /// say.
+    pub fn announce_remote(&mut self, changed: bool, auto_changed: bool, capture_changed: bool) {
+        if auto_changed {
+            self.emit_ipc(shoestring_ipc::Event::AutomationChanged {
+                enabled: self.automation_enabled,
+            });
+        }
+        if capture_changed {
+            self.emit_ipc(shoestring_ipc::Event::ScreenCaptureChanged {
+                enabled: self.screen_capture_enabled,
+            });
+        }
+        if changed {
+            tracing::info!(enabled = self.remote_enabled, "remote gate changed");
+            self.emit_remote_changed();
+        }
     }
 
     /// Broadcast the current remote-desktop state to subscribers — the bar

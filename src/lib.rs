@@ -44,6 +44,7 @@ pub mod presentation;
 pub mod profiling;
 mod remote;
 mod remote_command;
+mod remote_lease;
 mod remote_screenshot;
 pub mod render;
 mod scale;

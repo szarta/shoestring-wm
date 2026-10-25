@@ -326,7 +326,20 @@ pub enum Request {
     /// [`Event::RemoteChanged`] is broadcast when the value changes. Runtime
     /// only — never read from disk, so remote access can't be on at login
     /// (the user enables it explicitly after logging into the served box).
-    SetRemote { enabled: bool },
+    ///
+    /// Turning the gate on may set a **lease**, after which the WM turns it
+    /// off by the same path: `for_secs` is a time limit, and `idle_secs`
+    /// turns it off once no viewer has been connected for that long (counting
+    /// from now if none is). With both, whichever comes first. Without either
+    /// the gate stays on until turned off. Each `set_remote` replaces the
+    /// lease; both must be positive, and are refused with `enabled: false`.
+    SetRemote {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        for_secs: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_secs: Option<u64>,
+    },
     /// Read the remote-gate state without changing it: whether the gate is on,
     /// whether a server has registered, and the current viewer count. Reply is
     /// [`Response::Remote`].
@@ -977,6 +990,23 @@ pub const REQUEST_TYPES: &[&str] = &[
     "hash_region",
 ];
 
+/// A remote-gate lease as `remote_status` reports it (see
+/// [`Request::SetRemote`]). Times are whole seconds from the reply, rounded
+/// up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteLease {
+    /// Until the time limit ends the gate; absent without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+    /// The idle period asked for; absent without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_secs: Option<u64>,
+    /// Until the idle period ends the gate, counting while nobody is
+    /// connected; absent while someone is, or without an idle period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_expires_in_secs: Option<u64>,
+}
+
 /// The runtime gates, as reported by [`Response::ServerInfo`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateStates {
@@ -1051,13 +1081,16 @@ pub enum Response {
     /// number of connected clients (the "being viewed" chip lights when > 0).
     /// `endpoint` is where the registered server listens while the gate is on
     /// (a socket path, or `tcp ADDR:PORT`); absent with no server, or one that
-    /// didn't say.
+    /// didn't say. `lease` is the gate's lease, absent when it has none.
     Remote {
         enabled: bool,
         server_available: bool,
         viewers: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
+        /// The gate's lease, if the `set_remote` that turned it on set one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease: Option<RemoteLease>,
     },
     /// Returned for [`Request::ServerInfo`].
     ServerInfo {
@@ -2222,8 +2255,22 @@ mod tests {
             r#"{"type":"register_remote_server","endpoint":"tcp 127.0.0.1:7355"}"#
         );
         assert_eq!(
-            serde_json::to_string(&Request::SetRemote { enabled: true }).unwrap(),
+            serde_json::to_string(&Request::SetRemote {
+                enabled: true,
+                for_secs: None,
+                idle_secs: None
+            })
+            .unwrap(),
             r#"{"type":"set_remote","enabled":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::SetRemote {
+                enabled: true,
+                for_secs: Some(7200),
+                idle_secs: Some(600)
+            })
+            .unwrap(),
+            r#"{"type":"set_remote","enabled":true,"for_secs":7200,"idle_secs":600}"#
         );
         assert_eq!(
             serde_json::to_string(&Request::RemoteStatus).unwrap(),
@@ -2238,6 +2285,7 @@ mod tests {
             server_available: true,
             viewers: 1,
             endpoint: None,
+            lease: None,
         };
         assert_eq!(
             serde_json::to_string(&resp).unwrap(),
@@ -2248,10 +2296,15 @@ mod tests {
             server_available: true,
             viewers: 0,
             endpoint: Some("/run/user/1000/shoestring-remote-wayland-1.sock".into()),
+            lease: Some(RemoteLease {
+                expires_in_secs: None,
+                idle_secs: Some(600),
+                idle_expires_in_secs: Some(42),
+            }),
         };
         assert_eq!(
             serde_json::to_string(&resp).unwrap(),
-            r#"{"type":"remote","enabled":true,"server_available":true,"viewers":0,"endpoint":"/run/user/1000/shoestring-remote-wayland-1.sock"}"#
+            r#"{"type":"remote","enabled":true,"server_available":true,"viewers":0,"endpoint":"/run/user/1000/shoestring-remote-wayland-1.sock","lease":{"idle_secs":600,"idle_expires_in_secs":42}}"#
         );
         let ev = Event::RemoteChanged {
             enabled: false,
@@ -2265,7 +2318,14 @@ mod tests {
         // Round-trips back to the same value.
         let back: Request =
             serde_json::from_str(r#"{"type":"set_remote","enabled":false}"#).unwrap();
-        assert!(matches!(back, Request::SetRemote { enabled: false }));
+        assert!(matches!(
+            back,
+            Request::SetRemote {
+                enabled: false,
+                for_secs: None,
+                idle_secs: None
+            }
+        ));
     }
 
     #[test]

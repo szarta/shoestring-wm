@@ -545,11 +545,22 @@ enum AutomationAction {
 enum RemoteAction {
     /// Turn the gate ON: couple the capture + automation gates and let the
     /// registered server stream + replay input. Refused if no server has
-    /// registered yet.
-    On,
+    /// registered yet. Without --for or --until-idle the gate stays on until
+    /// turned off; with them the WM turns it off itself.
+    On {
+        /// Turn the gate off after this long, viewers or not. A number of
+        /// seconds, or with units: 90s, 10m, 2h, 1h30m.
+        #[arg(long = "for", value_name = "DURATION")]
+        limit: Option<String>,
+        /// Turn the gate off once nobody has been connected for this long,
+        /// counting from now if nobody is. Same format as --for.
+        #[arg(long, value_name = "DURATION")]
+        until_idle: Option<String>,
+    },
     /// Turn the gate OFF: the server's listener closes and no port stays open.
     Off,
-    /// Print the current state (gate, whether a server is registered, viewers).
+    /// Print the current state (gate, whether a server is registered, viewers,
+    /// where the server listens, and any lease).
     Status,
 }
 
@@ -835,8 +846,16 @@ fn main() -> Result<()> {
         },
         Command::ResetGamma { output } => Request::ResetGamma { output },
         Command::Remote { action } => match action {
-            RemoteAction::On => Request::SetRemote { enabled: true },
-            RemoteAction::Off => Request::SetRemote { enabled: false },
+            RemoteAction::On { limit, until_idle } => Request::SetRemote {
+                enabled: true,
+                for_secs: limit.as_deref().map(parse_secs).transpose()?,
+                idle_secs: until_idle.as_deref().map(parse_secs).transpose()?,
+            },
+            RemoteAction::Off => Request::SetRemote {
+                enabled: false,
+                for_secs: None,
+                idle_secs: None,
+            },
             RemoteAction::Status => Request::RemoteStatus,
         },
         Command::RemoteClients => Request::RemoteClientStatus,
@@ -966,6 +985,41 @@ fn parse_env_kv(s: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
+/// Parse a duration for `remote on --for/--until-idle` into whole seconds: a
+/// bare number of seconds, or numbers each followed by `s`, `m`, `h` or `d`
+/// (`90s`, `10m`, `1h30m`). Zero is refused.
+fn parse_secs(s: &str) -> Result<u64> {
+    let bad = || anyhow::anyhow!("expected a duration such as 90, 10m or 1h30m (got {s:?})");
+    if let Ok(secs) = s.parse::<u64>() {
+        anyhow::ensure!(secs > 0, "a duration must be positive (got {s:?})");
+        return Ok(secs);
+    }
+    let mut total: u64 = 0;
+    let mut digits = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86_400,
+            _ => return Err(bad()),
+        };
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        total = n
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(bad)?;
+        digits.clear();
+    }
+    anyhow::ensure!(digits.is_empty(), bad());
+    anyhow::ensure!(total > 0, "a duration must be positive (got {s:?})");
+    Ok(total)
+}
+
 /// Parse an `X,Y` coordinate pair (floats) for `drag --from/--to`.
 fn parse_xy(s: &str) -> Result<(f64, f64)> {
     let (x, y) = s
@@ -1014,7 +1068,20 @@ fn print_value<T: serde::Serialize>(value: &T, pretty: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_chord;
+    use super::{parse_secs, split_chord};
+
+    #[test]
+    fn parse_secs_reads_bare_seconds_and_units() {
+        assert_eq!(parse_secs("90").unwrap(), 90);
+        assert_eq!(parse_secs("90s").unwrap(), 90);
+        assert_eq!(parse_secs("10m").unwrap(), 600);
+        assert_eq!(parse_secs("2h").unwrap(), 7200);
+        assert_eq!(parse_secs("1h30m").unwrap(), 5400);
+        assert_eq!(parse_secs("1d").unwrap(), 86_400);
+        for bad in ["", "0", "0m", "m", "10x", "1h30", "-5", "1.5h"] {
+            assert!(parse_secs(bad).is_err(), "{bad:?} parsed");
+        }
+    }
 
     #[test]
     fn split_chord_passes_through_bare_keysym() {

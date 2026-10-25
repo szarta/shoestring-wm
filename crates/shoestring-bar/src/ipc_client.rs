@@ -236,7 +236,14 @@ pub fn query_remote_clients() -> Result<(u8, Option<String>)> {
 /// it flips; enabling is refused by the WM unless a server has registered.
 pub fn set_remote(enabled: bool) -> Result<()> {
     let mut stream = connect()?;
-    write_request(&mut stream, &Request::SetRemote { enabled })?;
+    write_request(
+        &mut stream,
+        &Request::SetRemote {
+            enabled,
+            for_secs: None,
+            idle_secs: None,
+        },
+    )?;
     let line = read_line(&mut stream)?.context("server closed before responding")?;
     let resp: Response = serde_json::from_str(&line).context("parse set_remote response")?;
     match resp {

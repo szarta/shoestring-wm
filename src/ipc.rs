@@ -1448,7 +1448,27 @@ fn remote_response(state: &ShoestringWm) -> Response {
         server_available: state.remote_server.is_some(),
         viewers: state.remote_viewers,
         endpoint: state.remote_endpoint.clone(),
+        lease: state
+            .remote_lease
+            .as_ref()
+            .map(|lease| lease.status(Instant::now())),
     }
+}
+
+/// Refuse a lease that can't mean anything: one on a gate being turned off,
+/// or a zero period.
+fn check_remote_lease(
+    enabled: bool,
+    for_secs: Option<u64>,
+    idle_secs: Option<u64>,
+) -> Result<(), String> {
+    if !enabled && (for_secs.is_some() || idle_secs.is_some()) {
+        return Err("set_remote: for_secs and idle_secs need enabled: true".into());
+    }
+    if for_secs == Some(0) || idle_secs == Some(0) {
+        return Err("set_remote: for_secs and idle_secs must be positive".into());
+    }
+    Ok(())
 }
 
 /// Remote desktop: server and viewer registration, the remote gate, the machine axis, and the clipboard bridge.
@@ -1478,7 +1498,11 @@ fn dispatch_remote(
             state.emit_remote_changed();
             false
         }
-        Request::SetRemote { enabled } => {
+        Request::SetRemote {
+            enabled,
+            for_secs,
+            idle_secs,
+        } => {
             // Enabling requires a registered server (the consent toggle is
             // greyed until then; refuse it over IPC too).
             if enabled && state.remote_server.is_none() {
@@ -1490,24 +1514,28 @@ fn dispatch_remote(
                 );
                 return true;
             }
+            if let Err(message) = check_remote_lease(enabled, for_secs, idle_secs) {
+                let _ = write_response(client, &Response::Error { message });
+                return true;
+            }
             let changed = state.remote_enabled != enabled;
-            // Couples the automation + capture gates on/off.
+            // Couples the automation + capture gates on/off, and drops any
+            // earlier lease.
             let (auto_changed, capture_changed) = state.set_remote(enabled);
+            if enabled {
+                let lease = crate::remote_lease::Lease::new(
+                    Instant::now(),
+                    for_secs.map(Duration::from_secs),
+                    idle_secs.map(Duration::from_secs),
+                    state.remote_viewers,
+                );
+                if lease.is_some() {
+                    tracing::info!(?for_secs, ?idle_secs, "remote gate leased");
+                }
+                state.set_remote_lease(lease);
+            }
             let _ = write_response(client, &remote_response(state));
-            if auto_changed {
-                state.emit_ipc(Event::AutomationChanged {
-                    enabled: state.automation_enabled,
-                });
-            }
-            if capture_changed {
-                state.emit_ipc(Event::ScreenCaptureChanged {
-                    enabled: state.screen_capture_enabled,
-                });
-            }
-            if changed {
-                tracing::info!(enabled, "remote gate changed via ipc");
-                state.emit_remote_changed();
-            }
+            state.announce_remote(changed, auto_changed, capture_changed);
             true
         }
         Request::RemoteStatus => {
@@ -1521,6 +1549,7 @@ fn dispatch_remote(
             state.remote_viewers = viewers;
             let _ = write_response(client, &Response::Ok);
             if changed {
+                state.remote_lease_viewers_changed();
                 state.emit_remote_changed();
             }
             true

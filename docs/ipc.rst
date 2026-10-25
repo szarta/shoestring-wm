@@ -655,10 +655,18 @@ Each request is a JSON object with a ``type`` discriminator:
        persisted — driven by the bar chip on a desktop, or by
        ``shoestring-ctl remote on`` (the headless/container entrypoint). See
        :doc:`remote`.
+
+       Turning it on may set a lease, after which the WM turns the gate off
+       itself, by the same path: ``"for_secs": N`` is a time limit, and
+       ``"idle_secs": N`` turns it off once no viewer has been connected for N
+       seconds, counting from the request if nobody is. With both, whichever
+       comes first. Each ``set_remote`` replaces the lease, and one without
+       either field keeps the gate on until it is turned off. Zero, or either
+       field with ``"enabled": false``, is refused with ``error``.
    * - ``{"type": "remote_status"}``
      - Read the remote-gate state without changing it. Reply is ``remote``
-       (``enabled`` / ``server_available`` / ``viewers`` / ``endpoint``).
-       Read-only, not gated.
+       (``enabled`` / ``server_available`` / ``viewers`` / ``endpoint`` /
+       ``lease``). Read-only, not gated.
    * - ``{"type": "server_info"}``
      - Describe the running WM: version, active backend, lock state, every
        gate, and the request types it understands. Reply is ``server_info``.
@@ -941,6 +949,12 @@ The server replies with a single JSON object tagged by ``type``:
     viewed" chip lights when > 0); ``endpoint`` is where the server listens
     while the gate is on, a socket path or ``tcp ADDR:PORT``, as it said when
     it registered. ``endpoint`` is absent with no server registered.
+    ``lease`` is present while the gate has one: ``{"expires_in_secs": <int>,
+    "idle_secs": <int>, "idle_expires_in_secs": <int>}``, whole seconds
+    rounded up. ``expires_in_secs`` is left on the time limit, ``idle_secs``
+    the idle period asked for, and ``idle_expires_in_secs`` what is left of it;
+    that last one is absent while a viewer is connected. Each field is absent
+    when its limit wasn't asked for.
 
 ``remote_clients``
     ``{"type": "remote_clients", "machines": [{"index": 1, "label":
@@ -1550,6 +1564,8 @@ Unreleased
   are affected.
 - ``register_remote_server`` takes an optional ``endpoint``, where the
   server listens while the gate is on, and the ``remote`` reply reports it.
+- ``set_remote`` takes optional ``for_secs`` and ``idle_secs`` to lease the
+  remote gate, and the ``remote`` reply reports the lease in ``lease``.
 - ``shoestring-remote-server`` refuses ``--tcp`` on an address other than
   loopback unless ``--tcp-any-host`` (or ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``)
   is also given.
