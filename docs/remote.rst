@@ -207,9 +207,14 @@ exactly one WM does:
   them. Otherwise a key your local WM doesn't bind could switch workspaces or
   close windows on a remote desktop nobody is looking at.
 
+Clicks follow the same rule. In serve mode a click takes the remote's own
+pointer path: it focuses and raises the window clicked, Super+drag moves or
+resizes there, and an armed window picker takes the click. In graft mode the
+click goes to the grafted window as it is.
+
 Over IPC this is ``inject_input``'s ``bindings`` flag, which the server sets
 for serve sessions; graft uses ``inject_input_to_window``, which never applies
-bindings, and automation's raw keys skip them too (see :doc:`ipc`).
+bindings, and automation's raw keys and buttons skip them too (see :doc:`ipc`).
 
 Consent and security
 --------------------

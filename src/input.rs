@@ -627,7 +627,7 @@ impl ShoestringWm {
     /// `FollowsMouse` clears focus when the pointer is over empty space;
     /// `Sloppy` keeps the previous focus until the pointer enters another
     /// window. Neither variant raises — see [`focus_window_no_raise`].
-    fn maybe_pointer_focus(&mut self, pos: Point<f64, Logical>) {
+    pub(crate) fn maybe_pointer_focus(&mut self, pos: Point<f64, Logical>) {
         use shoestring_config::FocusMode;
         let mode = self.config.general.focus_mode;
         if matches!(mode, FocusMode::ClickToFocus) {
@@ -1159,17 +1159,25 @@ impl ShoestringWm {
         self.maybe_pointer_focus(pos);
     }
 
-    /// Pointer button transition. Forwards raw to the active remote under
-    /// machine-axis capture; otherwise resolves picker clicks, super-drag,
-    /// click-to-focus, then delivers the button to the focused client.
+    /// A button transition from a physical pointer.
     fn handle_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
-        let pointer = self.seat.get_pointer().unwrap();
-        let keyboard = self.seat.get_keyboard().unwrap();
-        let serial = SERIAL_COUNTER.next_serial();
         let button = event.button_code();
         let button_state = event.state();
         self.physical_held
             .note_button(button, button_state == ButtonState::Pressed);
+        self.process_button(button, button_state, event.time_msec());
+    }
+
+    /// One pointer button transition, as from a mouse. Forwards raw to the
+    /// active remote under machine-axis capture; otherwise resolves picker
+    /// clicks, super-drag, click-to-focus, then delivers the button to the
+    /// focused client. Physical buttons come here, and so do a remote
+    /// serve-mode viewer's (see `inject_raw_button`), so both meet the same
+    /// pointer policy, as `process_key` does for keys.
+    pub(crate) fn process_button(&mut self, button: u32, button_state: ButtonState, time: u32) {
+        let pointer = self.seat.get_pointer().unwrap();
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
 
         // Machine-axis capture: forward the raw button transition to the
         // active remote and swallow it locally (no click-to-focus, no
@@ -1239,7 +1247,7 @@ impl ShoestringWm {
                 button,
                 state: button_state,
                 serial,
-                time: event.time_msec(),
+                time,
             },
         );
         pointer.frame(self);

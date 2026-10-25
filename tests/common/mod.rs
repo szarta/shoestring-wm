@@ -74,6 +74,7 @@ pub const PATTERN: u32 = 0;
 pub const NOISE: u32 = 1;
 
 pub const BTN_LEFT: u32 = 0x110;
+pub const BTN_RIGHT: u32 = 0x111;
 /// evdev `KEY_A`.
 pub const KEY_A: u32 = 30;
 
@@ -934,6 +935,11 @@ pub struct ClientState {
     window_surface: Option<WlSurface>,
     pointer_in_window: bool,
     keyboard_in_window: bool,
+    /// A size the WM asked for after the window mapped (an interactive
+    /// resize); the window is drawn at it from then on. Configures before the
+    /// map are ignored, so a window keeps the size its test asked for.
+    resized: Option<(u32, u32)>,
+    mapped: bool,
 }
 
 pub fn client_main(
@@ -967,12 +973,17 @@ pub fn client_main(
         s.configured
     });
     state.colour = IDLE;
+    state.mapped = true;
     acks.send(()).unwrap();
 
     let mut lock: Option<(ExtSessionLockV1, Vec<(WlSurface, ExtSessionLockSurfaceV1)>)> = None;
     let mut pending_paint_ack = false;
+    let mut painted_size = (width, height);
     loop {
-        if state.painted != state.colour {
+        let size = state.resized.unwrap_or((width, height));
+        if state.painted != state.colour || painted_size != size {
+            let (width, height) = size;
+            painted_size = size;
             let buffer = solid_buffer(&state, &qh, width, height, state.colour);
             surface.attach(Some(&buffer), 0, 0);
             surface.damage_buffer(0, 0, width as i32, height as i32);
@@ -1324,6 +1335,23 @@ impl Dispatch<XdgSurface, ()> for ClientState {
     }
 }
 
+impl Dispatch<XdgToplevel, ()> for ClientState {
+    fn event(
+        state: &mut Self,
+        _: &XdgToplevel,
+        event: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure { width, height, .. } = event {
+            if state.mapped && width > 0 && height > 0 {
+                state.resized = Some((width as u32, height as u32));
+            }
+        }
+    }
+}
+
 impl Dispatch<ExtSessionLockV1, ()> for ClientState {
     fn event(
         state: &mut Self,
@@ -1393,6 +1421,5 @@ inert!(
     WlShm => wl_shm::Event,
     WlShmPool => wayland_client::protocol::wl_shm_pool::Event,
     WlOutput => wl_output::Event,
-    XdgToplevel => xdg_toplevel::Event,
     ExtSessionLockManagerV1 => wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::Event,
 );

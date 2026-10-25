@@ -1113,9 +1113,11 @@ fn dispatch_input(
                     state.inject_raw_keycode(keycode, pressed, bindings)
                 }
                 shoestring_ipc::RawInput::Button { button, pressed } => {
-                    state.inject_raw_button(button, pressed)
+                    state.inject_raw_button(button, pressed, bindings)
                 }
-                shoestring_ipc::RawInput::Motion { x, y } => state.inject_move_mouse(x, y),
+                shoestring_ipc::RawInput::Motion { x, y } => {
+                    state.inject_raw_motion(x, y, bindings)
+                }
                 shoestring_ipc::RawInput::Axis {
                     horizontal,
                     vertical,

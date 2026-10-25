@@ -367,9 +367,9 @@ fn held_transition(event: RawInput) -> Option<(Held, bool)> {
 }
 
 /// Release what an ended session held and nobody else does, so a viewer that
-/// dropped mid-chord or mid-drag leaves nothing pressed. Serve-mode keys go
-/// back through the bindings path, which also stops a keybind repeat the key
-/// was driving. If the gate has closed these fail, harmlessly: the WM released
+/// dropped mid-chord or mid-drag leaves nothing pressed. Serve-mode keys and
+/// buttons go back through the bindings path, which also stops a keybind
+/// repeat the key was driving and ends a Super+drag the button started. If the gate has closed these fail, harmlessly: the WM released
 /// everything injection held when it did.
 fn release_held(released: Vec<Held>, serve: bool) {
     for held in released {

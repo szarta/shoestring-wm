@@ -7,8 +7,9 @@
 //! path does NOT consult the WM's binding table — we don't want a
 //! scripted `Super+q` to quit the WM. Callers wanting WM actions should
 //! use the typed IPC requests directly. The one exception is a remote
-//! serve-mode viewer's keys (`inject_input` with `bindings`), which are a
-//! person at a keyboard driving this desktop; see [`inject_raw_keycode`].
+//! serve-mode viewer's keys and buttons (`inject_input` with `bindings`),
+//! which are a person at a keyboard and mouse driving this desktop; see
+//! [`inject_raw_keycode`] and [`inject_raw_button`].
 //!
 //! Scope (v1):
 //! - `inject_key`: any keysym understood by `xkb_keysym_from_name`
@@ -368,7 +369,7 @@ impl ShoestringWm {
         };
 
         self.drag_motion(&focus, (fx, fy));
-        self.inject_raw_button(code, true);
+        self.inject_raw_button(code, true, false);
         // Interpolate so apps that track motion deltas see a continuous drag,
         // not a teleport from press to release.
         const STEPS: u32 = 16;
@@ -376,7 +377,7 @@ impl ShoestringWm {
             let t = i as f64 / STEPS as f64;
             self.drag_motion(&focus, (fx + (tx - fx) * t, fy + (ty - fy) * t));
         }
-        self.inject_raw_button(code, false);
+        self.inject_raw_button(code, false, false);
         Ok(())
     }
 
@@ -442,14 +443,29 @@ impl ShoestringWm {
 
     /// Inject one raw pointer button transition by evdev button code
     /// (`BTN_LEFT` = `0x110`, …). Unlike [`inject_click`] this is a single
-    /// down or up — so a remote drag (press → move → release) reproduces — and
-    /// it does *not* run the click-to-focus logic: the served WM applies its
-    /// own focus policy as the events flow through the seat.
-    pub fn inject_raw_button(&mut self, button: u32, pressed: bool) {
+    /// down or up, so a remote drag (press → move → release) reproduces.
+    ///
+    /// With `bindings`, the button takes the physical-pointer path
+    /// ([`ShoestringWm::process_button`]): the window picker, Super+drag,
+    /// click-to-focus and the overlay and session-lock rules all apply, as
+    /// they would to a local click, so typing after a remote click reaches
+    /// the window clicked. Remote serve mode asks for this, as it does for
+    /// keys. Without it, the button goes straight to the seat with no focus
+    /// change, which drags and graft mode rely on.
+    pub fn inject_raw_button(&mut self, button: u32, pressed: bool, bindings: bool) {
         // Same ownership rule as keys (see `inject_raw_keycode`).
         if !self.injected_held.note_button(button, pressed)
             || self.physical_held.buttons.contains(&button)
         {
+            return;
+        }
+        let state = if pressed {
+            ButtonState::Pressed
+        } else {
+            ButtonState::Released
+        };
+        if bindings {
+            self.process_button(button, state, monotonic_msec());
             return;
         }
         let serial = SERIAL_COUNTER.next_serial();
@@ -458,17 +474,23 @@ impl ShoestringWm {
             self,
             &ButtonEvent {
                 button,
-                state: if pressed {
-                    ButtonState::Pressed
-                } else {
-                    ButtonState::Released
-                },
+                state,
                 serial,
                 time: monotonic_msec(),
             },
         );
         let pointer = self.seat.get_pointer().unwrap();
         pointer.frame(self);
+    }
+
+    /// Inject one raw absolute pointer motion. With `bindings` (remote serve
+    /// mode) it also runs focus-follows-mouse, as a local mouse would; without
+    /// it, it is [`inject_move_mouse`], which leaves keyboard focus alone.
+    pub fn inject_raw_motion(&mut self, x: f64, y: f64, bindings: bool) {
+        self.inject_move_mouse(x, y);
+        if bindings {
+            self.maybe_pointer_focus((x, y).into());
+        }
     }
 
     /// Release every key and button raw injection still holds, so input a
@@ -569,7 +591,7 @@ impl ShoestringWm {
                 self.inject_window_motion(&window, x, y);
             }
             shoestring_ipc::RawInput::Button { button, pressed } => {
-                self.inject_raw_button(button, pressed)
+                self.inject_raw_button(button, pressed, false)
             }
             shoestring_ipc::RawInput::Axis {
                 horizontal,

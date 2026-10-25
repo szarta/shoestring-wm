@@ -165,15 +165,18 @@ pub enum Request {
     /// a drag, or a chord can be reproduced exactly as the remote client sent
     /// it. Keys carry an evdev keycode.
     ///
-    /// `bindings` decides whether a key may trigger this WM's keybindings. Off
-    /// (the default), keys go straight to the focused client, past the binding
-    /// table, so a scripted `Super+q` can't quit the WM. On, a key takes the
-    /// same path as a physical keystroke, bindings included: remote serve mode
-    /// sets it, because the viewer is driving this whole desktop and its
-    /// workspace and window keys are meant for this machine. Graft mode uses
-    /// [`Request::InjectInputToWindow`], which never applies bindings. Only
-    /// key events read the flag. Gated by `set_automation`. Reply is
-    /// [`Response::Ok`].
+    /// `bindings` decides whether the event meets this WM's desktop policy, as
+    /// local input does. Off (the default), keys go straight to the focused
+    /// client, past the binding table, so a scripted `Super+q` can't quit the
+    /// WM, and buttons and motion reach the seat without changing keyboard
+    /// focus. On, a key takes the same path as a physical keystroke, bindings
+    /// included, and a button the same path as a physical click (window
+    /// picker, Super+drag, click-to-focus), with motion running
+    /// focus-follows-mouse: remote serve mode sets it, because the viewer is
+    /// driving this whole desktop and its keys and clicks are meant for this
+    /// machine. Graft mode uses [`Request::InjectInputToWindow`], which never
+    /// applies them. Scroll events don't read the flag. Gated by
+    /// `set_automation`. Reply is [`Response::Ok`].
     InjectInput {
         event: RawInput,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

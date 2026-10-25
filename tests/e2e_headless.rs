@@ -986,6 +986,234 @@ fn e2e_remote_gate_off_releases_held_keys() {
     viewer.bye();
 }
 
+/// A test window as the `windows` list reports it.
+struct ListedWindow {
+    id: String,
+    /// On-screen `(x, y, w, h)`.
+    rect: (i32, i32, i32, i32),
+    focused: bool,
+}
+
+/// The mapped test windows.
+fn test_windows(wm: &Wm) -> Vec<ListedWindow> {
+    let reply = wm.ipc_ok(json!({"type": "windows"}));
+    reply["windows"]
+        .as_array()
+        .expect("windows")
+        .iter()
+        .filter(|w| w["title"] == TITLE)
+        .filter_map(|w| {
+            let g = &w["geometry"];
+            let at = |k: &str| g[k].as_i64().map(|v| v as i32);
+            Some(ListedWindow {
+                id: w["id"].as_str()?.to_owned(),
+                rect: (at("x")?, at("y")?, at("w")?, at("h")?),
+                focused: w["focused"].as_bool()?,
+            })
+        })
+        .collect()
+}
+
+fn rect_of(wm: &Wm, id: &str) -> (i32, i32, i32, i32) {
+    test_windows(wm)
+        .into_iter()
+        .find(|w| w.id == id)
+        .map(|w| w.rect)
+        .expect("test window")
+}
+
+fn wait_focused(wm: &Wm, id: &str, what: &str) {
+    wait_for(what, || {
+        test_windows(wm)
+            .iter()
+            .any(|w| w.id == id && w.focused)
+            .then_some(())
+    });
+}
+
+/// Two windows: a large one mapped first, then a small one on top of its
+/// centre, focused.
+struct Stacked {
+    _clients: [TestClient; 2],
+    large: String,
+    /// A point on the large window that the small one doesn't cover.
+    on_large: (i32, i32),
+    small: String,
+    on_small: (i32, i32),
+}
+
+fn large_under_small(wm: &Wm) -> Stacked {
+    let large = TestClient::map_sized(wm, (2 * WINDOW_W, 2 * WINDOW_H));
+    wait_for("the large window to map", || {
+        (test_windows(wm).len() == 1).then_some(())
+    });
+    let large_id = test_windows(wm)[0].id.clone();
+    let small = TestClient::map(wm);
+    let small_id = wait_for("the small window to map", || {
+        test_windows(wm)
+            .into_iter()
+            .find(|w| w.id != large_id)
+            .map(|w| w.id)
+    });
+    wait_focused(wm, &small_id, "the small window to take focus");
+    let (lx, ly, _, _) = rect_of(wm, &large_id);
+    let (sx, sy, sw, sh) = rect_of(wm, &small_id);
+    let on_large = (lx + 10, ly + 10);
+    assert!(
+        on_large.0 < sx || on_large.1 < sy,
+        "the small window covers the probe point"
+    );
+    Stacked {
+        _clients: [large, small],
+        large: large_id,
+        on_large,
+        small: small_id,
+        on_small: (sx + sw / 2, sy + sh / 2),
+    }
+}
+
+/// A serve-mode viewer's click focuses the window clicked, as a local click
+/// would, so the viewer's next keys reach that window and not the one that
+/// had focus. Automation's raw buttons, without `bindings`, leave focus alone.
+#[test]
+#[ignore]
+fn e2e_remote_serve_click_moves_keyboard_focus() {
+    let mut wm = Wm::start();
+    let stacked = large_under_small(&wm);
+    let (on_large, on_small) = (stacked.on_large, stacked.on_small);
+    wm.park_pointer();
+    wm.start_remote_server();
+
+    // Automation: a raw press and release on the large window delivers the
+    // button but keeps the small window focused.
+    wm.ipc_ok(json!({"type": "inject_input",
+                     "event": {"kind": "motion", "x": on_large.0, "y": on_large.1}}));
+    for pressed in [true, false] {
+        wm.ipc_ok(json!({"type": "inject_input",
+                         "event": {"kind": "button", "button": BTN_LEFT, "pressed": pressed}}));
+    }
+    wm.park_pointer();
+    wm.wait_pixel(on_large, rgb(CLICKED), "large window after a raw click");
+    assert!(
+        test_windows(&wm)
+            .iter()
+            .any(|w| w.id == stacked.small && w.focused),
+        "a raw automation click moved focus"
+    );
+    wm.ipc_ok(json!({"type": "inject_click", "button": "left", "x": on_small.0, "y": on_small.1}));
+    wm.park_pointer();
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    viewer.click(on_large);
+    wait_focused(
+        &wm,
+        &stacked.large,
+        "the viewer's click to focus the large window",
+    );
+    viewer.key(KEY_A);
+    viewer.send(ClientMessage::PointerMotion {
+        x: (OUTPUT_W - 1) as f64,
+        y: (OUTPUT_H - 1) as f64,
+    });
+    // Only the focused window gets keys, so this is the key landing where
+    // the viewer clicked.
+    viewer.wait_pixel(on_large, rgb(KEYED), "large window after the viewer's key");
+    viewer.bye();
+}
+
+/// A viewer drags a window with Super held: left moves it and right resizes
+/// it, through the served WM's own grabs, and neither press reaches the app.
+#[test]
+#[ignore]
+fn e2e_remote_serve_super_drag_moves_and_resizes() {
+    let mut wm = Wm::start();
+    let _client = TestClient::map(&wm);
+    let (id, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+    let (x, y, w, h) = rect_of(&wm, &id);
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    let drag = |viewer: &mut Viewer, button: u32, from: (i32, i32), by: (i32, i32)| {
+        viewer_key(viewer, KEY_LEFTMETA, true);
+        viewer.send(ClientMessage::PointerMotion {
+            x: from.0 as f64,
+            y: from.1 as f64,
+        });
+        viewer.send(ClientMessage::PointerButton {
+            button,
+            pressed: true,
+        });
+        for step in 1..=4 {
+            viewer.send(ClientMessage::PointerMotion {
+                x: (from.0 + by.0 * step / 4) as f64,
+                y: (from.1 + by.1 * step / 4) as f64,
+            });
+        }
+        viewer.send(ClientMessage::PointerButton {
+            button,
+            pressed: false,
+        });
+        viewer_key(viewer, KEY_LEFTMETA, false);
+    };
+
+    drag(&mut viewer, BTN_LEFT, centre, (40, 30));
+    wait_for("Super+left drag to move the window", || {
+        (rect_of(&wm, &id) == (x + 40, y + 30, w, h)).then_some(())
+    });
+
+    // Right-drag from near the bottom-right corner grows the window there.
+    let (x, y, w, h) = rect_of(&wm, &id);
+    drag(&mut viewer, BTN_RIGHT, (x + w - 10, y + h - 10), (30, 20));
+    wait_for("Super+right drag to resize the window", || {
+        let (_, _, nw, nh) = rect_of(&wm, &id);
+        (nw > w && nh > h).then_some(())
+    });
+    // The app sees Super itself, as it would from a local keyboard, but no
+    // button.
+    wm.park_pointer();
+    assert_ne!(
+        wm.pixel((x + 20, y + 20)),
+        rgb(CLICKED),
+        "a Super+drag press reached the app"
+    );
+    viewer.bye();
+}
+
+/// While a picker is armed, a viewer's click picks the window under it and
+/// never reaches the app.
+#[test]
+#[ignore]
+fn e2e_remote_serve_click_answers_the_picker() {
+    let mut wm = Wm::start();
+    let _client = TestClient::map(&wm);
+    let (id, centre) = wm.mapped_window();
+    wm.park_pointer();
+    wm.start_remote_server();
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    let mut pick = wm.connect_ipc();
+    wait_focused(&wm, &id, "the window to have focus before the pick");
+    writeln!(pick, "{}", json!({"type": "pick_window"})).expect("write pick_window");
+    // Arming the picker takes keyboard focus off the window.
+    wait_for("the picker to arm", || {
+        test_windows(&wm).iter().all(|w| !w.focused).then_some(())
+    });
+    viewer.click(centre);
+    let reply = read_line(&mut pick);
+    assert_eq!(reply["window"]["id"], id.as_str(), "{reply}");
+    wm.park_pointer();
+    assert_eq!(
+        wm.pixel(centre),
+        rgb(IDLE),
+        "the picking click reached the app"
+    );
+    viewer.bye();
+}
+
 /// The "being viewed" count follows viewers that connect and leave all at
 /// once: every change reaches the WM in order, so it ends on the true number.
 #[test]
