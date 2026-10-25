@@ -117,11 +117,14 @@ The ``[general]`` section
      - ``false``
      - Master gate for remote-automation IPC methods (``inject_key`` /
        ``inject_text`` / ``inject_click`` / ``move_mouse`` /
-       ``screenshot`` / ``run_command`` / ``dispatch_action``). Off by default so an
-       attacker with only socket access can't drive the session. The
-       CLI flag ``--enable-automation`` and the runtime IPC
+       ``screenshot`` / ``run_command`` / ``dispatch_action``). Off by
+       default, so nothing drives the session until someone turns it on.
+       The CLI flag ``--enable-automation`` and the runtime IPC
        ``set_automation`` both override this without writing back to
        disk — the config file stays the source of truth at next start.
+       It is consent, not protection: any process running as you can
+       turn it on over IPC, and virtual-pointer and virtual-keyboard
+       input is never gated. See :ref:`ipc-trust-model`.
    * - ``screen_capture_enabled``
      - bool
      - ``false``
@@ -130,7 +133,9 @@ The ``[general]`` section
        ``xdg-desktop-portal-shoestring`` screencast/screenshot backend use
        to read the screen. Off by default: unlike
        X11, Wayland isolates clients, so leaving it off means a stray or
-       malicious client simply cannot capture the screen. When ``false``
+       malicious Wayland client cannot capture the screen through the
+       protocol. It doesn't stop a process running as you, which can turn
+       the gate on over IPC (see :ref:`ipc-trust-model`). When ``false``
        neither the ``zwlr_screencopy_manager_v1`` global nor the modern
        ``ext-image-copy-capture-v1`` / ``ext-image-capture-source-v1``
        managers are advertised, and any capture is refused. The runtime

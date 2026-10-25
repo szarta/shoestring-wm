@@ -116,6 +116,12 @@ startup with an error that names the fix. The bind mount carries only the
       ssh -N -L "$XDG_RUNTIME_DIR/box.sock:/run/user/<uid>/sandbox/shoestring-remote.sock" host
       shoestring-remote-client --connect "$XDG_RUNTIME_DIR/box.sock" --label box
 
+Inside the container the desktop rule still holds: every process there runs
+as the container user, so the app and anything it starts can reach the WM's
+IPC socket and turn its gates on. The container boundary keeps them away from
+your own session; nothing keeps them away from this one (see
+:ref:`ipc-trust-model` and `Isolation boundaries`_).
+
 TCP is still available, but nothing checks who connects to it: every user on
 the host can reach a loopback-published port, and anything on the container
 network can reach ``0.0.0.0``, and either gets the whole session. Use it only

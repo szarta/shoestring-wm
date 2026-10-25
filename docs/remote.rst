@@ -221,6 +221,12 @@ Consent and security
 
 The remote gate reuses the existing capability-gate model end to end:
 
+- **The gates are consent, not protection.** Any process running as you on
+  the served box can reach the WM's IPC socket and turn the remote gate on
+  itself, which opens the listener. The gate keeps sharing off until someone
+  means it and shows when it is on; it does not stop software already running
+  as you. Keep software you don't trust off that account, or in a container
+  without your ``$XDG_RUNTIME_DIR``. See :ref:`ipc-trust-model`.
 - The **remote gate** couples the **capture gate** (for the served output) and
   the **automation gate** (for injected input), then opens the listener. It is
   off by default and **greyed until a** ``shoestring-remote-server`` **has

@@ -70,6 +70,15 @@ and must not see your windows.
 
 ``-C`` is not needed: without it the WM starts nothing.
 
+This isolation keeps tests apart and off your desktop; it is not a sandbox.
+The application under test runs as you, so it can reach the test WM's IPC
+socket, and your own session's too. The automation gate is consent, not
+protection: any process running as you can turn it on itself, and any Wayland
+client can synthesize input through the virtual-pointer and virtual-keyboard
+protocols whatever the gate says. To test an application you don't trust, run
+the whole test as another user or in a container without your
+``$XDG_RUNTIME_DIR``. See :ref:`ipc-trust-model`.
+
 Readiness
 ---------
 

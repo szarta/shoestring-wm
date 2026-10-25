@@ -203,6 +203,13 @@ Command-line flags
     can still flip the gate; the config file is the source of truth at
     next start. See :doc:`ipc`.
 
+    The gate is consent, not protection: any process running as your user can
+    reach the IPC socket and turn it on itself, and any Wayland client can
+    synthesize input through the virtual-pointer and virtual-keyboard protocols
+    whatever the gate says. To keep software you don't trust out of the
+    session, run it as another user, or in a container or sandbox without your
+    ``$XDG_RUNTIME_DIR``. See :ref:`ipc-trust-model`.
+
 ``-V, --version``
     Print the binary version.
 
