@@ -1,4 +1,4 @@
-TIMESTAMP = 1792771826
+TIMESTAMP = 1792888093
 SHA256 (rust/crates/adler2-2.0.1.crate) = 320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa
 SIZE (rust/crates/adler2-2.0.1.crate) = 13366
 SHA256 (rust/crates/ahash-0.8.12.crate) = 5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75
@@ -821,5 +821,5 @@ SHA256 (rust/crates/zmij-1.0.21.crate) = b8848ee67ecc8aedbaf3e4122217aff89263923
 SIZE (rust/crates/zmij-1.0.21.crate) = 26665
 SHA256 (szarta-smithay-6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a_GH0.tar.gz) = fdd55ef62332bc5e1c1283c8340ab4fe20a62ceda319267f836f9582b5553e3e
 SIZE (szarta-smithay-6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a_GH0.tar.gz) = 845874
-SHA256 (szarta-shoestring-wm-v0.9.1_GH0.tar.gz) = 4d422b168cf666a7ca4dc1c8b0d10084c27a6298c88724caf8df8bd0d56ec951
-SIZE (szarta-shoestring-wm-v0.9.1_GH0.tar.gz) = 1143958
+SHA256 (szarta-shoestring-wm-v0.10.0_GH0.tar.gz) = 3eb6605f0e4fc70bcafc5f9c5ea6f034c5d54aab6e25cd2e6be15139575c71a9
+SIZE (szarta-shoestring-wm-v0.10.0_GH0.tar.gz) = 1189287
