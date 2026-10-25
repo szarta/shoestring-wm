@@ -699,12 +699,14 @@ impl ShoestringWm {
             // seat's tablet-seat before its tool events mean anything; touch
             // needs the wl_touch capability added once a touchscreen appears.
             InputEvent::DeviceAdded { device } => self.handle_device_added::<I>(device),
-            // Only tablets need teardown — smithay has no remove_touch, so the
+            // Release anything the device still held, then tear down a
+            // tablet. Touch needs nothing: smithay has no remove_touch, so the
             // wl_touch capability simply persists for the session.
-            InputEvent::DeviceRemoved { device }
-                if device.has_capability(DeviceCapability::TabletTool) =>
-            {
-                self.handle_tablet_removed::<I>(device)
+            InputEvent::DeviceRemoved { device } => {
+                self.release_device_input(&device.id());
+                if device.has_capability(DeviceCapability::TabletTool) {
+                    self.handle_tablet_removed::<I>(device);
+                }
             }
             InputEvent::TouchDown { event, .. } => self.on_touch_down::<I>(&event),
             InputEvent::TouchMotion { event, .. } => self.on_touch_motion::<I>(&event),
@@ -741,10 +743,12 @@ impl ShoestringWm {
     /// also holds stays down until both have let go.
     fn handle_keyboard_event<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
         let pressed = event.state() == KeyState::Pressed;
-        if !self
-            .held
-            .key(InputSource::Physical, event.key_code().into(), pressed)
-        {
+        let device = event.device().id();
+        if !self.held.key(
+            InputSource::Physical(&device),
+            event.key_code().into(),
+            pressed,
+        ) {
             return;
         }
         self.process_key(event.key_code(), event.state(), Event::time_msec(&event));
@@ -1173,7 +1177,11 @@ impl ShoestringWm {
         let button = event.button_code();
         let button_state = event.state();
         let pressed = button_state == ButtonState::Pressed;
-        if !self.held.button(InputSource::Physical, button, pressed) {
+        let device = event.device().id();
+        if !self
+            .held
+            .button(InputSource::Physical(&device), button, pressed)
+        {
             return;
         }
         self.process_button(button, button_state, event.time_msec());

@@ -247,6 +247,15 @@ pub fn init_winit(
             WinitEvent::CloseRequested => {
                 state.loop_signal.stop();
             }
+            // The host window lost focus. Keys held then are released by the
+            // host as synthetic events, which smithay drops, so nothing would
+            // ever lift them here: release them now, as libinput does for a
+            // device that goes away.
+            WinitEvent::Focus(false) => {
+                for device in state.held.physical_devices() {
+                    state.release_device_input(&device);
+                }
+            }
             _ => {}
         })
         .map_err(|e| anyhow::anyhow!("failed to insert winit source: {e}"))?;
