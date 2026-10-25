@@ -325,6 +325,45 @@ fn e2e_remote_idle_lease_follows_the_viewers() {
     assert_eq!(wm.remote_status()["enabled"], true);
 }
 
+/// Setting, replacing or dropping a lease with the gate already on tells
+/// subscribers, with the lease in the event; re-sending the same leaseless
+/// state doesn't.
+#[test]
+#[ignore]
+fn e2e_remote_lease_changes_are_announced() {
+    let mut wm = Wm::start();
+    wm.start_remote_server();
+    let mut events = wm.connect_ipc();
+    events
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(events, "{}", json!({"type": "event_stream"})).unwrap();
+    assert_eq!(read_line(&mut events)["type"], "ok");
+    let mut next_remote_changed = || loop {
+        let event = read_line(&mut events);
+        if event["type"] == "remote_changed" {
+            break event;
+        }
+    };
+
+    wm.ipc_ok(json!({"type": "set_remote", "enabled": true, "for_secs": 600}));
+    let event = next_remote_changed();
+    assert_eq!(event["enabled"], true, "{event}");
+    let left = event["lease"]["expires_in_secs"].as_u64().unwrap();
+    assert!((590..=600).contains(&left), "{event}");
+
+    wm.ipc_ok(json!({"type": "set_remote", "enabled": true}));
+    let event = next_remote_changed();
+    assert_eq!(event["enabled"], true, "{event}");
+    assert!(event.get("lease").is_none(), "lease dropped: {event}");
+
+    // Nothing changes here, so the next event is the one after it.
+    wm.ipc_ok(json!({"type": "set_remote", "enabled": true}));
+    wm.ipc_ok(json!({"type": "set_remote", "enabled": true, "idle_secs": 60}));
+    let event = next_remote_changed();
+    assert_eq!(event["lease"]["idle_secs"], 60, "{event}");
+}
+
 /// A lease that can't mean anything is refused, and changes nothing.
 #[test]
 #[ignore]

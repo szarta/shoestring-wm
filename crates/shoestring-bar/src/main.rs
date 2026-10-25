@@ -1091,6 +1091,7 @@ fn apply_ipc_event(state: &mut State, event: IpcEvent) {
             enabled,
             server_available,
             viewers,
+            ..
         } => {
             if state.remote_enabled != enabled
                 || state.remote_server_available != server_available

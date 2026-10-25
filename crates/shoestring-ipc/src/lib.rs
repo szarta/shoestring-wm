@@ -1546,7 +1546,8 @@ pub enum Event {
         enabled: bool,
     },
     /// Fired when any remote-desktop state changes: the gate flipping, a server
-    /// (un)registering, or the viewer count moving. Carries the full state so
+    /// (un)registering, the viewer count moving, or a `set_remote` setting,
+    /// replacing or dropping a lease. Carries the full state so
     /// the bar can light a "being viewed / controlled" chip (when `viewers >
     /// 0`) and grey the gate toggle (until `server_available`), and the
     /// registered server learns when to open/close its listener (`enabled`),
@@ -1556,6 +1557,10 @@ pub enum Event {
         enabled: bool,
         server_available: bool,
         viewers: u32,
+        /// The lease as of this event, as in [`Response::Remote`]; absent
+        /// without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease: Option<RemoteLease>,
     },
     /// Fired when the active machine-axis view changes — the user switched which
     /// machine they're driving (`Super+J/K`, the break-out hotkey, a
@@ -2342,11 +2347,15 @@ mod tests {
             enabled: false,
             server_available: true,
             viewers: 0,
+            lease: None,
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"type":"remote_changed","enabled":false,"server_available":true,"viewers":0}"#
         );
+        let leased = r#"{"type":"remote_changed","enabled":true,"server_available":true,"viewers":1,"lease":{"expires_in_secs":60}}"#;
+        let ev: Event = serde_json::from_str(leased).unwrap();
+        assert_eq!(serde_json::to_string(&ev).unwrap(), leased);
         // Round-trips back to the same value.
         let back: Request =
             serde_json::from_str(r#"{"type":"set_remote","enabled":false}"#).unwrap();

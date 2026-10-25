@@ -1449,10 +1449,7 @@ fn remote_response(state: &ShoestringWm) -> Response {
         server_available: state.remote_server.is_some(),
         viewers: state.remote_viewers,
         endpoint: state.remote_endpoint.clone(),
-        lease: state
-            .remote_lease
-            .as_ref()
-            .map(|lease| lease.status(Instant::now())),
+        lease: state.remote_lease_status(),
     }
 }
 
@@ -1526,6 +1523,7 @@ fn dispatch_remote(
                 return true;
             }
             let changed = state.remote_enabled != enabled;
+            let had_lease = state.remote_lease.is_some();
             // Couples the automation + capture gates on/off, and drops any
             // earlier lease.
             let (auto_changed, capture_changed) = state.set_remote(enabled);
@@ -1542,7 +1540,10 @@ fn dispatch_remote(
                 state.set_remote_lease(lease);
             }
             let _ = write_response(client, &remote_response(state));
-            state.announce_remote(changed, auto_changed, capture_changed);
+            // Setting, replacing or dropping a lease is news even when the
+            // gate was already on.
+            let lease_changed = had_lease || state.remote_lease.is_some();
+            state.announce_remote(changed || lease_changed, auto_changed, capture_changed);
             true
         }
         Request::RemoteStatus => {

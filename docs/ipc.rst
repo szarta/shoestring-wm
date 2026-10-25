@@ -1351,9 +1351,11 @@ Each event is tagged by ``type``.
 
 ``remote_changed``
     ``{"type": "remote_changed", "enabled": <bool>, "server_available":
-    <bool>, "viewers": <int>}``. Fired when the remote gate flips, a server
-    registers or drops, or the viewer count changes — same payload as the
-    ``remote`` response. The ``shoestring-remote-server`` watches it to open or
+    <bool>, "viewers": <int>, "lease": {...}}``. Fired when the remote gate
+    flips, a server registers or drops, the viewer count changes, or a
+    ``set_remote`` sets, replaces or drops a lease, even with the gate
+    already on. ``lease`` is as in the ``remote`` response, and absent
+    without one; its times are as of the event. The ``shoestring-remote-server`` watches it to open or
     close its listener; a bar uses it for the remote toggle and the "being
     viewed" chip. See :doc:`remote`.
 
@@ -1575,6 +1577,9 @@ Unreleased
 - ``set_remote`` takes optional ``for_secs`` and ``idle_secs`` to lease the
   remote gate, and the ``remote`` reply reports the lease in ``lease``. Each
   is at most 30 days.
+- ``remote_changed`` carries the lease in an optional ``lease``, and is also
+  sent when ``set_remote`` sets, replaces or drops a lease with the gate
+  already on, so subscribers needn't poll ``remote_status`` for it.
 - ``shoestring-remote-server`` refuses ``--tcp`` on an address other than
   loopback unless ``--tcp-any-host`` (or ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``)
   is also given.

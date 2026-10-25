@@ -93,6 +93,12 @@ impl ShoestringWm {
         self.arm_remote_lease();
     }
 
+    /// The lease as `remote_status` and `remote_changed` report it.
+    pub fn remote_lease_status(&self) -> Option<shoestring_ipc::RemoteLease> {
+        let now = Instant::now();
+        self.remote_lease.as_ref().map(|lease| lease.status(now))
+    }
+
     /// Follow a new viewer count with the idle clock.
     pub fn remote_lease_viewers_changed(&mut self) {
         if let Some(lease) = self.remote_lease.as_mut() {

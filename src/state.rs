@@ -2005,6 +2005,7 @@ impl ShoestringWm {
             enabled: self.remote_enabled,
             server_available,
             viewers: self.remote_viewers,
+            lease: self.remote_lease_status(),
         });
     }
 
