@@ -36,34 +36,75 @@ use smithay::{
 use crate::state::ShoestringWm;
 
 /// Keys (X-style keycodes, evdev + 8) and pointer buttons (evdev codes) one
-/// input source holds down. The WM keeps one set for raw injection and one for
-/// the real devices on this seat, so that a transition reaches clients only
-/// when it changes what the seat as a whole holds: injection can't lift a key a
-/// finger is still on, and releasing everything injection holds (when its gate
-/// closes) leaves physically held keys alone.
+/// input source holds down.
 #[derive(Debug, Default)]
 pub struct HeldInput {
     pub keys: BTreeSet<u32>,
     pub buttons: BTreeSet<u32>,
 }
 
-impl HeldInput {
-    /// Record a transition. Returns whether it changed this source's state (a
-    /// repeated press, or a release of something not held, does not).
-    fn note(set: &mut BTreeSet<u32>, code: u32, pressed: bool) -> bool {
-        if pressed {
-            set.insert(code)
-        } else {
-            set.remove(&code)
+/// Where a key or button transition came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    /// A real keyboard or pointer on this seat.
+    Physical,
+    /// Raw injection: `inject_input`, which carries a remote viewer's input.
+    Injected,
+}
+
+/// What each input source holds, so that a transition reaches clients only
+/// when it changes what the seat as a whole holds: a key goes down when the
+/// first source presses it and up when the last one releases it, whichever
+/// source that is. So neither a remote viewer nor a local finger can lift a
+/// key or end a drag the other still holds, and releasing everything
+/// injection holds (when its gate closes) leaves physically held keys alone.
+#[derive(Debug, Default)]
+pub struct SeatHeld {
+    physical: HeldInput,
+    injected: HeldInput,
+}
+
+impl SeatHeld {
+    /// Record a key transition from `source`. Returns whether to deliver it:
+    /// not a repeat or a stray release, and not a key another source holds.
+    pub fn key(&mut self, source: InputSource, keycode: u32, pressed: bool) -> bool {
+        let (own, other) = self.split(source);
+        Self::note(&mut own.keys, &other.keys, keycode, pressed)
+    }
+
+    /// Record a button transition from `source`, as [`Self::key`] does keys.
+    pub fn button(&mut self, source: InputSource, button: u32, pressed: bool) -> bool {
+        let (own, other) = self.split(source);
+        Self::note(&mut own.buttons, &other.buttons, button, pressed)
+    }
+
+    /// Forget everything injection holds. Returns what the seat no longer
+    /// holds as a result: the keys and buttons to release.
+    pub fn release_injected(&mut self) -> HeldInput {
+        let HeldInput { keys, buttons } = std::mem::take(&mut self.injected);
+        HeldInput {
+            keys: keys.difference(&self.physical.keys).copied().collect(),
+            buttons: buttons
+                .difference(&self.physical.buttons)
+                .copied()
+                .collect(),
         }
     }
 
-    pub fn note_key(&mut self, keycode: u32, pressed: bool) -> bool {
-        Self::note(&mut self.keys, keycode, pressed)
+    fn split(&mut self, source: InputSource) -> (&mut HeldInput, &HeldInput) {
+        match source {
+            InputSource::Physical => (&mut self.physical, &self.injected),
+            InputSource::Injected => (&mut self.injected, &self.physical),
+        }
     }
 
-    pub fn note_button(&mut self, button: u32, pressed: bool) -> bool {
-        Self::note(&mut self.buttons, button, pressed)
+    fn note(own: &mut BTreeSet<u32>, other: &BTreeSet<u32>, code: u32, pressed: bool) -> bool {
+        let changed = if pressed {
+            own.insert(code)
+        } else {
+            own.remove(&code)
+        };
+        changed && !other.contains(&code)
     }
 }
 
@@ -429,9 +470,7 @@ impl ShoestringWm {
         let keycode = evdev_keycode + 8;
         // Pass on only what changes the seat's state: not a repeat or a stray
         // release, and not a key a real keyboard is holding too.
-        if !self.injected_held.note_key(keycode, pressed)
-            || self.physical_held.keys.contains(&keycode)
-        {
+        if !self.held.key(InputSource::Injected, keycode, pressed) {
             return;
         }
         if bindings {
@@ -454,9 +493,7 @@ impl ShoestringWm {
     /// change, which drags and graft mode rely on.
     pub fn inject_raw_button(&mut self, button: u32, pressed: bool, bindings: bool) {
         // Same ownership rule as keys (see `inject_raw_keycode`).
-        if !self.injected_held.note_button(button, pressed)
-            || self.physical_held.buttons.contains(&button)
-        {
+        if !self.held.button(InputSource::Injected, button, pressed) {
             return;
         }
         let state = if pressed {
@@ -497,10 +534,11 @@ impl ShoestringWm {
     /// viewer or script left down (a dropped connection mid-chord or mid-drag)
     /// doesn't stay pressed on the seat. Called when the automation gate
     /// closes, which every revocation path goes through. Keys a real keyboard
-    /// also holds stay down, and a keybind repeat the released key drove stops.
+    /// also holds stay down, along with any keybind repeat they drive; a
+    /// repeat a released key drove stops.
     pub fn release_injected_input(&mut self) {
-        let held = std::mem::take(&mut self.injected_held);
-        for keycode in held.keys {
+        let released = self.held.release_injected();
+        for keycode in released.keys {
             if self
                 .key_repeat
                 .as_ref()
@@ -508,17 +546,12 @@ impl ShoestringWm {
             {
                 self.cancel_key_repeat();
             }
-            if !self.physical_held.keys.contains(&keycode) {
-                tracing::debug!(keycode, "releasing a key injection left held");
-                self.dispatch_key(keycode, KeyState::Released);
-            }
+            tracing::debug!(keycode, "releasing a key injection left held");
+            self.dispatch_key(keycode, KeyState::Released);
         }
         let pointer = self.seat.get_pointer().expect("seat must have pointer");
-        let mut released = false;
-        for button in held.buttons {
-            if self.physical_held.buttons.contains(&button) {
-                continue;
-            }
+        let mut any = false;
+        for button in released.buttons {
             tracing::debug!(button, "releasing a button injection left held");
             pointer.button(
                 self,
@@ -529,9 +562,9 @@ impl ShoestringWm {
                     time: monotonic_msec(),
                 },
             );
-            released = true;
+            any = true;
         }
-        if released {
+        if any {
             pointer.frame(self);
         }
     }
@@ -770,6 +803,84 @@ pub(crate) fn monotonic_msec() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use InputSource::{Injected, Physical};
+
+    /// X-style keycode for Shift_L (evdev 42 + 8).
+    const SHIFT: u32 = 50;
+
+    #[test]
+    fn overlapping_key_goes_down_once_and_up_last() {
+        for (first, second) in [(Injected, Physical), (Physical, Injected)] {
+            let mut held = SeatHeld::default();
+            assert!(held.key(first, SHIFT, true), "{first:?} press");
+            assert!(
+                !held.key(second, SHIFT, true),
+                "{second:?} press while held"
+            );
+            // Whichever source lets go first, the seat still holds the key.
+            assert!(!held.key(second, SHIFT, false), "{second:?} early release");
+            assert!(held.key(first, SHIFT, false), "{first:?} last release");
+
+            let mut held = SeatHeld::default();
+            held.key(first, SHIFT, true);
+            held.key(second, SHIFT, true);
+            assert!(!held.key(first, SHIFT, false), "{first:?} early release");
+            assert!(held.key(second, SHIFT, false), "{second:?} last release");
+        }
+    }
+
+    #[test]
+    fn overlapping_button_ends_the_drag_on_the_last_release() {
+        for (first, second) in [(Injected, Physical), (Physical, Injected)] {
+            let mut held = SeatHeld::default();
+            assert!(held.button(first, BTN_LEFT, true));
+            assert!(!held.button(second, BTN_LEFT, true));
+            assert!(!held.button(second, BTN_LEFT, false));
+            assert!(held.button(first, BTN_LEFT, false));
+        }
+    }
+
+    #[test]
+    fn repeats_and_stray_releases_are_dropped() {
+        for source in [Injected, Physical] {
+            let mut held = SeatHeld::default();
+            assert!(!held.key(source, SHIFT, false), "{source:?} stray release");
+            assert!(held.key(source, SHIFT, true));
+            assert!(!held.key(source, SHIFT, true), "{source:?} repeat press");
+            assert!(!held.button(source, BTN_LEFT, false));
+        }
+    }
+
+    #[test]
+    fn keys_and_buttons_are_separate() {
+        let mut held = SeatHeld::default();
+        // evdev BTN_LEFT and X keycode 0x110 are different things.
+        assert!(held.key(Injected, BTN_LEFT, true));
+        assert!(held.button(Physical, BTN_LEFT, true));
+    }
+
+    #[test]
+    fn releasing_injection_leaves_what_a_device_holds() {
+        let mut held = SeatHeld::default();
+        held.key(Injected, SHIFT, true);
+        held.key(Injected, 38, true);
+        held.key(Physical, SHIFT, true);
+        held.button(Injected, BTN_LEFT, true);
+        held.button(Injected, BTN_RIGHT, true);
+        held.button(Physical, BTN_RIGHT, true);
+
+        let released = held.release_injected();
+        assert_eq!(released.keys, BTreeSet::from([38]));
+        assert_eq!(released.buttons, BTreeSet::from([BTN_LEFT]));
+
+        // The device still holds Shift and right, so its releases now reach
+        // the seat, and injection starts again from nothing.
+        assert!(held.key(Physical, SHIFT, false));
+        assert!(held.button(Physical, BTN_RIGHT, false));
+        assert!(!held.key(Injected, 38, false), "injection still held a key");
+        assert!(held.release_injected().keys.is_empty());
+    }
 
     #[test]
     fn parse_button_names_and_codes() {

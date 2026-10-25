@@ -40,6 +40,7 @@ use smithay::{
 use crate::{
     binds::ModMask,
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
+    inject::InputSource,
     ipc::ClientId,
     layout::{self, LayoutState},
     state::ShoestringWm,
@@ -735,10 +736,17 @@ impl ShoestringWm {
         }
     }
 
-    /// A key transition from a physical keyboard.
+    /// A key transition from a physical keyboard. Like an injected one, it is
+    /// passed on only if it changes what the seat holds: a key a remote viewer
+    /// also holds stays down until both have let go.
     fn handle_keyboard_event<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
-        self.physical_held
-            .note_key(event.key_code().into(), event.state() == KeyState::Pressed);
+        let pressed = event.state() == KeyState::Pressed;
+        if !self
+            .held
+            .key(InputSource::Physical, event.key_code().into(), pressed)
+        {
+            return;
+        }
         self.process_key(event.key_code(), event.state(), Event::time_msec(&event));
     }
 
@@ -1159,12 +1167,15 @@ impl ShoestringWm {
         self.maybe_pointer_focus(pos);
     }
 
-    /// A button transition from a physical pointer.
+    /// A button transition from a physical pointer, passed on only if it
+    /// changes what the seat holds, as keys are.
     fn handle_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
         let button = event.button_code();
         let button_state = event.state();
-        self.physical_held
-            .note_button(button, button_state == ButtonState::Pressed);
+        let pressed = button_state == ButtonState::Pressed;
+        if !self.held.button(InputSource::Physical, button, pressed) {
+            return;
+        }
         self.process_button(button, button_state, event.time_msec());
     }
 

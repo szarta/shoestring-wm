@@ -341,7 +341,9 @@ Each request is a JSON object with a ``type`` discriminator:
        a press of a key or button it already holds, or a release of one it
        doesn't, is ignored, and a transition on a key or button a real device
        on the seat is holding is recorded but not delivered, so injection
-       can't lift a finger that is still down. Optional ``"bindings": true``
+       can't lift a finger that is still down. The rule runs both ways: a key
+       or button injection holds stays down through a real device's press and
+       release of it, and goes up when the last of the two lets go. Optional ``"bindings": true``
        gives the event the policy local input gets: a key takes the same path
        as a physical keystroke (keybindings, window picker, lock screen and
        shortcut inhibitors included), a button the same path as a physical

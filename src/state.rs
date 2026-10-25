@@ -491,11 +491,10 @@ pub struct ShoestringWm {
 
     /// Keys and buttons that raw injection (`inject_input`, a remote viewer)
     /// is holding down, and those a real keyboard or pointer on this seat is
-    /// holding. Injection only passes on a transition no other source owns,
-    /// and closing the automation gate releases whatever injection still
-    /// holds. See [`crate::inject::HeldInput`].
-    pub injected_held: crate::inject::HeldInput,
-    pub physical_held: crate::inject::HeldInput,
+    /// holding. Either source passes on only a transition that changes what
+    /// the seat as a whole holds, and closing the automation gate releases
+    /// whatever injection still holds. See [`crate::inject::SeatHeld`].
+    pub held: crate::inject::SeatHeld,
 
     /// Accumulated mouse-wheel travel (in v120 units, 120 per physical
     /// detent) while scrolling the bare desktop to switch workspaces.
@@ -955,8 +954,7 @@ impl ShoestringWm {
             edge_drag_window: None,
             edge_drag_repeat_token: None,
             key_repeat: None,
-            injected_held: Default::default(),
-            physical_held: Default::default(),
+            held: Default::default(),
             desktop_scroll_accum: 0.0,
             rules_applied: HashSet::new(),
             sticky: HashSet::new(),
