@@ -92,7 +92,7 @@ podman run --rm --userns=keep-id:uid=1000,gid=1000 \
 | `SHOESTRING_WM_RENDER_NODE` | auto | Render node to try; falls back to software if it can't be opened. |
 | `SHOESTRING_WM_HEADLESS_SOFTWARE` | unset | `1` forces the llvmpipe software path even with a GPU present. |
 | `SHOESTRING_REMOTE_SOCKET` | `/run/shoestring/remote/shoestring-remote.sock` | The remote server's Unix socket. |
-| `SHOESTRING_REMOTE_TCP` | unset | `ADDR:PORT` to listen on TCP instead. Unchecked: anyone who can reach it gets the session. |
+| `SHOESTRING_REMOTE_TCP` | unset | `ADDR:PORT` to listen on TCP instead, on loopback unless `SHOESTRING_REMOTE_TCP_ANY_HOST=1`. Unchecked: anyone who can reach it gets the session. |
 | `SHOESTRING_REMOTE_TCP_ANY_HOST` | `0` | `1` allows `SHOESTRING_REMOTE_TCP` on an address other than loopback, such as `0.0.0.0`. Required for TCP in a container; see above. |
 | `SHOESTRING_REMOTE_ENABLE` | `1` | `0` starts gated-off; flip later with `podman exec … shoestring-ctl remote on`. |
 | `SHOESTRING_APP` | unset | Optional app argv to launch into the session. |

@@ -286,14 +286,14 @@ The remote gate reuses the existing capability-gate model end to end:
   long enough to watch the password prompt, then the static frame again.
   The desktop comes back on unlock. See :ref:`ipc-session-lock`.
 - **TCP is opt-in and unchecked.** ``--tcp ADDR:PORT`` (or
-  ``SHOESTRING_REMOTE_TCP``) listens on TCP instead. Nothing checks who connects
-  there: on loopback any local user, and on any other address any host that can
-  reach it, gets the session. The server warns at startup.
-- **TCP beyond loopback takes a second opt-in.** The server refuses an address
-  other than loopback, ``0.0.0.0`` included, unless ``--tcp-any-host`` (or
-  ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``) is also given. A host name is resolved
-  once at startup and checked by the address it resolves to.
-  ``shoestring-ctl remote status`` reports where the server listens in
+  ``SHOESTRING_REMOTE_TCP``) listens on TCP instead, on loopback only unless
+  you opt in a second time. Nothing checks who connects there: on loopback
+  any local user gets the session. Any other address, ``0.0.0.0`` included,
+  is refused unless ``--tcp-any-host`` (or
+  ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``) is also given, and then any host that
+  can reach it gets the session. A host name is resolved once at startup and
+  checked by the address it resolves to. The server warns at startup either
+  way, and ``shoestring-ctl remote status`` reports where it listens in
   ``endpoint``.
 
 Clipboard
