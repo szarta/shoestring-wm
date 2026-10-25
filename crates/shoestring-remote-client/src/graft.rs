@@ -702,9 +702,13 @@ impl Dispatch<WlPointer, ()> for State {
                     _ => (0.0, 0.0),
                 };
                 if h != 0.0 || v != 0.0 {
+                    // A grafted window's input bypasses the served
+                    // machine's bindings, so whether this was a wheel
+                    // doesn't matter there.
                     state.outbox.push(ClientMessage::PointerAxis {
                         horizontal: h,
                         vertical: v,
+                        wheel: None,
                     });
                 }
             }

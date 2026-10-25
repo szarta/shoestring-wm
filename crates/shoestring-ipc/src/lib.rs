@@ -856,8 +856,25 @@ pub enum RawInput {
     /// system as [`Request::MoveMouse`].
     Motion { x: f64, y: f64 },
     /// Scroll. `horizontal` / `vertical` are continuous deltas (surface-local
-    /// units); either may be zero.
-    Axis { horizontal: f64, vertical: f64 },
+    /// units); either may be zero. `wheel` is present when the scroll came
+    /// from a mouse wheel rather than a touchpad or other continuous source.
+    /// With `bindings`, a wheel scroll over the bare desktop switches
+    /// workspaces as a local wheel does.
+    Axis {
+        horizontal: f64,
+        vertical: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wheel: Option<WheelSteps>,
+    },
+}
+
+/// A mouse wheel's travel for one [`RawInput::Axis`], in v120 units: 120 per
+/// notch, smaller steps from a high-resolution wheel, negative up or left. An
+/// axis the device gave no steps for is 0.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WheelSteps {
+    pub horizontal: f64,
+    pub vertical: f64,
 }
 
 /// A media-privacy snapshot: the live mute state of the default audio sink and
@@ -1972,6 +1989,15 @@ mod tests {
             RawInput::Axis {
                 horizontal: 0.0,
                 vertical: 15.0,
+                wheel: None,
+            },
+            RawInput::Axis {
+                horizontal: 0.0,
+                vertical: -15.0,
+                wheel: Some(WheelSteps {
+                    horizontal: 0.0,
+                    vertical: -120.0,
+                }),
             },
         ] {
             let s = serde_json::to_string(&Request::InjectInput {

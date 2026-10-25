@@ -1215,7 +1215,8 @@ fn dispatch_input(
                 shoestring_ipc::RawInput::Axis {
                     horizontal,
                     vertical,
-                } => state.inject_raw_axis(horizontal, vertical),
+                    wheel,
+                } => state.inject_raw_axis(horizontal, vertical, wheel, bindings),
             }
             let _ = write_response(client, &Response::Ok);
             true

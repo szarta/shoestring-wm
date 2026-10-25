@@ -341,7 +341,9 @@ Each request is a JSON object with a ``type`` discriminator:
        evdev keycode *before* XKB's ``+8``), ``button``
        (``button`` is an evdev code, ``BTN_LEFT`` = ``272``), ``motion``
        (``x`` / ``y`` compositor-space), and ``axis`` (``horizontal`` /
-       ``vertical`` scroll deltas). Each carries ``"pressed"`` for the
+       ``vertical`` scroll deltas, plus an optional ``"wheel": {"horizontal":
+       0, "vertical": -120}`` when the scroll came from a mouse wheel, its
+       travel in v120 units, 120 per notch). Each carries ``"pressed"`` for the
        down/up variants. Unlike ``inject_key`` / ``inject_click`` (atomic
        tap / press+release) each is a single event, so a held key, a chord,
        or a drag reproduces exactly. The WM tracks what raw injection holds:
@@ -355,13 +357,14 @@ Each request is a JSON object with a ``type`` discriminator:
        as a physical keystroke (keybindings, window picker, lock screen and
        shortcut inhibitors included), a button the same path as a physical
        click (window picker, Super+drag move and resize, click-to-focus), and
-       motion runs focus-follows-mouse. Remote serve mode sets it, because the
+       motion runs focus-follows-mouse, and a ``wheel`` scroll over the bare
+       desktop switches workspaces, as a local wheel does. Remote serve mode sets it, because the
        viewer is driving this whole desktop, so typing after a remote click
        reaches the window clicked. Without it (the default) keys go to the
        focused client past the binding table, so a scripted ``Super+q`` can't
        quit the WM, and buttons and motion leave keyboard focus alone, so a
-       script can compose a drag. ``axis`` events don't read it. Gated by the
-       automation gate.
+       script can compose a drag, and a wheel scroll is delivered as a
+       scroll. Gated by the automation gate.
    * - ``{"type": "inject_input_to_window", "id": "<ft-id>", "event": {…}}``
      - Like ``inject_input`` but delivered to the **single window** named by
        ``id`` (a foreign-toplevel identifier from ``windows``) rather than the
@@ -1564,6 +1567,10 @@ Unreleased
   are affected.
 - ``register_remote_server`` takes an optional ``endpoint``, where the
   server listens while the gate is on, and the ``remote`` reply reports it.
+- ``inject_input``'s ``axis`` event takes an optional ``wheel`` with the
+  wheel's steps, and with ``bindings`` a wheel over the bare desktop switches
+  workspaces. The remote client sends the steps, so a serve-mode viewer's
+  wheel works there as a local one does.
 - ``set_remote`` takes optional ``for_secs`` and ``idle_secs`` to lease the
   remote gate, and the ``remote`` reply reports the lease in ``lease``.
 - ``shoestring-remote-server`` refuses ``--tcp`` on an address other than

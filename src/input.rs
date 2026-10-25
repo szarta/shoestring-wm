@@ -1290,34 +1290,24 @@ impl ShoestringWm {
         // Machine-axis capture: forward the scroll deltas to the active
         // remote and swallow locally (no desktop-scroll workspace switch).
         if let Some(target) = self.captured_client() {
+            // Say when it is a wheel, so the remote's desktop scroll works.
+            let wheel = (source == AxisSource::Wheel).then(|| shoestring_ipc::WheelSteps {
+                horizontal: horizontal_discrete.unwrap_or(0.0),
+                vertical: vertical_discrete.unwrap_or(0.0),
+            });
             self.forward_captured(
                 target,
                 shoestring_ipc::RawInput::Axis {
                     horizontal: horizontal_amount,
                     vertical: vertical_amount,
+                    wheel,
                 },
             );
             return;
         }
 
-        // Desktop scroll: a mouse wheel over the bare desktop — no
-        // window or layer-shell surface under the pointer — switches
-        // workspaces (wheel up to the next, down to the previous),
-        // the way Openbox scrolls the root window. Restricted to real
-        // wheels so touchpad scrolling isn't hijacked, and skipped
-        // mid-grab, mid-pick, or while locked. The event is then
-        // consumed (there is no client under the pointer to deliver
-        // it to anyway).
-        if source == AxisSource::Wheel
-            && vertical_amount != 0.0
-            && self.pending_picker.is_none()
-            && !self.is_locked()
-        {
-            let pointer = self.seat.get_pointer().unwrap();
-            if !pointer.is_grabbed() && self.surface_under(pointer.current_location()).is_none() {
-                self.desktop_scroll_switch(vertical_amount, vertical_discrete);
-                return;
-            }
+        if source == AxisSource::Wheel && self.desktop_scroll(vertical_amount, vertical_discrete) {
+            return;
         }
 
         let mut frame = AxisFrame::new(event.time_msec()).source(source);
@@ -1345,6 +1335,30 @@ impl ShoestringWm {
         let pointer = self.seat.get_pointer().unwrap();
         pointer.axis(self, frame);
         pointer.frame(self);
+    }
+
+    /// Desktop scroll: a mouse wheel over the bare desktop — no window or
+    /// layer-shell surface under the pointer — switches workspaces (wheel up
+    /// to the next, down to the previous), the way Openbox scrolls the root
+    /// window. Only for real wheels, so touchpad scrolling isn't hijacked: the
+    /// caller checks that. Skipped mid-grab, mid-pick, or while locked.
+    /// Returns whether the scroll was used, in which case it is consumed
+    /// (there is no client under the pointer to deliver it to anyway). A
+    /// serve-mode viewer's wheel comes here too, through injection.
+    pub(crate) fn desktop_scroll(
+        &mut self,
+        vertical_amount: f64,
+        vertical_discrete: Option<f64>,
+    ) -> bool {
+        if vertical_amount == 0.0 || self.pending_picker.is_some() || self.is_locked() {
+            return false;
+        }
+        let pointer = self.seat.get_pointer().unwrap();
+        if pointer.is_grabbed() || self.surface_under(pointer.current_location()).is_some() {
+            return false;
+        }
+        self.desktop_scroll_switch(vertical_amount, vertical_discrete);
+        true
     }
 
     /// Step the active workspace by accumulated desktop-scroll wheel travel.

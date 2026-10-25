@@ -667,9 +667,11 @@ fn handle_wm_event(state: &mut State, net: &mut Net, my_index: u8, ev: IpcEvent)
                 RawInput::Axis {
                     horizontal,
                     vertical,
+                    wheel,
                 } => ClientMessage::PointerAxis {
                     horizontal,
                     vertical,
+                    wheel: wheel.map(|w| (w.horizontal, w.vertical)),
                 },
             };
             if let Err(e) = net.send(&msg) {
@@ -841,9 +843,11 @@ mod tests {
             RawInput::Axis {
                 horizontal,
                 vertical,
+                wheel,
             } => ClientMessage::PointerAxis {
                 horizontal,
                 vertical,
+                wheel: wheel.map(|w| (w.horizontal, w.vertical)),
             },
         }
     }
@@ -877,11 +881,28 @@ mod tests {
         assert_eq!(
             relay(RawInput::Axis {
                 horizontal: 1.0,
-                vertical: -2.0
+                vertical: -2.0,
+                wheel: None,
             }),
             ClientMessage::PointerAxis {
                 horizontal: 1.0,
-                vertical: -2.0
+                vertical: -2.0,
+                wheel: None,
+            }
+        );
+        assert_eq!(
+            relay(RawInput::Axis {
+                horizontal: 0.0,
+                vertical: -15.0,
+                wheel: Some(shoestring_ipc::WheelSteps {
+                    horizontal: 0.0,
+                    vertical: -120.0,
+                }),
+            }),
+            ClientMessage::PointerAxis {
+                horizontal: 0.0,
+                vertical: -15.0,
+                wheel: Some((0.0, -120.0)),
             }
         );
     }

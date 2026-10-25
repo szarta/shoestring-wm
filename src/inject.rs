@@ -636,15 +636,40 @@ impl ShoestringWm {
 
     /// Inject a scroll event. `horizontal` / `vertical` are continuous deltas
     /// in surface-local units (the same convention the remote wire uses); a
-    /// zero axis is omitted from the frame.
-    pub fn inject_raw_axis(&mut self, horizontal: f64, vertical: f64) {
-        let mut frame = AxisFrame::new(monotonic_msec())
-            .source(smithay::backend::input::AxisSource::Continuous);
+    /// zero axis is omitted from the frame. With `wheel` it is delivered as a
+    /// wheel scroll with those steps, and with `bindings` as well a wheel over
+    /// the bare desktop switches workspaces, as a local wheel does. Without
+    /// `wheel` it is a continuous scroll, like a touchpad's.
+    pub fn inject_raw_axis(
+        &mut self,
+        horizontal: f64,
+        vertical: f64,
+        wheel: Option<shoestring_ipc::WheelSteps>,
+        bindings: bool,
+    ) {
+        use smithay::backend::input::AxisSource;
+        let steps = |v120: f64| (v120 != 0.0).then_some(v120);
+        if let Some(w) = wheel {
+            if bindings && self.desktop_scroll(vertical, steps(w.vertical)) {
+                return;
+            }
+        }
+        let source = match wheel {
+            Some(_) => AxisSource::Wheel,
+            None => AxisSource::Continuous,
+        };
+        let mut frame = AxisFrame::new(monotonic_msec()).source(source);
         if horizontal != 0.0 {
             frame = frame.value(Axis::Horizontal, horizontal);
+            if let Some(v120) = wheel.and_then(|w| steps(w.horizontal)) {
+                frame = frame.v120(Axis::Horizontal, v120 as i32);
+            }
         }
         if vertical != 0.0 {
             frame = frame.value(Axis::Vertical, vertical);
+            if let Some(v120) = wheel.and_then(|w| steps(w.vertical)) {
+                frame = frame.v120(Axis::Vertical, v120 as i32);
+            }
         }
         let pointer = self.seat.get_pointer().expect("seat must have pointer");
         pointer.axis(self, frame);
@@ -694,7 +719,8 @@ impl ShoestringWm {
             shoestring_ipc::RawInput::Axis {
                 horizontal,
                 vertical,
-            } => self.inject_raw_axis(horizontal, vertical),
+                wheel,
+            } => self.inject_raw_axis(horizontal, vertical, wheel, false),
         }
         Ok(())
     }

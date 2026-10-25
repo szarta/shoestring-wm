@@ -935,6 +935,76 @@ fn e2e_remote_serve_keys_reach_bindings() {
     viewer.bye();
 }
 
+/// A serve-mode viewer's mouse wheel over the bare desktop switches
+/// workspaces, as a local wheel does. A scroll without wheel steps (a
+/// touchpad's), a wheel over a window, and automation's wheel without
+/// `bindings` don't.
+#[test]
+#[ignore]
+fn e2e_remote_serve_wheel_switches_workspaces() {
+    let mut wm = Wm::start();
+    let _client = TestClient::map(&wm);
+    let (_, centre) = wm.mapped_window();
+    wm.start_remote_server();
+    assert_eq!(active_workspace(&wm), 1);
+
+    let wheel_up = ClientMessage::PointerAxis {
+        horizontal: 0.0,
+        vertical: -15.0,
+        wheel: Some((0.0, -120.0)),
+    };
+    let wheel_down = ClientMessage::PointerAxis {
+        horizontal: 0.0,
+        vertical: 15.0,
+        wheel: Some((0.0, 120.0)),
+    };
+    let desktop = ClientMessage::PointerMotion { x: 5.0, y: 5.0 };
+
+    // Automation's raw wheel stays a plain scroll. The reply comes after it
+    // is handled.
+    wm.ipc_ok(json!({"type": "move_mouse", "x": 5, "y": 5}));
+    wm.ipc_ok(json!({"type": "inject_input", "event": {"kind": "axis",
+        "horizontal": 0.0, "vertical": -15.0,
+        "wheel": {"horizontal": 0.0, "vertical": -120.0}}}));
+    assert_eq!(active_workspace(&wm), 1, "automation's wheel switched");
+
+    let mut viewer = Viewer::serve(&wm);
+    wm.wait_viewers(1);
+    viewer.send(desktop.clone());
+    viewer.send(wheel_up.clone());
+    wait_for("the viewer's wheel to switch workspace", || {
+        (active_workspace(&wm) == 2).then_some(())
+    });
+
+    // The server forwards in order. Had the touchpad scroll (up) switched,
+    // the wheel down after it would land on 2, not 1.
+    viewer.send(ClientMessage::PointerAxis {
+        horizontal: 0.0,
+        vertical: -15.0,
+        wheel: None,
+    });
+    viewer.send(wheel_down);
+    wait_for("the wheel down to come back", || {
+        (active_workspace(&wm) == 1).then_some(())
+    });
+
+    // Over a window the wheel goes to the window. Had it switched, the
+    // desktop wheel after it would land on 3, not 2.
+    viewer.send(ClientMessage::PointerMotion {
+        x: centre.0 as f64,
+        y: centre.1 as f64,
+    });
+    viewer.send(wheel_up.clone());
+    viewer.send(desktop);
+    viewer.send(wheel_up);
+    wait_for("the desktop wheel after the window's", || {
+        (active_workspace(&wm) == 2).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(active_workspace(&wm), 2);
+    viewer.bye();
+}
+
 /// A graft viewer's keys go to the grafted window and never run the served
 /// WM's bindings: that window is one among the viewer's local windows, and
 /// the viewer's own WM owns the keys.

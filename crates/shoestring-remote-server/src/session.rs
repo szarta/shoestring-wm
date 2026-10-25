@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use shoestring_ipc::RawInput;
+use shoestring_ipc::{RawInput, WheelSteps};
 use shoestring_remote::transport::Stream;
 use shoestring_remote::{
     incompatibility, read_framed, write_framed, ClientMessage, Error, PeerInfo, ServerMessage,
@@ -403,9 +403,14 @@ fn to_raw_input(msg: &ClientMessage) -> Option<RawInput> {
         ClientMessage::PointerAxis {
             horizontal,
             vertical,
+            wheel,
         } => Some(RawInput::Axis {
             horizontal,
             vertical,
+            wheel: wheel.map(|(horizontal, vertical)| WheelSteps {
+                horizontal,
+                vertical,
+            }),
         }),
         ClientMessage::Hello { .. }
         | ClientMessage::Graft { .. }
@@ -494,11 +499,28 @@ mod tests {
         assert_eq!(
             to_raw_input(&ClientMessage::PointerAxis {
                 horizontal: 1.0,
-                vertical: -2.0
+                vertical: -2.0,
+                wheel: None,
             }),
             Some(RawInput::Axis {
                 horizontal: 1.0,
-                vertical: -2.0
+                vertical: -2.0,
+                wheel: None,
+            })
+        );
+        assert_eq!(
+            to_raw_input(&ClientMessage::PointerAxis {
+                horizontal: 0.0,
+                vertical: 15.0,
+                wheel: Some((0.0, 120.0)),
+            }),
+            Some(RawInput::Axis {
+                horizontal: 0.0,
+                vertical: 15.0,
+                wheel: Some(WheelSteps {
+                    horizontal: 0.0,
+                    vertical: 120.0
+                }),
             })
         );
     }

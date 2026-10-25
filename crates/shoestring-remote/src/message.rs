@@ -223,8 +223,15 @@ pub enum ClientMessage {
     /// (`BTN_LEFT` = 0x110, `BTN_RIGHT` = 0x111, …).
     PointerButton { button: u32, pressed: bool },
     /// Scroll deltas (continuous, in surface-local units). Either axis may be
-    /// zero.
-    PointerAxis { horizontal: f64, vertical: f64 },
+    /// zero. `wheel` is the `(horizontal, vertical)` travel in v120 units (120
+    /// per notch) when the scroll came from a mouse wheel, so the served
+    /// machine can treat it as one. It travels after the deltas, so a peer
+    /// from before it ignores it, and one that sends none is read as `None`.
+    PointerAxis {
+        horizontal: f64,
+        vertical: f64,
+        wheel: Option<(f64, f64)>,
+    },
     /// Pull request: asks the server for the served machine's current selection
     /// (`primary` = primary vs clipboard). The server replies with one
     /// [`ServerMessage::Clipboard`]. The viewer fires this for `Super+Shift+V`.
@@ -274,10 +281,15 @@ impl Message for ClientMessage {
             ClientMessage::PointerAxis {
                 horizontal,
                 vertical,
+                wheel,
             } => {
                 put_u8(out, 4);
                 put_f64(out, *horizontal);
                 put_f64(out, *vertical);
+                if let Some((h, v)) = wheel {
+                    put_f64(out, *h);
+                    put_f64(out, *v);
+                }
             }
             ClientMessage::GetClipboard { primary } => {
                 put_u8(out, 6);
@@ -326,6 +338,11 @@ impl Message for ClientMessage {
             4 => ClientMessage::PointerAxis {
                 horizontal: r.f64()?,
                 vertical: r.f64()?,
+                wheel: if r.is_at_end() {
+                    None
+                } else {
+                    Some((r.f64()?, r.f64()?))
+                },
             },
             5 => ClientMessage::Bye,
             6 => ClientMessage::GetClipboard { primary: r.bool()? },
@@ -540,6 +557,12 @@ mod tests {
         roundtrip(ClientMessage::PointerAxis {
             horizontal: 0.0,
             vertical: 15.0,
+            wheel: None,
+        });
+        roundtrip(ClientMessage::PointerAxis {
+            horizontal: 0.0,
+            vertical: -15.0,
+            wheel: Some((0.0, -120.0)),
         });
         roundtrip(ClientMessage::GetClipboard { primary: true });
         roundtrip(ClientMessage::SetClipboard {
@@ -619,6 +642,27 @@ mod tests {
             title: String::new(),
         });
         roundtrip(ServerMessage::Bye);
+    }
+
+    /// The wheel steps follow the deltas, so a peer from before them reads the
+    /// same deltas and ignores the rest, and its own message reads as no wheel.
+    #[test]
+    fn wheel_steps_are_a_trailing_field() {
+        let plain = ClientMessage::PointerAxis {
+            horizontal: 1.0,
+            vertical: -15.0,
+            wheel: None,
+        };
+        let wheel = ClientMessage::PointerAxis {
+            horizontal: 1.0,
+            vertical: -15.0,
+            wheel: Some((0.0, -120.0)),
+        };
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        plain.encode(&mut old);
+        wheel.encode(&mut new);
+        assert_eq!(&new[..old.len()], &old[..], "the old form is a prefix");
+        assert_eq!(ClientMessage::decode(&old).unwrap(), plain);
     }
 
     #[test]

@@ -212,6 +212,12 @@ pointer path: it focuses and raises the window clicked, Super+drag moves or
 resizes there, and an armed window picker takes the click. In graft mode the
 click goes to the grafted window as it is.
 
+So does the mouse wheel. In serve mode a wheel over the remote's bare desktop
+switches its workspaces, as it would locally. A touchpad scroll doesn't,
+there or locally, so the viewer tells the server which one it was. A viewer
+from before that told it nothing, so with an older viewer every scroll
+reaches the remote as a plain scroll.
+
 Over IPC this is ``inject_input``'s ``bindings`` flag, which the server sets
 for serve sessions; graft uses ``inject_input_to_window``, which never applies
 bindings, and automation's raw keys and buttons skip them too (see :doc:`ipc`).
