@@ -653,7 +653,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             | Request::CaptureWindow { .. }
             | Request::GetPixel { .. }
             | Request::HashRegion { .. }) => return dispatch_capture(state, id, client, r),
-            r @ (Request::RegisterRemoteServer
+            r @ (Request::RegisterRemoteServer { .. }
             | Request::SetRemote { .. }
             | Request::RemoteStatus
             | Request::ReportRemoteViewers { .. }
@@ -1440,6 +1440,17 @@ fn dispatch_capture(
     }
 }
 
+/// The remote-gate state, as `register_remote_server`, `set_remote` and
+/// `remote_status` reply.
+fn remote_response(state: &ShoestringWm) -> Response {
+    Response::Remote {
+        enabled: state.remote_enabled,
+        server_available: state.remote_server.is_some(),
+        viewers: state.remote_viewers,
+        endpoint: state.remote_endpoint.clone(),
+    }
+}
+
 /// Remote desktop: server and viewer registration, the remote gate, the machine axis, and the clipboard bridge.
 /// Returns whether to close the connection, as [`handle_readable`] does.
 fn dispatch_remote(
@@ -1449,22 +1460,20 @@ fn dispatch_remote(
     request: Request,
 ) -> bool {
     match request {
-        Request::RegisterRemoteServer => {
+        Request::RegisterRemoteServer { endpoint } => {
             // Mark this connection as *the* remote server (replacing any
             // prior one) and subscribe it to events so it learns when the
             // gate flips. Long-lived: its disconnect clears the
             // registration and forces the gate off (see drop_ipc_client).
             state.remote_server = Some(id);
-            client.borrow_mut().subscriber = true;
-            let _ = write_response(
-                client,
-                &Response::Remote {
-                    enabled: state.remote_enabled,
-                    server_available: true,
-                    viewers: state.remote_viewers,
-                },
+            tracing::info!(
+                ?id,
+                endpoint = endpoint.as_deref().unwrap_or("?"),
+                "remote server registered"
             );
-            tracing::info!(?id, "remote server registered");
+            state.remote_endpoint = endpoint;
+            client.borrow_mut().subscriber = true;
+            let _ = write_response(client, &remote_response(state));
             // Tell the bar a server is now available (toggle un-greys).
             state.emit_remote_changed();
             false
@@ -1484,14 +1493,7 @@ fn dispatch_remote(
             let changed = state.remote_enabled != enabled;
             // Couples the automation + capture gates on/off.
             let (auto_changed, capture_changed) = state.set_remote(enabled);
-            let _ = write_response(
-                client,
-                &Response::Remote {
-                    enabled: state.remote_enabled,
-                    server_available: state.remote_server.is_some(),
-                    viewers: state.remote_viewers,
-                },
-            );
+            let _ = write_response(client, &remote_response(state));
             if auto_changed {
                 state.emit_ipc(Event::AutomationChanged {
                     enabled: state.automation_enabled,
@@ -1509,14 +1511,7 @@ fn dispatch_remote(
             true
         }
         Request::RemoteStatus => {
-            let _ = write_response(
-                client,
-                &Response::Remote {
-                    enabled: state.remote_enabled,
-                    server_available: state.remote_server.is_some(),
-                    viewers: state.remote_viewers,
-                },
-            );
+            let _ = write_response(client, &remote_response(state));
             true
         }
         Request::ReportRemoteViewers { viewers } => {
@@ -2913,6 +2908,7 @@ impl ShoestringWm {
         // RemoteChanged push doesn't try to write to the just-removed socket.
         let remote_teardown = (self.remote_server == Some(id)).then(|| {
             self.remote_server = None;
+            self.remote_endpoint = None;
             let changes = if self.remote_enabled {
                 self.set_remote(false)
             } else {

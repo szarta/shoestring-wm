@@ -14,6 +14,8 @@ use std::os::unix::net::UnixStream;
 use anyhow::{anyhow, bail, Context, Result};
 use shoestring_ipc::{client_socket_path, RawInput, Request, Response};
 
+use crate::listen::Endpoint;
+
 /// Open a fresh connection to the WM IPC socket.
 pub fn connect() -> Result<UnixStream> {
     let path = client_socket_path().context(
@@ -161,10 +163,16 @@ pub fn open_window_capture_stream(id: &str) -> Result<UnixStream> {
 /// Register this process as *the* remote server and return the connection (now
 /// a long-lived event subscriber) plus the gate's initial enabled state. The
 /// connection must be kept alive for the whole process: its drop tells the WM
-/// the server went away and forces the remote gate off.
-pub fn register() -> Result<(BufReader<UnixStream>, bool)> {
+/// the server went away and forces the remote gate off. `endpoint` is where
+/// viewers connect while the gate is on, which `remote_status` reports.
+pub fn register(endpoint: &Endpoint) -> Result<(BufReader<UnixStream>, bool)> {
     let mut stream = connect()?;
-    write_request(&mut stream, &Request::RegisterRemoteServer)?;
+    write_request(
+        &mut stream,
+        &Request::RegisterRemoteServer {
+            endpoint: Some(endpoint.to_string()),
+        },
+    )?;
     let mut reader = BufReader::new(stream);
     let line = read_line(&mut reader)?.context("WM closed before register reply")?;
     let resp: Response = serde_json::from_str(&line).context("parse register reply")?;

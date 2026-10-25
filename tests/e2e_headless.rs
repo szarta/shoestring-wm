@@ -232,10 +232,15 @@ fn e2e_remote_reconnect_and_gate_revocation() {
         UnixStream::connect(wm.remote_socket()).is_err(),
         "listener survived the gate"
     );
+    // The server reports the count over its own connection, so it can land
+    // just after the sessions end.
+    wm.wait_viewers(0);
     let status = wm.remote_status();
+    assert_eq!(status["enabled"], json!(false));
+    // The server said where it listens when it registered.
     assert_eq!(
-        (status["enabled"].clone(), status["viewers"].clone()),
-        (json!(false), json!(0))
+        status["endpoint"],
+        json!(wm.remote_socket().display().to_string())
     );
     assert_eq!(
         wm.ipc(json!({"type": "automation_status"}))["enabled"],

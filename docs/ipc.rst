@@ -633,7 +633,7 @@ Each request is a JSON object with a ``type`` discriminator:
        ``app_id``/``title``, then ``Frame``/``Resize``, and a ``Bye`` when the
        window closes). While the session is locked a new subscription is
        refused and an open one is paused; see :ref:`ipc-session-lock`.
-   * - ``{"type": "register_remote_server"}``
+   * - ``{"type": "register_remote_server", "endpoint": "/run/user/1000/shoestring-remote-wayland-1.sock"}``
      - Register this connection as **the** remote-desktop server
        (``shoestring-remote-server``), the served-box handshake. Sent once at
        the server's startup so the WM knows a server is available — which is
@@ -642,7 +642,9 @@ Each request is a JSON object with a ``type`` discriminator:
        disconnects the WM clears it and forces the gate off. One server
        registers at a time; a second registration replaces the first. Reply is
        ``remote``, then ``remote_changed`` is pushed to this connection so the
-       server learns of later gate flips.
+       server learns of later gate flips. ``endpoint`` (optional) is where the
+       server listens while the gate is on, a socket path or ``tcp ADDR:PORT``;
+       ``remote_status`` reports it.
    * - ``{"type": "set_remote", "enabled": true}``
      - Toggle the runtime **remote gate** — the consent switch for serve mode.
        Enabling *couples* the capture gate (so the served output can be
@@ -655,7 +657,8 @@ Each request is a JSON object with a ``type`` discriminator:
        :doc:`remote`.
    * - ``{"type": "remote_status"}``
      - Read the remote-gate state without changing it. Reply is ``remote``
-       (``enabled`` / ``server_available`` / ``viewers``). Read-only, not gated.
+       (``enabled`` / ``server_available`` / ``viewers`` / ``endpoint``).
+       Read-only, not gated.
    * - ``{"type": "server_info"}``
      - Describe the running WM: version, active backend, lock state, every
        gate, and the request types it understands. Reply is ``server_info``.
@@ -930,12 +933,14 @@ The server replies with a single JSON object tagged by ``type``:
 
 ``remote``
     ``{"type": "remote", "enabled": <bool>, "server_available": <bool>,
-    "viewers": <int>}``. The remote-gate snapshot, returned for
-    ``register_remote_server``, ``set_remote``, ``remote_status``, and
-    ``report_remote_viewers``. ``enabled`` is the gate; ``server_available`` is
-    whether a ``shoestring-remote-server`` has registered (the bar greys the
+    "viewers": <int>, "endpoint": <string>}``. The remote-gate snapshot,
+    returned for ``register_remote_server``, ``set_remote``, ``remote_status``,
+    and ``report_remote_viewers``. ``enabled`` is the gate; ``server_available``
+    is whether a ``shoestring-remote-server`` has registered (the bar greys the
     toggle until then); ``viewers`` is the connected-client count (the "being
-    viewed" chip lights when > 0).
+    viewed" chip lights when > 0); ``endpoint`` is where the server listens
+    while the gate is on, a socket path or ``tcp ADDR:PORT``, as it said when
+    it registered. ``endpoint`` is absent with no server registered.
 
 ``remote_clients``
     ``{"type": "remote_clients", "machines": [{"index": 1, "label":
@@ -1543,6 +1548,11 @@ Unreleased
   for one message arrives as several ``Frame`` messages, each with its own
   ``seq``. It used to end the stream. Only frames near the 8192×8192 limit
   are affected.
+- ``register_remote_server`` takes an optional ``endpoint``, where the
+  server listens while the gate is on, and the ``remote`` reply reports it.
+- ``shoestring-remote-server`` refuses ``--tcp`` on an address other than
+  loopback unless ``--tcp-any-host`` (or ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``)
+  is also given.
 - ``wait_window`` resolves a map wait once the window has its first frame
   and its initial placement. It used to resolve as soon as a wayland window
   had a matching title, which a toolkit sets before drawing, and could reply

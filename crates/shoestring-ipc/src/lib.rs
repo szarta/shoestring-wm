@@ -311,7 +311,12 @@ pub enum Request {
     /// pushes [`Event::RemoteChanged`] to this connection so the server learns
     /// when the gate flips (open / close its ssh-tunneled listener). At most one
     /// server registers at a time; a second registration replaces the first.
-    RegisterRemoteServer,
+    /// `endpoint` is where viewers connect while the gate is on (a socket path,
+    /// or `tcp ADDR:PORT`); the WM reports it in [`Response::Remote`].
+    RegisterRemoteServer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
     /// Flip the runtime **remote gate** — the single consent switch for
     /// remote-desktop serve mode. Enabling *couples* the capture gate (so the
     /// served output can be streamed) and the automation gate (so client input
@@ -1044,10 +1049,15 @@ pub enum Response {
     /// gate; `server_available` is whether a `shoestring-remote-server` has
     /// registered (the bar greys the toggle until then); `viewers` is the
     /// number of connected clients (the "being viewed" chip lights when > 0).
+    /// `endpoint` is where the registered server listens while the gate is on
+    /// (a socket path, or `tcp ADDR:PORT`); absent with no server, or one that
+    /// didn't say.
     Remote {
         enabled: bool,
         server_available: bool,
         viewers: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
     },
     /// Returned for [`Request::ServerInfo`].
     ServerInfo {
@@ -2195,8 +2205,21 @@ mod tests {
     #[test]
     fn remote_request_response_event_shapes() {
         assert_eq!(
-            serde_json::to_string(&Request::RegisterRemoteServer).unwrap(),
+            serde_json::to_string(&Request::RegisterRemoteServer { endpoint: None }).unwrap(),
             r#"{"type":"register_remote_server"}"#
+        );
+        // A server from before the endpoint field still registers.
+        let old: Request = serde_json::from_str(r#"{"type":"register_remote_server"}"#).unwrap();
+        assert!(matches!(
+            old,
+            Request::RegisterRemoteServer { endpoint: None }
+        ));
+        assert_eq!(
+            serde_json::to_string(&Request::RegisterRemoteServer {
+                endpoint: Some("tcp 127.0.0.1:7355".into())
+            })
+            .unwrap(),
+            r#"{"type":"register_remote_server","endpoint":"tcp 127.0.0.1:7355"}"#
         );
         assert_eq!(
             serde_json::to_string(&Request::SetRemote { enabled: true }).unwrap(),
@@ -2214,10 +2237,21 @@ mod tests {
             enabled: true,
             server_available: true,
             viewers: 1,
+            endpoint: None,
         };
         assert_eq!(
             serde_json::to_string(&resp).unwrap(),
             r#"{"type":"remote","enabled":true,"server_available":true,"viewers":1}"#
+        );
+        let resp = Response::Remote {
+            enabled: true,
+            server_available: true,
+            viewers: 0,
+            endpoint: Some("/run/user/1000/shoestring-remote-wayland-1.sock".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"type":"remote","enabled":true,"server_available":true,"viewers":0,"endpoint":"/run/user/1000/shoestring-remote-wayland-1.sock"}"#
         );
         let ev = Event::RemoteChanged {
             enabled: false,

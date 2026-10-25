@@ -25,6 +25,20 @@ export XDG_RUNTIME_DIR
 if [ -n "${SHOESTRING_REMOTE_TCP:-}" ]; then
     # The image's socket default would conflict with an explicit TCP choice.
     unset SHOESTRING_REMOTE_SOCKET
+    # The host's -p can only reach a port bound beyond the container's own
+    # loopback, and the server refuses such an address without a second
+    # opt-in. Stop here with the fix rather than leave the WM running with no
+    # remote server.
+    case "$SHOESTRING_REMOTE_TCP" in
+        127.*:* | localhost:* | "[::1]":*) ;;
+        *)
+            if [ "${SHOESTRING_REMOTE_TCP_ANY_HOST:-0}" != 1 ]; then
+                log "ERROR: SHOESTRING_REMOTE_TCP=$SHOESTRING_REMOTE_TCP is not a loopback address, so the remote server refuses it without SHOESTRING_REMOTE_TCP_ANY_HOST=1."
+                log "Set it only when the host publishes the port to loopback (-p 127.0.0.1:PORT:PORT) or every host that can reach the port is trusted. See docs/containers.rst."
+                exit 1
+            fi
+            ;;
+    esac
     log "WARN: remote server on TCP $SHOESTRING_REMOTE_TCP: nothing checks who connects"
 elif [ -n "${SHOESTRING_REMOTE_SOCKET:-}" ]; then
     REMOTE_DIR=$(dirname "$SHOESTRING_REMOTE_SOCKET")

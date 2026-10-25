@@ -203,6 +203,7 @@ pub fn query_remote() -> Result<(bool, bool, u32)> {
             enabled,
             server_available,
             viewers,
+            ..
         } => Ok((enabled, server_available, viewers)),
         Response::Error { message } => anyhow::bail!("server error: {message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),

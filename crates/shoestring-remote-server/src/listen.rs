@@ -12,10 +12,13 @@
 //!
 //! TCP is still available for setups that need it (`--tcp ADDR:PORT`), but
 //! nothing checks who connects to it: anyone who can reach the port gets the
-//! session, so the server warns at startup.
+//! session, so the server warns at startup. A loopback address exposes the
+//! session to local users only; any other address exposes it to every host
+//! that can reach the port, so it takes a second opt-in (`--tcp-any-host`)
+//! on top of `--tcp` ([`tcp_endpoint`]).
 
 use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -28,7 +31,9 @@ use shoestring_remote::transport::Stream;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
     Unix(PathBuf),
-    Tcp(String),
+    /// Resolved once at startup, so the policy check, the bind and what the
+    /// WM reports all name the same address.
+    Tcp(SocketAddr),
 }
 
 impl Endpoint {
@@ -87,6 +92,18 @@ impl Listener {
         }
         .context("set listener non-blocking")?;
         Ok(listener)
+    }
+
+    /// Where this listener is, for logs: the socket path, or the TCP address
+    /// it actually bound (the port a `:0` request was given).
+    pub fn describe(&self) -> String {
+        match self {
+            Listener::Unix { path, .. } => path.display().to_string(),
+            Listener::Tcp(listener) => match listener.local_addr() {
+                Ok(addr) => format!("tcp {addr}"),
+                Err(_) => "tcp (address unknown)".into(),
+            },
+        }
     }
 
     /// Accept one connection. `Ok(None)` when none is pending, and also when a
@@ -222,16 +239,46 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(uid)
 }
 
-/// The startup warning for a TCP listener, or `None` if the address doesn't
-/// parse (bind will report that).
-pub fn tcp_warning(addr: &str) -> Option<&'static str> {
-    let parsed: SocketAddr = addr.parse().ok()?;
-    Some(if parsed.ip().is_loopback() {
+/// Resolve a `--tcp` address and apply the listening policy. `addr` is
+/// `ADDR:PORT` or `HOST:PORT`; a host name is resolved now and the first
+/// address is used from then on. A loopback address is accepted. Any other
+/// address, `0.0.0.0` included, is refused unless `any_host` is set, because
+/// every host that can reach it gets the session with no authentication.
+pub fn tcp_endpoint(addr: &str, any_host: bool) -> Result<Endpoint> {
+    let resolved = addr
+        .to_socket_addrs()
+        .with_context(|| format!("resolve tcp address {addr} (expected ADDR:PORT)"))?
+        .next()
+        .with_context(|| format!("tcp address {addr} resolves to nothing"))?;
+    if !is_loopback(resolved.ip()) && !any_host {
+        let named = if resolved.to_string() == addr {
+            addr.to_owned()
+        } else {
+            format!("{addr} ({resolved})")
+        };
+        bail!(
+            "refusing to listen on {named}: it is not a loopback address, so any host that \
+             can reach the port could see and control this session, with nothing checking \
+             who connects. Prefer the Unix socket reached over ssh -L. To listen there \
+             anyway, also pass --tcp-any-host (or SHOESTRING_REMOTE_TCP_ANY_HOST=1)"
+        );
+    }
+    Ok(Endpoint::Tcp(resolved))
+}
+
+/// Loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`).
+fn is_loopback(ip: IpAddr) -> bool {
+    ip.to_canonical().is_loopback()
+}
+
+/// The startup warning for a TCP listener.
+pub fn tcp_warning(addr: SocketAddr) -> &'static str {
+    if is_loopback(addr.ip()) {
         "TCP listener: any local user can connect and see and control this session"
     } else {
         "TCP listener on a non-loopback address: any host that can reach it can see and \
          control this session"
-    })
+    }
 }
 
 #[cfg(test)]
@@ -308,11 +355,47 @@ mod tests {
     }
 
     #[test]
+    fn loopback_tcp_needs_no_second_opt_in() {
+        for addr in ["127.0.0.1:7355", "[::1]:7355", "[::ffff:127.0.0.1]:7355"] {
+            let endpoint = tcp_endpoint(addr, false).unwrap();
+            assert_eq!(endpoint, Endpoint::Tcp(addr.parse().unwrap()));
+        }
+    }
+
+    #[test]
+    fn non_loopback_tcp_is_refused_without_the_second_opt_in() {
+        for addr in ["0.0.0.0:7355", "[::]:7355", "192.0.2.7:7355"] {
+            let err = tcp_endpoint(addr, false).unwrap_err().to_string();
+            assert!(err.contains("not a loopback address"), "{err}");
+            assert!(err.contains("--tcp-any-host"), "{err}");
+            assert_eq!(
+                tcp_endpoint(addr, true).unwrap(),
+                Endpoint::Tcp(addr.parse().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_name_is_resolved_before_the_check() {
+        let Endpoint::Tcp(addr) = tcp_endpoint("localhost:7355", false).unwrap() else {
+            panic!("not tcp");
+        };
+        assert!(addr.ip().is_loopback(), "{addr}");
+        assert_eq!(addr.port(), 7355);
+        assert!(tcp_endpoint("not-an-address", true).is_err());
+    }
+
+    #[test]
+    fn tcp_listener_reports_the_port_it_bound() {
+        let listener = Listener::bind(&tcp_endpoint("127.0.0.1:0", false).unwrap()).unwrap();
+        let described = listener.describe();
+        assert!(described.starts_with("tcp 127.0.0.1:"), "{described}");
+        assert!(!described.ends_with(":0"), "{described}");
+    }
+
+    #[test]
     fn tcp_warnings_name_the_exposure() {
-        assert!(tcp_warning("127.0.0.1:7355")
-            .unwrap()
-            .contains("local user"));
-        assert!(tcp_warning("0.0.0.0:7355").unwrap().contains("any host"));
-        assert!(tcp_warning("not-an-address").is_none());
+        assert!(tcp_warning("127.0.0.1:7355".parse().unwrap()).contains("local user"));
+        assert!(tcp_warning("0.0.0.0:7355".parse().unwrap()).contains("any host"));
     }
 }

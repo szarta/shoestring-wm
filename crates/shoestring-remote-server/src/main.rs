@@ -18,7 +18,8 @@
 //! Transport is a single ssh-forwarded stream. The socket is mode 0600 and a
 //! connection is accepted only from our own uid, so ssh login is the
 //! authentication (see [`listen`]). An explicit `--tcp` listener has no such
-//! check and warns at startup.
+//! check and warns at startup; one on a non-loopback address also needs
+//! `--tcp-any-host`.
 
 mod holds;
 mod listen;
@@ -93,16 +94,14 @@ fn main() -> Result<()> {
         endpoint = %cfg.endpoint,
         "shoestring-remote-server starting"
     );
-    if let Endpoint::Tcp(addr) = &cfg.endpoint {
-        match listen::tcp_warning(addr) {
-            Some(warning) => tracing::warn!(%addr, "{warning}"),
-            None => tracing::warn!(%addr, "TCP listener: connections are not checked"),
-        }
+    if let Endpoint::Tcp(addr) = cfg.endpoint {
+        tracing::warn!(%addr, "{}", listen::tcp_warning(addr));
     }
 
     // Register with the WM. The connection is kept alive for the whole process
     // (its drop forces the gate off); we read RemoteChanged events off it.
-    let (event_reader, initial_enabled) = wm::register().context("registering with WM")?;
+    let (event_reader, initial_enabled) =
+        wm::register(&cfg.endpoint).context("registering with WM")?;
     tracing::info!(initial_enabled, "registered with WM");
 
     let gate = Arc::new(Gate::new(initial_enabled)?);
@@ -268,7 +267,7 @@ fn run_supervisor(
                 continue;
             }
         };
-        tracing::info!(endpoint = %cfg.endpoint, "listening (remote gate on)");
+        tracing::info!(endpoint = %listener.describe(), "listening (remote gate on)");
 
         // Accept while the gate stays on, sleeping until a connection arrives
         // or the gate changes; an idle server wakes for nothing.
@@ -382,6 +381,11 @@ fn parse_args() -> Result<Option<Cfg>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let mut socket = env("SHOESTRING_REMOTE_SOCKET").map(std::path::PathBuf::from);
     let mut tcp = env("SHOESTRING_REMOTE_TCP");
+    let mut tcp_any_host = match env("SHOESTRING_REMOTE_TCP_ANY_HOST").as_deref() {
+        None | Some("0") => false,
+        Some("1") => true,
+        Some(other) => anyhow::bail!("SHOESTRING_REMOTE_TCP_ANY_HOST must be 0 or 1, not {other}"),
+    };
     let mut output = env("SHOESTRING_REMOTE_OUTPUT");
     // The old TCP-by-default settings. Honouring them would quietly reopen an
     // unchecked TCP port, so stop with a pointer to the explicit setting.
@@ -411,6 +415,7 @@ fn parse_args() -> Result<Option<Cfg>> {
             "--tcp" => {
                 tcp = Some(args.next().context("--tcp needs ADDR:PORT")?);
             }
+            "--tcp-any-host" => tcp_any_host = true,
             "--bind" | "--port" => {
                 anyhow::bail!("{arg} is no longer supported: use --tcp ADDR:PORT (try --help)")
             }
@@ -423,7 +428,7 @@ fn parse_args() -> Result<Option<Cfg>> {
     let endpoint = match (socket, tcp) {
         (Some(_), Some(_)) => anyhow::bail!("--socket and --tcp are mutually exclusive"),
         (Some(path), None) => Endpoint::Unix(path),
-        (None, Some(addr)) => Endpoint::Tcp(addr),
+        (None, Some(addr)) => listen::tcp_endpoint(&addr, tcp_any_host)?,
         (None, None) => Endpoint::default_unix()?,
     };
     Ok(Some(Cfg { endpoint, output }))
@@ -448,14 +453,17 @@ Options:
                        $XDG_RUNTIME_DIR/shoestring-remote-$WAYLAND_DISPLAY.sock).
       --tcp ADDR:PORT  Listen on TCP instead. Nothing checks who connects:
                        anyone who can reach the port can see and control the
-                       session.
+                       session. A host name is resolved once, at startup.
+      --tcp-any-host   Allow --tcp on an address other than loopback, such
+                       as 0.0.0.0, which every host that can reach the port
+                       can connect to. Refused without this.
       --output NAME    Served WM output name (default: the first output).
   -h, --help           Print this help and exit.
   -V, --version        Print version and exit.
 
 Environment: SHOESTRING_WM_SOCKET (WM IPC socket, required to find the WM),
 SHOESTRING_REMOTE_SOCKET / SHOESTRING_REMOTE_TCP / SHOESTRING_REMOTE_OUTPUT
-(same as the flags), SHOESTRING_REMOTE_SERVER_LOG (append tracing to a file),
+(same as the flags), SHOESTRING_REMOTE_TCP_ANY_HOST=1 (same as --tcp-any-host), SHOESTRING_REMOTE_SERVER_LOG (append tracing to a file),
 RUST_LOG (tracing filter).
 ",
         ver = env!("CARGO_PKG_VERSION"),

@@ -429,6 +429,10 @@ pub struct ShoestringWm {
     /// `Some` ⇒ the remote gate is selectable. Cleared when that connection
     /// drops, which also forces the gate off.
     pub remote_server: Option<crate::ipc::ClientId>,
+    /// Where the registered server listens while the gate is on, as it said
+    /// when registering. Reported by `remote_status`; cleared with
+    /// [`Self::remote_server`].
+    pub remote_endpoint: Option<String>,
     /// Connected remote viewers/controllers, as last reported by the server
     /// ([`shoestring_ipc::Request::ReportRemoteViewers`]). Drives the bar's
     /// "being viewed / controlled" chip; `> 0` means someone is watching.
@@ -941,6 +945,7 @@ impl ShoestringWm {
             // enables it after a server registers (runtime-only consent).
             remote_enabled: false,
             remote_server: None,
+            remote_endpoint: None,
             remote_viewers: 0,
             remote_clients: Vec::new(),
             view_index: 0,

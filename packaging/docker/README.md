@@ -64,9 +64,14 @@ The socket only exists while the remote gate is on, and the gate couples the
 capture + automation gates — nothing is viewable or driveable until then.
 
 To use TCP instead, set `SHOESTRING_REMOTE_TCP` and publish the port, for
-example `-e SHOESTRING_REMOTE_TCP=0.0.0.0:7355 -p 127.0.0.1:7355:7355`. Nothing
-checks who connects over TCP: every user on the host can reach a
-loopback-published port and get the whole session.
+example `-e SHOESTRING_REMOTE_TCP=0.0.0.0:7355 -e SHOESTRING_REMOTE_TCP_ANY_HOST=1
+-p 127.0.0.1:7355:7355`. The server binds `0.0.0.0` inside the container
+because the published port can't reach the container's own loopback, and it
+refuses any address other than loopback without the second setting. That
+setting is safe here only because `-p 127.0.0.1:...` keeps the port on the
+host's loopback; never pair it with a bare `-p 7355:7355`. Nothing checks who
+connects over TCP: every user on the host can reach a loopback-published port
+and get the whole session.
 
 ## One app per container
 
@@ -88,6 +93,7 @@ podman run --rm --userns=keep-id:uid=1000,gid=1000 \
 | `SHOESTRING_WM_HEADLESS_SOFTWARE` | unset | `1` forces the llvmpipe software path even with a GPU present. |
 | `SHOESTRING_REMOTE_SOCKET` | `/run/shoestring/remote/shoestring-remote.sock` | The remote server's Unix socket. |
 | `SHOESTRING_REMOTE_TCP` | unset | `ADDR:PORT` to listen on TCP instead. Unchecked: anyone who can reach it gets the session. |
+| `SHOESTRING_REMOTE_TCP_ANY_HOST` | `0` | `1` allows `SHOESTRING_REMOTE_TCP` on an address other than loopback, such as `0.0.0.0`. Required for TCP in a container; see above. |
 | `SHOESTRING_REMOTE_ENABLE` | `1` | `0` starts gated-off; flip later with `podman exec … shoestring-ctl remote on`. |
 | `SHOESTRING_APP` | unset | Optional app argv to launch into the session. |
 | `SHOESTRING_WM_CONFIG` | `/etc/shoestring-wm/config.toml` | WM config path. |

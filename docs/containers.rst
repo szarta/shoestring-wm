@@ -116,11 +116,21 @@ startup with an error that names the fix. The bind mount carries only the
       ssh -N -L "$XDG_RUNTIME_DIR/box.sock:/run/user/<uid>/sandbox/shoestring-remote.sock" host
       shoestring-remote-client --connect "$XDG_RUNTIME_DIR/box.sock" --label box
 
-TCP is still available with ``-e SHOESTRING_REMOTE_TCP=ADDR:PORT`` and ``-p``,
-but nothing checks who connects to it: every user on the host can reach a
-loopback-published port, and anything on the container network can reach
-``0.0.0.0``, and either gets the whole session. Use it only where every such
-user is trusted.
+TCP is still available, but nothing checks who connects to it: every user on
+the host can reach a loopback-published port, and anything on the container
+network can reach ``0.0.0.0``, and either gets the whole session. Use it only
+where every such user is trusted::
+
+    -e SHOESTRING_REMOTE_TCP=0.0.0.0:7355 -e SHOESTRING_REMOTE_TCP_ANY_HOST=1 \
+    -p 127.0.0.1:7355:7355
+
+The server has to bind ``0.0.0.0`` inside the container, because a published
+port can't reach the container's own loopback, and it refuses any address but
+loopback unless ``SHOESTRING_REMOTE_TCP_ANY_HOST=1`` is also set. The
+container stops at startup with that hint if it isn't. The setting is safe
+here only because ``-p 127.0.0.1:...`` keeps the port on the host's loopback;
+a bare ``-p 7355:7355`` would publish the session to every host that can
+reach this one.
 
 GPU and CPU-only rendering
 --------------------------

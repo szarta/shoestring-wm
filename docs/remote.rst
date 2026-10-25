@@ -266,6 +266,12 @@ The remote gate reuses the existing capability-gate model end to end:
   ``SHOESTRING_REMOTE_TCP``) listens on TCP instead. Nothing checks who connects
   there: on loopback any local user, and on any other address any host that can
   reach it, gets the session. The server warns at startup.
+- **TCP beyond loopback takes a second opt-in.** The server refuses an address
+  other than loopback, ``0.0.0.0`` included, unless ``--tcp-any-host`` (or
+  ``SHOESTRING_REMOTE_TCP_ANY_HOST=1``) is also given. A host name is resolved
+  once at startup and checked by the address it resolves to.
+  ``shoestring-ctl remote status`` reports where the server listens in
+  ``endpoint``.
 
 Clipboard
 ---------
