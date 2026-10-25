@@ -132,6 +132,173 @@ descriptor/``.service`` files the packages install.
 
 (The ``.deb`` / ``.rpm`` packages do all of this for you.)
 
+.. _install-minimal:
+
+Minimal install
+---------------
+
+The compositor is a single binary, and it runs on its own. Build just it
+with::
+
+    cargo build --release -p shoestring-wm
+
+That build needs the libraries for its backends (wayland, xkbcommon, DRM,
+GBM, udev, libinput, libseat, libdisplay-info, pixman) but not PAM,
+PipeWire or libclang, so on Debian/Ubuntu the last two lines of the
+``apt install`` below can be left off. ``cargo build --release --workspace``
+builds every companion binary as well, and needs all of them: PAM for
+``shoestring-lock``, PipeWire and libclang for ``shoestring-mediad`` and the
+screencast portal.
+
+The default config expects some companion binaries to be on ``$PATH``. The
+WM starts them by name, and when one is missing it logs a warning and
+carries on, so nothing fails loudly. What each one adds, and what quietly
+stops working without it:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 30 14 34
+
+   * - Binary
+     - Provides
+     - Extra deps
+     - Without it
+   * - ``shoestring-bar``
+     - The status bar: workspaces, clock, battery, the gate toggles and the
+       privacy chips (capture, automation, remote viewers, mute, mic,
+       camera).
+     - none
+     - In the default autostart, so a warning at startup and no bar. Nothing
+       on screen shows that a gate is on; check with ``shoestring-ctl
+       automation status`` and friends.
+   * - ``shoestring-mediad``
+     - The media-privacy monitor, and the mute actions behind the bar's
+       mute toggles.
+     - PipeWire, libclang (build)
+     - In the default autostart, so a warning at startup. The mute, mic and
+       camera chips stay empty, and the mute actions only log a warning.
+   * - ``shoestring-confirm``
+     - The yes/no dialog behind quitting and the power actions.
+     - none
+     - ``Super+Shift+Q``, the power keys and the bar's power menu do
+       nothing: they fail closed rather than act without asking.
+   * - ``shoestring-lock``
+     - The default ``lock_command``, run by ``Super+Shift+L`` and
+       ``idle_lock_secs``.
+     - PAM, plus its PAM policy file
+     - The session doesn't lock. The WM logs an error and sends
+       ``lock_failed`` (see :doc:`ipc`). Set ``lock_command`` to another
+       ``ext-session-lock-v1`` locker to use that instead.
+   * - ``shoestring-menu``
+     - The launcher, bookmarks and window switcher on ``Super+P``,
+       ``Super+B`` and ``Super+Tab``.
+     - none
+     - Those keys do nothing beyond a logged warning.
+   * - ``shoestring-notify``
+     - The notification daemon (``org.freedesktop.Notifications``).
+     - none
+     - Not started by default; add it to ``autostart``. Without a daemon,
+       application notifications aren't shown.
+   * - ``shoestring-screenshot``, ``shoestring-region``
+     - The ``Print`` key, the region picker it uses, and the IPC
+       ``remote_screenshot`` request.
+     - none
+     - ``Print`` does nothing beyond a logged warning.
+   * - ``xdg-desktop-portal-shoestring``
+     - Screen sharing and portal screenshots for browsers, Zoom and OBS.
+       Also needs the portal files under ``resources/`` (see
+       :doc:`portals`).
+     - PipeWire, libclang (build)
+     - Screen sharing and portal screenshots don't work; applications
+       often hang waiting for them.
+   * - ``shoestring-ctl``
+     - The IPC client for scripts and the shell.
+     - none
+     - Nothing in the WM needs it, but the container entrypoint and most
+       recipes in these docs do.
+   * - ``shoestring-remote-server``, ``shoestring-remote-client``
+     - Remote desktop: serving this session, and viewing another (see
+       :doc:`remote`).
+     - none
+     - The remote gate stays greyed out, and there is nothing to view
+       another machine with.
+   * - ``shoestring-kill``, ``shoestring-tasks``, ``shoestring-clipboard``
+     - Click-to-close, the console window manager, and the clipboard tool
+       for scripts and the cross-machine bridge.
+     - none
+     - Nothing; none is bound or started by default.
+
+The helpers that draw (bar, menu, notifications, locker, confirm dialog)
+also need a system font at runtime; see the FreeBSD notes below for a
+system that has none.
+
+Sizes of the release binaries, measured once on x86_64 Linux at commit
+``a427fb7`` (2026-10-25) with rustc 1.99.1 and the default release profile.
+"Stripped" is after ``strip``, close to what the ``.deb`` ships, since
+cargo-deb strips binaries. For runtime use, see the measurements in
+:doc:`running`.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Binary
+     - As built (MiB)
+     - Stripped (MiB)
+   * - ``shoestring-wm``
+     - 25.4
+     - 17.3
+   * - ``shoestring-bar``
+     - 7.0
+     - 4.9
+   * - ``xdg-desktop-portal-shoestring``
+     - 5.7
+     - 3.9
+   * - ``shoestring-remote-client``
+     - 4.8
+     - 3.1
+   * - ``shoestring-menu``
+     - 4.4
+     - 2.9
+   * - ``shoestring-notify``
+     - 4.3
+     - 3.0
+   * - ``shoestring-lock``
+     - 4.2
+     - 2.9
+   * - ``shoestring-remote-server``
+     - 3.6
+     - 2.5
+   * - ``shoestring-clipboard``
+     - 3.4
+     - 2.3
+   * - ``shoestring-mediad``
+     - 2.9
+     - 2.1
+   * - ``shoestring-ctl``
+     - 2.3
+     - 1.7
+   * - ``shoestring-screenshot``
+     - 2.1
+     - 1.4
+   * - ``shoestring-confirm``
+     - 1.7
+     - 1.1
+   * - ``shoestring-tasks``
+     - 1.7
+     - 1.2
+   * - ``shoestring-region``
+     - 1.6
+     - 0.9
+   * - ``shoestring-kill``
+     - 1.1
+     - 0.7
+   * - **WM only**
+     - **25.4**
+     - **17.3**
+   * - **Whole workspace**
+     - **76.8**
+     - **52.7**
+
 Distro packages
 ---------------
 

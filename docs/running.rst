@@ -87,6 +87,9 @@ ten times as much CPU. While the session is locked, remote viewers get a static
 frame rather than the animated lock screen (see :doc:`remote`), and the WM
 composites only what the lock screen redraws.
 
+For what a WM-only install leaves out, and the size of each binary, see
+:ref:`install-minimal`.
+
 Measured at v0.9.0 with ``scripts/measure-headless.sh``, on a 1920x1080
 headless output, on a laptop with a 4-core, 8-thread Intel Core i7-10610U and
 its integrated UHD Graphics (Mesa 25.2), 10 seconds per workload. CPU is a
