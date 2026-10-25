@@ -134,6 +134,17 @@ pub enum Request {
     /// apps tracking pointer deltas register the drag), then release — the
     /// press/move/release the space map and other drag surfaces need, without
     /// the caller hand-composing it from `move_mouse` + raw button events.
+    ///
+    /// The drag takes real time, so a drag source that checks the button
+    /// after the press (wine, OLE, toolkits with a drag threshold) still finds
+    /// it held: the press, `hold_ms`, `steps` motions spread over
+    /// `duration_ms`, `hold_ms` at the target, then the release. Defaults are
+    /// [`DRAG_DEFAULT_HOLD_MS`], [`DRAG_DEFAULT_DURATION_MS`] and
+    /// [`DRAG_DEFAULT_STEPS`]; zeros give the fastest drag. The reply is
+    /// deferred until the release. One drag runs at a time; it stops early,
+    /// releasing the button and replying with an error, if the automation
+    /// gate closes, the session locks after it began, or the window goes
+    /// away, and closing the connection releases the button too.
     /// Coordinates are compositor-global logical pixels, unless `id` is set — a
     /// [`WindowSummary::id`] — in which case `from` / `to` are window-local and
     /// the WM translates them by the window's origin (placement-immune, like
@@ -149,6 +160,12 @@ pub enum Request {
         from_y: f64,
         to_x: f64,
         to_y: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
     },
     /// Move the pointer to compositor-space `(x, y)` without clicking.
     /// Parity with `xdotool mousemove`; useful for hover-only tests and
@@ -1298,6 +1315,17 @@ fn default_drag_button() -> String {
     "left".to_string()
 }
 
+/// [`Request::Drag`]'s default hold after the press and before the release.
+pub const DRAG_DEFAULT_HOLD_MS: u32 = 150;
+/// [`Request::Drag`]'s default time from the first motion to the last.
+pub const DRAG_DEFAULT_DURATION_MS: u32 = 300;
+/// [`Request::Drag`]'s default number of motions.
+pub const DRAG_DEFAULT_STEPS: u32 = 16;
+/// The longest `hold_ms` or `duration_ms` a drag accepts.
+pub const DRAG_MAX_MS: u32 = 60_000;
+/// The most motions a drag accepts.
+pub const DRAG_MAX_STEPS: u32 = 1_000;
+
 /// Default paste keysym for [`Request::Paste`] — the `v` of `Ctrl+V`.
 fn default_paste_keysym() -> String {
     "v".to_string()
@@ -1917,7 +1945,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             d,
-            Request::Drag { id: None, ref button, from_x, from_y, to_x, to_y }
+            Request::Drag { id: None, ref button, from_x, from_y, to_x, to_y, hold_ms: None, duration_ms: None, steps: None }
                 if button == "left" && from_x == 1.0 && from_y == 2.0 && to_x == 3.0 && to_y == 4.0
         ));
         let dw = Request::Drag {
@@ -1927,11 +1955,14 @@ mod tests {
             from_y: 6.0,
             to_x: 7.0,
             to_y: 8.0,
+            hold_ms: Some(0),
+            duration_ms: None,
+            steps: Some(4),
         };
         let back: Request = serde_json::from_str(&serde_json::to_string(&dw).unwrap()).unwrap();
         assert!(matches!(
             back,
-            Request::Drag { id: Some(ref id), ref button, .. }
+            Request::Drag { id: Some(ref id), ref button, hold_ms: Some(0), duration_ms: None, steps: Some(4), .. }
                 if id == "wl-9" && button == "middle"
         ));
     }

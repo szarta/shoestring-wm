@@ -329,6 +329,21 @@ Each request is a JSON object with a ``type`` discriminator:
        drag that slides off the pressed widget still reads as one continuous
        drag. Returns an ``error`` if ``id`` is unknown/unmapped or ``button`` is
        bad. Gated by the automation gate.
+
+       The drag takes real time, because a drag source that checks the button
+       after the press (wine's drag detection, OLE ``DoDragDrop``, toolkits
+       with a drag threshold) would otherwise find it already released and
+       read a click. The button is held ``"hold_ms"`` (default 150) before the
+       first motion and again before the release, and ``"steps"`` motions
+       (default 16), each its own frame with a rising timestamp, are spread
+       over ``"duration_ms"`` (default 300). A busy WM can stretch these
+       times but never shortens them. Zeros give the fastest drag;
+       ``hold_ms`` and ``duration_ms`` are at most 60000 and ``steps`` 1 to
+       1000. The event loop keeps running throughout, and the ``ok`` reply
+       comes after the release. One drag runs at a time; a second is refused
+       with ``error``. A drag stops early, releasing the button, if its
+       connection closes, or with an ``error`` reply if the automation gate
+       closes, the session locks after it began, or the window goes away.
    * - ``{"type": "move_mouse", "x": 100.0, "y": 200.0}``
      - Move the pointer to compositor-space ``(x, y)`` without clicking.
        Parity with ``xdotool mousemove``; useful for hover-only tests.
@@ -1579,6 +1594,12 @@ Unreleased
 - ``set_remote`` takes optional ``for_secs`` and ``idle_secs`` to lease the
   remote gate, and the ``remote`` reply reports the lease in ``lease``. Each
   is at most 30 days.
+- ``drag`` takes real time, so wine, OLE and other drag sources that check
+  the button after the press see a drag instead of a click. It holds the
+  button 150 ms before moving and before releasing, spreads 16 motions over
+  300 ms, and replies after the release; the optional ``hold_ms``,
+  ``duration_ms`` and ``steps`` change that. It used to send every event at
+  once, with one timestamp.
 - ``remote_changed`` carries the lease in an optional ``lease``, and is also
   sent when ``set_remote`` sets, replaces or drops a lease with the gate
   already on, so subscribers needn't poll ``remote_status`` for it.

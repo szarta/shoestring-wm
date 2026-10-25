@@ -224,9 +224,15 @@ is named.
     window-local coordinates (0,0 is the window's top-left), wherever
     the window was placed. **--count** 2 double-clicks.
 
-**drag** **--from** *X,Y* **--to** *X,Y* [**--button** *BUTTON*] [**--window** *ID*]
+**drag** **--from** *X,Y* **--to** *X,Y* [**--button** *BUTTON*] [**--window** *ID*] [**--hold-ms** *MS*] [**--duration-ms** *MS*] [**--steps** *N*]
     Press *BUTTON* (default ``left``) at **--from**, move to **--to**,
-    and release. With **--window** both points are window-local.
+    and release. With **--window** both points are window-local. The
+    drag takes real time, so apps that check the button after the press
+    (wine and OLE drag sources, for one) see it held: the button is held
+    **--hold-ms** (default 150) before the first motion and again before
+    the release, and **--steps** motions (default 16) are spread over
+    **--duration-ms** (default 300). Zeros give the fastest drag. Returns
+    after the release; one drag runs at a time.
 
 **move-mouse** *X* *Y*
     Move the pointer without clicking. Parity with

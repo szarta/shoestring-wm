@@ -840,6 +840,129 @@ fn e2e_window_targeted_input_respects_the_lock() {
     wm.wait_pixel(centre, rgb(CLICKED), "targeted drag after unlock");
 }
 
+/// Wait until the window has received a button release, and return every
+/// pointer event since the last take.
+fn pointer_events_through_release(client: &TestClient) -> Vec<PointerEvent> {
+    let mut events = Vec::new();
+    wait_for("the window to see the release", || {
+        events.extend(client.take_pointer_events());
+        events
+            .iter()
+            .any(|e| matches!(e, PointerEvent::Release { .. }))
+            .then_some(())
+    });
+    events
+}
+
+/// Start a `drag` on its own connection and return it unread.
+fn start_drag(wm: &Wm, request: serde_json::Value) -> UnixStream {
+    let mut stream = wm.connect_ipc();
+    writeln!(stream, "{request}").unwrap();
+    stream
+}
+
+/// A drag takes real time with the button held throughout, so a drag source
+/// that checks the button after the press (wine, OLE) still finds it down:
+/// press, a hold, the motions spread out with rising timestamps, a hold at
+/// the target, then the release, and only then the reply.
+#[test]
+#[ignore]
+fn e2e_drag_takes_time_with_the_button_held() {
+    let wm = Wm::start();
+    let client = TestClient::map(&wm);
+    let (id, _) = wm.mapped_window();
+    wm.park_pointer();
+    std::thread::sleep(Duration::from_millis(100));
+    client.take_pointer_events();
+
+    let sent = std::time::Instant::now();
+    wm.ipc_ok(
+        json!({"type": "drag", "id": id, "from_x": 20.0, "from_y": 20.0,
+        "to_x": 120.0, "to_y": 100.0, "hold_ms": 100, "duration_ms": 200, "steps": 8}),
+    );
+    assert!(
+        sent.elapsed() >= Duration::from_millis(400),
+        "replied after {:?}, before the release was due",
+        sent.elapsed()
+    );
+
+    let events = pointer_events_through_release(&client);
+    let press = events
+        .iter()
+        .position(|e| matches!(e, PointerEvent::Press { .. }))
+        .expect("a press");
+    let PointerEvent::Press { time: pressed } = events[press] else {
+        unreachable!()
+    };
+    let after = &events[press + 1..];
+    let motions: Vec<(u32, f64, f64)> = after
+        .iter()
+        .filter_map(|e| match *e {
+            PointerEvent::Motion { time, x, y } => Some((time, x, y)),
+            _ => None,
+        })
+        .collect();
+    let Some(&PointerEvent::Release { time: released }) = after.last() else {
+        panic!("the release comes last: {events:?}");
+    };
+    assert_eq!(motions.len(), 8, "{events:?}");
+    let (first, last) = (motions[0], motions[7]);
+    assert!(first.0 - pressed >= 100, "held before moving: {events:?}");
+    assert!(released - last.0 >= 100, "held at the target: {events:?}");
+    assert!(last.0 - first.0 >= 150, "motions spread out: {events:?}");
+    assert!(motions.windows(2).all(|w| w[1].0 >= w[0].0), "{events:?}");
+    assert_eq!((last.1, last.2), (120.0, 100.0), "{events:?}");
+}
+
+/// Closing a drag's connection releases the button at once, and a second
+/// drag is refused while one runs; closing the automation gate stops one
+/// with an error.
+#[test]
+#[ignore]
+fn e2e_drag_stops_cleanly() {
+    let wm = Wm::start();
+    let client = TestClient::map(&wm);
+    let (id, _) = wm.mapped_window();
+    wm.park_pointer();
+    std::thread::sleep(Duration::from_millis(100));
+    client.take_pointer_events();
+    let long = json!({"type": "drag", "id": id, "from_x": 20.0, "from_y": 20.0,
+        "to_x": 120.0, "to_y": 100.0, "duration_ms": 10_000});
+
+    let first = start_drag(&wm, long.clone());
+    std::thread::sleep(Duration::from_millis(200));
+    let second = wm.ipc(long.clone());
+    assert_eq!(second["type"], "error", "{second}");
+    assert!(
+        second["message"].as_str().unwrap().contains("in progress"),
+        "{second}"
+    );
+    let closed = std::time::Instant::now();
+    drop(first);
+    pointer_events_through_release(&client);
+    assert!(
+        closed.elapsed() < Duration::from_secs(2),
+        "released when closed"
+    );
+
+    let mut third = start_drag(&wm, long);
+    std::thread::sleep(Duration::from_millis(200));
+    wm.ipc_ok(json!({"type": "set_automation", "enabled": false}));
+    third
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let reply = read_line(&mut third);
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert!(
+        reply["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("automation disabled"),
+        "{reply}"
+    );
+    pointer_events_through_release(&client);
+}
+
 /// Send a `run_command` on its own connection and return it unread, with the
 /// time it was sent, so the test can probe the WM while the command runs.
 fn start_command(wm: &Wm, argv: &[&str], timeout_ms: u32) -> (UnixStream, std::time::Instant) {

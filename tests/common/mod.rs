@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -845,7 +845,18 @@ pub struct TestClient {
     cmds: Sender<Cmd>,
     acks: Receiver<()>,
     thread: Option<JoinHandle<()>>,
+    pointer_log: PointerLog,
 }
+
+/// A pointer event the window received, with its Wayland timestamp (ms).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PointerEvent {
+    Press { time: u32 },
+    Release { time: u32 },
+    Motion { time: u32, x: f64, y: f64 },
+}
+
+type PointerLog = Arc<Mutex<Vec<PointerEvent>>>;
 
 impl TestClient {
     pub fn map(wm: &Wm) -> TestClient {
@@ -858,11 +869,14 @@ impl TestClient {
             UnixStream::connect(wm.wayland_socket()).expect("connect to the WM's Wayland socket");
         let (cmds, cmd_rx) = mpsc::channel();
         let (ack_tx, acks) = mpsc::channel();
-        let thread = std::thread::spawn(move || client_main(socket, size, cmd_rx, ack_tx));
+        let pointer_log = PointerLog::default();
+        let log = Arc::clone(&pointer_log);
+        let thread = std::thread::spawn(move || client_main(socket, size, cmd_rx, ack_tx, log));
         let client = TestClient {
             cmds,
             acks,
             thread: Some(thread),
+            pointer_log,
         };
         client.wait_ack("the client to map its window");
         client
@@ -896,6 +910,11 @@ impl TestClient {
 
     pub fn unlock(&self) {
         self.request(Cmd::Unlock, "the unlock");
+    }
+
+    /// Take the pointer events the window has received since the last call.
+    pub fn take_pointer_events(&self) -> Vec<PointerEvent> {
+        std::mem::take(&mut *self.pointer_log.lock().unwrap())
     }
 }
 
@@ -940,6 +959,8 @@ pub struct ClientState {
     /// map are ignored, so a window keeps the size its test asked for.
     resized: Option<(u32, u32)>,
     mapped: bool,
+    /// Button and motion events over the window, for [`TestClient::take_pointer_events`].
+    pointer_log: PointerLog,
 }
 
 pub fn client_main(
@@ -947,12 +968,16 @@ pub fn client_main(
     (width, height): (u32, u32),
     cmds: Receiver<Cmd>,
     acks: Sender<()>,
+    pointer_log: PointerLog,
 ) {
     let conn = Connection::from_socket(socket).expect("wayland connection");
     let mut eq = conn.new_event_queue::<ClientState>();
     let qh = eq.handle();
     conn.display().get_registry(&qh, ());
-    let mut state = ClientState::default();
+    let mut state = ClientState {
+        pointer_log,
+        ..ClientState::default()
+    };
     eq.roundtrip(&mut state).expect("registry roundtrip");
     let compositor = state.compositor.clone().expect("wl_compositor");
     let wm_base = state.wm_base.clone().expect("xdg_wm_base");
@@ -1296,9 +1321,28 @@ impl Dispatch<WlPointer, ()> for ClientState {
             }
             wl_pointer::Event::Leave { .. } => state.pointer_in_window = false,
             wl_pointer::Event::Button {
-                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                time,
+                state: WEnum::Value(button_state),
                 ..
-            } if state.pointer_in_window => state.colour = CLICKED,
+            } if state.pointer_in_window => {
+                let pressed = button_state == wl_pointer::ButtonState::Pressed;
+                if pressed {
+                    state.colour = CLICKED;
+                }
+                state.pointer_log.lock().unwrap().push(if pressed {
+                    PointerEvent::Press { time }
+                } else {
+                    PointerEvent::Release { time }
+                });
+            }
+            wl_pointer::Event::Motion {
+                time,
+                surface_x,
+                surface_y,
+            } if state.pointer_in_window => {
+                let (x, y) = (surface_x, surface_y);
+                (state.pointer_log.lock().unwrap()).push(PointerEvent::Motion { time, x, y });
+            }
             _ => {}
         }
     }

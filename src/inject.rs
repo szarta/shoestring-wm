@@ -415,10 +415,10 @@ impl ShoestringWm {
         Ok((loc.x, loc.y))
     }
 
-    /// Press `button` at `from`, move to `to` with interpolated motion, then
-    /// release — a press/move/release drag. When `ft_id` is `Some`, `from`/`to`
-    /// are window-local and translated by the window's origin (placement-immune,
-    /// like [`Self::inject_click_to_window`]); otherwise they are global logical
+    /// Resolve a drag's endpoints and pinned focus, for [`crate::drag`]. When
+    /// `ft_id` is `Some`, `from`/`to` are window-local and translated by the
+    /// window's origin (placement-immune, like
+    /// [`Self::inject_click_to_window`]); otherwise they are global logical
     /// coords.
     ///
     /// Focus is **pinned** to the surface under the press point for the whole
@@ -429,18 +429,18 @@ impl ShoestringWm {
     /// `leave` and cancel the app's in-progress selection. Holding the focus
     /// keeps every motion on the pressed surface, so the drag reads as one
     /// continuous gesture.
-    pub fn inject_drag(
+    pub(crate) fn resolve_drag(
         &mut self,
         ft_id: Option<&str>,
         button: &str,
         from: (f64, f64),
         to: (f64, f64),
-    ) -> Result<(), InjectError> {
-        let code = parse_button(button)?;
-        // Resolve global from/to plus the pinned focus. For a window drag the
-        // focus is the window's own surface (so an occluded/off-workspace target
-        // still works); for a global drag it's whatever sits under the press.
-        let (focus, (fx, fy), (tx, ty)) = match ft_id {
+    ) -> Result<crate::drag::DragPath, InjectError> {
+        let button = parse_button(button)?;
+        // For a window drag the focus is the window's own surface (so an
+        // occluded/off-workspace target still works); for a global drag it's
+        // whatever sits under the press.
+        let (focus, from, to) = match ft_id {
             Some(id) => {
                 let window = crate::ipc::window_by_ft_id(self, id)
                     .ok_or_else(|| InjectError::Window(format!("no window with id {id}")))?;
@@ -451,33 +451,26 @@ impl ShoestringWm {
                     .element_location(&window)
                     .ok_or_else(|| InjectError::Window(format!("window {id} is not mapped")))?
                     .to_f64();
-                let focus = Some((surface, origin));
                 (
-                    focus,
+                    Some((surface, origin)),
                     (origin.x + from.0, origin.y + from.1),
                     (origin.x + to.0, origin.y + to.1),
                 )
             }
             None => (self.surface_under(from.into()), from, to),
         };
-
-        self.drag_motion(&focus, (fx, fy));
-        self.inject_raw_button(code, true, false);
-        // Interpolate so apps that track motion deltas see a continuous drag,
-        // not a teleport from press to release.
-        const STEPS: u32 = 16;
-        for i in 1..=STEPS {
-            let t = i as f64 / STEPS as f64;
-            self.drag_motion(&focus, (fx + (tx - fx) * t, fy + (ty - fy) * t));
-        }
-        self.inject_raw_button(code, false, false);
-        Ok(())
+        Ok(crate::drag::DragPath {
+            button,
+            focus,
+            from,
+            to,
+        })
     }
 
-    /// Emit one pointer motion during [`Self::inject_drag`], keeping the
-    /// caller's pinned `focus` rather than recomputing `surface_under` — see
-    /// that method's doc for why the drag must hold focus.
-    fn drag_motion(
+    /// Emit one pointer motion during a drag, keeping the caller's pinned
+    /// `focus` rather than recomputing `surface_under` — see
+    /// [`Self::resolve_drag`] for why the drag must hold focus.
+    pub(crate) fn drag_motion(
         &mut self,
         focus: &Option<(WlSurface, Point<f64, Logical>)>,
         location: (f64, f64),

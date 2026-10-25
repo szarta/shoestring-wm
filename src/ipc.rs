@@ -646,7 +646,7 @@ fn handle_readable(state: &mut ShoestringWm, id: ClientId, client: &Rc<RefCell<C
             | Request::Drag { .. }
             | Request::MoveMouse { .. }
             | Request::InjectInput { .. }
-            | Request::InjectInputToWindow { .. }) => return dispatch_input(state, client, r),
+            | Request::InjectInputToWindow { .. }) => return dispatch_input(state, id, client, r),
             r @ (Request::Screenshot { .. }
             | Request::ScreenshotWindow { .. }
             | Request::CaptureStream { .. }
@@ -1074,6 +1074,7 @@ fn dispatch_session(
 /// Returns whether to close the connection, as [`handle_readable`] does.
 fn dispatch_input(
     state: &mut ShoestringWm,
+    id: ClientId,
     client: &Rc<RefCell<Client>>,
     request: Request,
 ) -> bool {
@@ -1160,12 +1161,15 @@ fn dispatch_input(
             true
         }
         Request::Drag {
-            id,
+            id: ft_id,
             button,
             from_x,
             from_y,
             to_x,
             to_y,
+            hold_ms,
+            duration_ms,
+            steps,
         } => {
             if !state.automation_enabled {
                 let _ = write_response(client, &automation_off_error());
@@ -1174,19 +1178,28 @@ fn dispatch_input(
             // A window-targeted drag pins the pointer to that window's
             // surface, past the lock screen; a global one meets the lock
             // surface like real input.
-            if id.is_some() && state.is_locked() {
+            if ft_id.is_some() && state.is_locked() {
                 let _ = write_response(client, &session_locked_error("drag"));
                 return true;
             }
-            let resp =
-                match state.inject_drag(id.as_deref(), &button, (from_x, from_y), (to_x, to_y)) {
-                    Ok(()) => Response::Ok,
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                    },
-                };
-            let _ = write_response(client, &resp);
-            true
+            let started = crate::drag::DragTiming::from_request(hold_ms, duration_ms, steps)
+                .and_then(|timing| {
+                    let path = state
+                        .resolve_drag(ft_id.as_deref(), &button, (from_x, from_y), (to_x, to_y))
+                        .map_err(|e| e.to_string())?;
+                    state.start_drag(id, client, path, timing)
+                });
+            match started {
+                // The reply follows the release.
+                Ok(()) => {
+                    client.borrow_mut().spent = true;
+                    false
+                }
+                Err(message) => {
+                    let _ = write_response(client, &Response::Error { message });
+                    true
+                }
+            }
         }
         Request::MoveMouse { x, y } => {
             if !state.automation_enabled {
@@ -2953,6 +2966,7 @@ impl ShoestringWm {
         // connection (and cancel their timers). A no-op when we're being called
         // from a wait's own finalizer — that already removed the entry.
         self.cancel_waits_owned_by(id);
+        self.cancel_drag_owned_by(id);
 
         // If the registered remote server's connection dropped, the server is
         // gone: clear registration and force the remote gate off (no server ⇒

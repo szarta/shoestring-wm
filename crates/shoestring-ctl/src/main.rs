@@ -165,8 +165,10 @@ enum Command {
     },
     /// Drag with a button held: press at --from, move to --to, release.
     /// Coordinates are compositor-space, unless --window is given, in which case
-    /// --from/--to are window-local (immune to window placement). Requires the
-    /// automation gate.
+    /// --from/--to are window-local (immune to window placement). The drag takes
+    /// real time (about 0.6 s by default) so apps that check the button after
+    /// the press, such as wine and OLE drag sources, see it held; the command
+    /// returns after the release. Requires the automation gate.
     Drag {
         /// Start point `X,Y`.
         #[arg(long, value_name = "X,Y")]
@@ -180,6 +182,16 @@ enum Command {
         /// Toplevel id (from `windows`); makes --from/--to window-local.
         #[arg(long)]
         window: Option<String>,
+        /// Hold the button this long after the press and again before the
+        /// release (default 150).
+        #[arg(long, value_name = "MS")]
+        hold_ms: Option<u32>,
+        /// Spread the motions over this long (default 300).
+        #[arg(long, value_name = "MS")]
+        duration_ms: Option<u32>,
+        /// How many motions to send (default 16).
+        #[arg(long, value_name = "N")]
+        steps: Option<u32>,
     },
     /// Move the pointer to compositor-space (X, Y) without clicking. Same
     /// coordinate system as `click --x --y`. Useful for hover-only tests
@@ -691,6 +703,9 @@ fn main() -> Result<()> {
             to,
             button,
             window,
+            hold_ms,
+            duration_ms,
+            steps,
         } => {
             let (from_x, from_y) = parse_xy(&from)?;
             let (to_x, to_y) = parse_xy(&to)?;
@@ -701,6 +716,9 @@ fn main() -> Result<()> {
                 from_y,
                 to_x,
                 to_y,
+                hold_ms,
+                duration_ms,
+                steps,
             }
         }
         Command::MoveMouse { x, y } => Request::MoveMouse { x, y },

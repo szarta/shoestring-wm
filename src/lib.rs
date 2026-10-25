@@ -19,6 +19,7 @@ mod confirm;
 mod cursor;
 pub mod decorations;
 pub mod diag_overlay;
+mod drag;
 pub mod drawing;
 mod ext_screencopy;
 mod ext_workspace;

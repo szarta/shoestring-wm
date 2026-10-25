@@ -369,6 +369,8 @@ pub struct ShoestringWm {
     /// Connections parked on [`shoestring_ipc::Request::WaitReady`] awaiting
     /// XWayland. Resolved from the `XWaylandEvent::Ready` handler or timeout.
     pub(crate) pending_wait_ready: Vec<crate::ipc::PendingWaitReady>,
+    /// The `drag` in progress, if any (see [`crate::drag`]).
+    pub(crate) pending_drag: Option<crate::drag::PendingDrag>,
     /// One-shot `get_pixel` / `hash_region` probes awaiting the next render tick
     /// (renderer in scope). Drained per output by
     /// [`crate::screencopy::process_pending_probes`].
@@ -936,6 +938,7 @@ impl ShoestringWm {
             pending_window_screenshots: Vec::new(),
             pending_wait_windows: Vec::new(),
             pending_wait_ready: Vec::new(),
+            pending_drag: None,
             pending_probes: Vec::new(),
             metrics: crate::metrics::Metrics::new(),
             // Default to the safe (non-integrating) stance; `main` flips this
