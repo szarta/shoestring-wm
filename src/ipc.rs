@@ -14,15 +14,19 @@
 //!   one JSON line per call, dispatch a [`Request`], and either write a
 //!   single [`Response`] (closing after) or flip the client into event-
 //!   streaming mode.
-//! - Events: [`Server::emit`] walks `clients` and writes one JSON line to
-//!   every subscriber. Writes are non-blocking; on `WouldBlock` (or any
-//!   I/O error) we drop the subscriber rather than buffering — IPC traffic
-//!   is small (workspace changes, focus changes), so backpressure means
-//!   "client is broken," not "we need a real queue."
+//! - Events: [`ShoestringWm::emit_ipc`] walks `clients` and writes one JSON
+//!   line to every subscriber.
 //!
-//! The binary capture streams are the exception: a frame can be megabytes,
-//! so they queue what the socket won't take yet and hold back new frames
-//! until it drains (see [`Client::queue_frames`]).
+//! Writes never block the loop. What the socket won't take yet waits in the
+//! client's queue (see [`Client::send_line`]), and a write-ready source drains
+//! it, so a reply far bigger than the socket buffer (a clipboard of megabytes)
+//! arrives whole. A client dropped with a reply still queued lingers until the
+//! reply is out, for at most [`LINGER_TIMEOUT`]. A subscriber that falls more
+//! than [`SUBSCRIBER_BACKLOG`] behind is dropped: event traffic is small, so
+//! that much backpressure means the client is broken.
+//!
+//! The binary capture streams share the queue: a frame can be megabytes, so
+//! they hold back new frames until it drains (see [`Client::queue_frames`]).
 //!
 //! Stream-mode clients are also re-armed for `READ` to detect hangup
 //! (`read()` → 0); we don't expect more requests on a streaming connection.
@@ -44,6 +48,7 @@ use shoestring_ipc::{
 };
 use smithay::reexports::calloop::{
     generic::Generic,
+    ping::{make_ping, Ping},
     timer::{TimeoutAction, Timer},
     Interest, LoopHandle, Mode, PostAction, RegistrationToken,
 };
@@ -61,8 +66,22 @@ pub struct Server {
     #[allow(dead_code)]
     listener_token: RegistrationToken,
     clients: HashMap<ClientId, ClientEntry>,
+    /// Dropped clients whose last reply is still going out. See
+    /// [`ShoestringWm::drop_ipc_client`].
+    lingering: HashMap<ClientId, ClientEntry>,
+    /// Wakes the loop to arm a write-ready source for each client whose queue
+    /// a write left non-empty (see [`ShoestringWm::arm_ipc_flushers`]).
+    wake: Ping,
     next_id: u64,
 }
+
+/// How long a dropped client may go without reading any of the rest of its
+/// reply before it is closed.
+const LINGER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How far behind an event or metrics subscriber may fall before it is
+/// dropped.
+const SUBSCRIBER_BACKLOG: usize = 1024 * 1024;
 
 impl Drop for Server {
     fn drop(&mut self) {
@@ -72,7 +91,10 @@ impl Drop for Server {
 
 struct ClientEntry {
     client: Rc<RefCell<Client>>,
-    token: RegistrationToken,
+    /// The read source; `None` once the client is lingering.
+    token: Option<RegistrationToken>,
+    /// The write-ready source draining the queue, while one is armed.
+    flush: Option<RegistrationToken>,
 }
 
 pub(crate) struct Client {
@@ -102,13 +124,65 @@ pub(crate) struct Client {
     /// the binary stream carries a single **window** rendered offscreen (the
     /// remote-desktop *graft* path, see [`crate::window_capture`]).
     pub(crate) window_capture_sub: Option<crate::window_capture::WindowCaptureSub>,
-    /// Binary capture frames queued but not yet written, and how much of the
-    /// front has gone out. See [`Client::queue_frames`].
+    /// Bytes queued but not yet written (JSON lines, or binary capture
+    /// frames), and how much of the front has gone out. See
+    /// [`Client::send_line`] and [`Client::queue_frames`].
     out_buf: Vec<u8>,
     out_pos: usize,
+    /// Pinged when a JSON write leaves bytes queued, so the loop arms a
+    /// write-ready source to drain them. `None` in unit tests.
+    wake: Option<Ping>,
+    /// A JSON write left bytes queued that a write-ready source should drain.
+    wants_flush: bool,
+    /// When the socket last took any queued bytes.
+    last_progress: Instant,
 }
 
 impl Client {
+    /// Send one newline-terminated JSON line, behind anything already queued.
+    /// What the socket won't take now stays queued and the loop is woken to
+    /// drain it when the socket is writable, so a `WouldBlock` partway through
+    /// a large reply is backpressure, not a truncated line. Errors only on a
+    /// real I/O failure.
+    pub(crate) fn send_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.out_buf.extend_from_slice(line.as_bytes());
+        self.out_buf.push(b'\n');
+        if !self.flush_out()? && !self.wants_flush {
+            self.wants_flush = true;
+            if let Some(wake) = &self.wake {
+                wake.ping();
+            }
+        }
+        Ok(())
+    }
+
+    /// Bytes still queued for the socket.
+    fn backlog_len(&self) -> usize {
+        self.out_buf.len() - self.out_pos
+    }
+
+    /// [`Self::send_line`] for a subscriber's push. Fails, so the caller drops
+    /// the subscriber, once it has fallen more than [`SUBSCRIBER_BACKLOG`]
+    /// behind; what it hasn't read is discarded with it.
+    fn send_subscribed(&mut self, line: &str) -> std::io::Result<()> {
+        self.send_line(line)?;
+        if self.backlog_len() > SUBSCRIBER_BACKLOG {
+            self.out_buf.clear();
+            self.out_pos = 0;
+            return Err(std::io::Error::new(
+                ErrorKind::WouldBlock,
+                "subscriber fell too far behind",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A long-lived capture stream, whose queued frames are worth nothing
+    /// once it is dropped.
+    fn is_capture(&self) -> bool {
+        self.capture_sub.is_some() || self.window_capture_sub.is_some()
+    }
+
     /// Queue length-prefixed binary frames for a capture subscriber and write
     /// as much as the socket takes now. A full frame can run to megabytes, far
     /// over the socket buffer, so unlike the newline-JSON paths a `WouldBlock`
@@ -131,7 +205,10 @@ impl Client {
         while self.out_pos < self.out_buf.len() {
             match self.stream.write(&self.out_buf[self.out_pos..]) {
                 Ok(0) => return Err(ErrorKind::WriteZero.into()),
-                Ok(n) => self.out_pos += n,
+                Ok(n) => {
+                    self.out_pos += n;
+                    self.last_progress = Instant::now();
+                }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -266,10 +343,17 @@ impl Server {
             })
             .map_err(|e| anyhow::anyhow!("insert ipc listener source: {e}"))?;
 
+        let (wake, wake_source) = make_ping().context("create the ipc flush ping")?;
+        loop_handle
+            .insert_source(wake_source, |_, _, state| state.arm_ipc_flushers())
+            .map_err(|e| anyhow::anyhow!("insert ipc flush ping: {e}"))?;
+
         Ok(Self {
             socket_path,
             listener_token,
             clients: HashMap::new(),
+            lingering: HashMap::new(),
+            wake,
             next_id: 0,
         })
     }
@@ -360,6 +444,9 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
         window_capture_sub: None,
         out_buf: Vec::new(),
         out_pos: 0,
+        wake: Some(server.wake.clone()),
+        wants_flush: false,
+        last_progress: Instant::now(),
     }));
 
     let source_client = Rc::clone(&client);
@@ -378,7 +465,14 @@ fn accept_client(state: &mut ShoestringWm, stream: UnixStream) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("insert ipc client source: {e}"))?;
 
-    server.clients.insert(id, ClientEntry { client, token });
+    server.clients.insert(
+        id,
+        ClientEntry {
+            client,
+            token: Some(token),
+            flush: None,
+        },
+    );
     tracing::debug!(?id, "ipc client connected");
     Ok(())
 }
@@ -1764,8 +1858,7 @@ pub(crate) fn session_locked_error(request: &str) -> Response {
 pub(crate) fn write_response(client: &Rc<RefCell<Client>>, resp: &Response) -> std::io::Result<()> {
     let line = serde_json::to_string(resp).expect("Response must serialize");
     let mut c = client.borrow_mut();
-    c.stream.write_all(line.as_bytes())?;
-    c.stream.write_all(b"\n")?;
+    c.send_line(&line)?;
     c.spent = true;
     Ok(())
 }
@@ -2193,11 +2286,7 @@ impl ShoestringWm {
             }
         };
         let mut c = entry.client.borrow_mut();
-        if let Err(e) = c
-            .stream
-            .write_all(line.as_bytes())
-            .and_then(|_| c.stream.write_all(b"\n"))
-        {
+        if let Err(e) = c.send_line(&line) {
             tracing::debug!(?id, error = %e, "targeted ipc push failed");
         }
     }
@@ -2221,11 +2310,7 @@ impl ShoestringWm {
             if !c.subscriber {
                 continue;
             }
-            if let Err(e) = c
-                .stream
-                .write_all(line.as_bytes())
-                .and_then(|_| c.stream.write_all(b"\n"))
-            {
+            if let Err(e) = c.send_subscribed(&line) {
                 tracing::debug!(?id, error = %e, "ipc event write failed; dropping subscriber");
                 to_drop.push(id);
             }
@@ -2702,11 +2787,7 @@ impl ShoestringWm {
                     continue;
                 }
             }
-            if let Err(e) = c
-                .stream
-                .write_all(line.as_bytes())
-                .and_then(|_| c.stream.write_all(b"\n"))
-            {
+            if let Err(e) = c.send_subscribed(&line) {
                 tracing::debug!(?id, error = %e, "metrics push failed; dropping subscriber");
                 to_drop.push(id);
             } else if let Some(sub) = c.metrics_sub.as_mut() {
@@ -2718,6 +2799,99 @@ impl ShoestringWm {
             self.drop_ipc_client(id);
         }
         self.metrics.record_subscribers_dropped(dropped);
+    }
+
+    /// Arm a write-ready source for each client whose queue a JSON write left
+    /// non-empty. Runs from the server's ping, which [`Client::send_line`]
+    /// fires.
+    fn arm_ipc_flushers(&mut self) {
+        let Some(server) = self.ipc.as_mut() else {
+            return;
+        };
+        for (&id, entry) in server.clients.iter_mut().chain(server.lingering.iter_mut()) {
+            if entry.flush.is_some() || !entry.client.borrow().wants_flush {
+                continue;
+            }
+            let fd = match entry.client.borrow().stream.try_clone() {
+                Ok(fd) => fd,
+                Err(e) => {
+                    tracing::debug!(?id, error = %e, "ipc flush source: clone failed");
+                    continue;
+                }
+            };
+            let source = Generic::new(fd, Interest::WRITE, Mode::Level);
+            match self
+                .loop_handle
+                .insert_source(source, move |_, _, state| Ok(state.flush_ipc_client(id)))
+            {
+                Ok(token) => entry.flush = Some(token),
+                Err(e) => tracing::debug!(?id, error = %e, "ipc flush source: insert failed"),
+            }
+        }
+    }
+
+    /// Drain `id`'s queue while its socket is writable. Once it is empty the
+    /// write-ready source goes, and a lingering client is closed.
+    fn flush_ipc_client(&mut self, id: ClientId) -> PostAction {
+        let Some(server) = self.ipc.as_mut() else {
+            return PostAction::Remove;
+        };
+        let (entry, lingering) = match server.clients.get_mut(&id) {
+            Some(entry) => (entry, false),
+            None => match server.lingering.get_mut(&id) {
+                Some(entry) => (entry, true),
+                None => return PostAction::Remove,
+            },
+        };
+        let result = entry.client.borrow_mut().flush_out();
+        match result {
+            Ok(false) => return PostAction::Continue,
+            Ok(true) => {
+                entry.flush = None;
+                entry.client.borrow_mut().wants_flush = false;
+                if lingering {
+                    server.lingering.remove(&id);
+                    tracing::debug!(?id, "ipc client's reply finished; closed");
+                }
+            }
+            Err(e) => {
+                entry.flush = None;
+                // Nothing more will get through, so don't linger on it.
+                {
+                    let mut c = entry.client.borrow_mut();
+                    c.out_buf.clear();
+                    c.out_pos = 0;
+                }
+                tracing::debug!(?id, error = %e, "ipc client write failed");
+                if lingering {
+                    server.lingering.remove(&id);
+                } else {
+                    self.drop_ipc_client(id);
+                }
+            }
+        }
+        PostAction::Remove
+    }
+
+    /// Close a lingering client that has read none of its reply for
+    /// [`LINGER_TIMEOUT`]; one still reading is checked again later.
+    fn check_ipc_linger(&mut self, id: ClientId) -> TimeoutAction {
+        let Some(server) = self.ipc.as_mut() else {
+            return TimeoutAction::Drop;
+        };
+        let Some(entry) = server.lingering.get(&id) else {
+            return TimeoutAction::Drop;
+        };
+        let idle = entry.client.borrow().last_progress.elapsed();
+        if idle < LINGER_TIMEOUT {
+            return TimeoutAction::ToDuration(LINGER_TIMEOUT - idle);
+        }
+        let entry = server.lingering.remove(&id).expect("checked above");
+        tracing::debug!(?id, "ipc client stopped reading its reply; closed");
+        if let Some(flush) = entry.flush {
+            self.loop_handle.remove(flush);
+        }
+        TimeoutAction::Drop
     }
 
     pub(crate) fn drop_ipc_client(&mut self, id: ClientId) {
@@ -2749,9 +2923,30 @@ impl ShoestringWm {
         });
 
         if let Some(server) = self.ipc.as_mut() {
-            if let Some(entry) = server.clients.remove(&id) {
-                self.loop_handle.remove(entry.token);
-                tracing::debug!(?id, "ipc client dropped");
+            if let Some(mut entry) = server.clients.remove(&id) {
+                if let Some(token) = entry.token.take() {
+                    self.loop_handle.remove(token);
+                }
+                let linger = {
+                    let c = entry.client.borrow();
+                    c.backlog_len() > 0 && !c.is_capture()
+                };
+                if linger {
+                    // The last reply is still going out: keep the socket
+                    // until it has, or until the client stops reading.
+                    tracing::debug!(?id, "ipc client dropped; finishing its reply");
+                    server.lingering.insert(id, entry);
+                    self.loop_handle
+                        .insert_source(Timer::from_duration(LINGER_TIMEOUT), move |_, _, state| {
+                            state.check_ipc_linger(id)
+                        })
+                        .ok();
+                } else {
+                    if let Some(flush) = entry.flush {
+                        self.loop_handle.remove(flush);
+                    }
+                    tracing::debug!(?id, "ipc client dropped");
+                }
             }
         }
 
@@ -2796,7 +2991,60 @@ mod tests {
             window_capture_sub: None,
             out_buf: Vec::new(),
             out_pos: 0,
+            wake: None,
+            wants_flush: false,
+            last_progress: Instant::now(),
         }
+    }
+
+    /// A JSON reply far bigger than the socket buffer is queued, not cut off:
+    /// it drains across several flushes, whole and newline-terminated, and a
+    /// line sent after it waits its turn.
+    #[test]
+    fn oversized_json_reply_drains_whole_and_in_order() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut client = client_on(ours);
+        let big = Response::Clipboard {
+            mime: Some("text/plain".into()),
+            data: vec![b'A'; 2 * 1024 * 1024],
+        };
+        let line = serde_json::to_string(&big).unwrap();
+        client.send_line(&line).unwrap();
+        assert!(client.has_backlog(), "a 6 MiB line should not fit at once");
+        assert!(client.wants_flush);
+        client.send_line(r#"{"type":"ok"}"#).unwrap();
+
+        let reader = std::thread::spawn(move || {
+            let mut lines = std::io::BufRead::lines(std::io::BufReader::new(theirs));
+            let first = lines.next().unwrap().unwrap();
+            let second = lines.next().unwrap().unwrap();
+            (first, second)
+        });
+        while !client.flush_out().unwrap() {
+            std::thread::yield_now();
+        }
+        let (first, second) = reader.join().unwrap();
+        assert_eq!(first, line, "the reply arrived changed");
+        assert_eq!(second, r#"{"type":"ok"}"#);
+    }
+
+    /// A subscriber that stops reading is cut loose once it is
+    /// [`SUBSCRIBER_BACKLOG`] behind, and what it hadn't read is discarded.
+    #[test]
+    fn stalled_subscriber_is_dropped_past_its_backlog() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let mut client = client_on(ours);
+        let line = "x".repeat(64 * 1024);
+        let mut sent = 0;
+        let err = loop {
+            match client.send_subscribed(&line) {
+                Ok(()) => sent += 1,
+                Err(e) => break e,
+            }
+            assert!(sent < 1000, "never hit the backlog cap");
+        };
+        assert_eq!(err.kind(), ErrorKind::WouldBlock);
+        assert!(!client.has_backlog());
     }
 
     /// A frame far bigger than the socket buffer is queued, not fatal: it

@@ -20,6 +20,13 @@ the clipboard bridge's 64 MiB maximum, since JSON writes each byte as a number.
 A connection that sends more without a ``\n`` gets an ``error`` reply starting
 ``request too large`` and is closed.
 
+A reply can be as large: a ``clipboard`` reply carrying 64 MiB is about 200 MiB
+of JSON. The WM never blocks on a client. It queues what the socket won't take
+yet and keeps sending as the client reads, so a client always gets the whole
+line, and closes the connection only once it has. A client that reads none of
+its reply for 30 seconds is closed with the reply unfinished. A streaming
+subscriber that falls more than 1 MiB behind is dropped.
+
 Socket location
 ---------------
 
@@ -1074,8 +1081,9 @@ The server replies with a single JSON object tagged by ``type``:
        * - ``ipc.requests_total``
          - Well-formed IPC requests parsed and handled.
        * - ``ipc.subscribers_dropped``
-         - Stream subscribers hung up on after a failed write
-           (backpressure), as opposed to a clean disconnect.
+         - Stream subscribers hung up on after a failed write or after
+           falling more than 1 MiB behind (backpressure), as opposed to a
+           clean disconnect.
 
     The WM warns in its log when ``process.open_fds`` crosses
     ``[diagnostics].fd_warn_fraction`` of ``process.fd_limit`` or climbs

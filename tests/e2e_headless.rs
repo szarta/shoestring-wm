@@ -1548,3 +1548,35 @@ fn e2e_run_command_leaves_unrelated_background_alone() {
         "a background process that didn't hold the output was killed"
     );
 }
+
+/// A reply far bigger than the socket buffer arrives whole to a client that
+/// reads it slowly, and the WM keeps answering others meanwhile. A clipboard
+/// of a few hundred KiB used to come back cut off partway.
+#[test]
+#[ignore]
+fn e2e_large_reply_reaches_a_slow_reader_whole() {
+    use std::io::{BufRead, BufReader, Read};
+
+    let wm = Wm::start();
+    let data: Vec<u8> = (0..1024 * 1024).map(|i| b'a' + (i % 26) as u8).collect();
+    wm.ipc_ok(json!({"type": "set_clipboard", "mime": "text/plain", "data": data}));
+
+    let mut get = wm.connect_ipc();
+    writeln!(get, "{}", json!({"type": "get_clipboard"})).expect("write get_clipboard");
+    // Read a little at a time, with pauses, so the reply backs up in the WM.
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(100));
+        let n = get.read(&mut chunk).expect("read part of the reply");
+        reply.extend_from_slice(&chunk[..n]);
+        assert_responsive(&wm, "while a large reply backs up");
+    }
+    BufReader::new(get)
+        .read_until(b'\n', &mut reply)
+        .expect("read the rest of the reply");
+    let reply: serde_json::Value = serde_json::from_slice(&reply).expect("reply is whole JSON");
+    assert_eq!(reply["type"], "clipboard", "{reply}");
+    let got: Vec<u8> = serde_json::from_value(reply["data"].clone()).expect("clipboard bytes");
+    assert!(got == data, "the clipboard came back changed");
+}
