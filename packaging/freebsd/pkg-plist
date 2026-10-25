@@ -27,6 +27,7 @@ share/man/man1/shoestring-lock.1.gz
 share/man/man1/shoestring-menu.1.gz
 share/man/man1/shoestring-notify.1.gz
 share/man/man1/shoestring-region.1.gz
+share/man/man1/shoestring-remote-server.1.gz
 share/man/man1/shoestring-screenshot.1.gz
 share/man/man1/shoestring-tasks.1.gz
 share/man/man1/shoestring-wm.1.gz

@@ -1128,4 +1128,53 @@ mod tests {
         assert_eq!(k, "x");
         assert_eq!(m, vec!["ctrl", "alt"]);
     }
+
+    /// Every subcommand and long option has an entry in the man page, so a
+    /// new one can't ship undocumented there.
+    #[test]
+    fn man_page_covers_every_subcommand_and_option() {
+        use clap::CommandFactory;
+        let page = include_str!("../../../docs/man/shoestring-ctl.1.rst");
+        // Definition terms: unindented lines that start in bold.
+        let terms: Vec<&str> = page.lines().filter(|l| l.starts_with("**")).collect();
+        let mut missing = Vec::new();
+        for cmd in super::Cli::command().get_subcommands() {
+            let name = cmd.get_name();
+            if name == "help" {
+                continue;
+            }
+            let head = format!("**{name}");
+            let entries: Vec<&str> = terms
+                .iter()
+                .copied()
+                .filter(|t| {
+                    t.strip_prefix(&head)
+                        .is_some_and(|r| r.starts_with(['*', ' ']))
+                })
+                .collect();
+            if entries.is_empty() {
+                missing.push(name.to_string());
+                continue;
+            }
+            let has = |needle: &str| entries.iter().any(|t| t.contains(needle));
+            // `**remote on**`, `**media mic-mute on**`, or `\| **off**`.
+            for sub in cmd.get_subcommands().map(|c| c.get_name()) {
+                if sub != "help" && !has(&format!("{head} {sub}")) && !has(&format!("**{sub}**")) {
+                    missing.push(format!("{name} {sub}"));
+                }
+            }
+            let opts = cmd
+                .get_arguments()
+                .chain(cmd.get_subcommands().flat_map(|c| c.get_arguments()));
+            for long in opts.filter_map(|a| a.get_long()).filter(|l| *l != "help") {
+                if !has(&format!("**--{long}**")) {
+                    missing.push(format!("{name} --{long}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "not in shoestring-ctl.1.rst: {missing:?}"
+        );
+    }
 }

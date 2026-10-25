@@ -60,6 +60,7 @@ This is the user guide. For source-level architecture notes see
    man/shoestring-notify.1
    man/shoestring-region.1
    man/shoestring-screenshot.1
+   man/shoestring-remote-server.1
 
 Indices
 -------

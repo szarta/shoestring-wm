@@ -107,5 +107,12 @@ man_pages = [
         [author],
         1,
     ),
+    (
+        "man/shoestring-remote-server.1",
+        "shoestring-remote-server",
+        "remote-desktop server for shoestring-wm",
+        [author],
+        1,
+    ),
 ]
 man_show_urls = True

@@ -234,6 +234,7 @@ assets = [
     ["docs/_build/man/shoestring-notify.1",     "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-region.1",     "usr/share/man/man1/", "644"],
     ["docs/_build/man/shoestring-screenshot.1", "usr/share/man/man1/", "644"],
+    ["docs/_build/man/shoestring-remote-server.1", "usr/share/man/man1/", "644"],
     ["README.md",                            "usr/share/doc/shoestring-wm/README.md", "644"],
     ["LICENSE",                              "usr/share/doc/shoestring-wm/", "644"],
     # Third-party license notices and CycloneDX SBOMs, from
@@ -298,6 +299,7 @@ assets = [
     { source = "docs/_build/man/shoestring-notify.1",     dest = "/usr/share/man/man1/shoestring-notify.1",     mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-region.1",     dest = "/usr/share/man/man1/shoestring-region.1",     mode = "0644", doc = true },
     { source = "docs/_build/man/shoestring-screenshot.1", dest = "/usr/share/man/man1/shoestring-screenshot.1", mode = "0644", doc = true },
+    { source = "docs/_build/man/shoestring-remote-server.1", dest = "/usr/share/man/man1/shoestring-remote-server.1", mode = "0644", doc = true },
     { source = "README.md",                            dest = "/usr/share/doc/shoestring-wm/README.md", mode = "0644", doc = true },
     { source = "LICENSE",                              dest = "/usr/share/licenses/shoestring-wm/LICENSE", mode = "0644", doc = true },
     # Third-party license notices and CycloneDX SBOMs, from
