@@ -127,8 +127,9 @@ the `headless` backend on a box with no display, and
 injects the viewer's input back through the WM. The viewer is
 `shoestring-remote-client`, a Wayland and IPC client of the shoestring-wm on
 the machine you sit at. The two speak the `shoestring-remote` wire protocol
-over a Unix socket that only an ssh login can reach. Serving a box with a
-real display (mirror mode) is planned. See `docs/remote.rst` for the
+over a Unix socket that accepts only the session's own user; from another
+machine, the intended way in is an ssh forward of that socket. Serving a box
+with a real display (mirror mode) is planned. See `docs/remote.rst` for the
 protocol and consent model.
 
 ### Crate dependency graph
