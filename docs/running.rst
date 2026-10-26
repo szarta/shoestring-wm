@@ -156,6 +156,15 @@ compares ``idle_suspend`` off and on, and ``SHOESTRING_E2E_BIN_DIR`` measures
 another build's binaries, such as a release tag's. Numbers depend on the
 machine and the renderer, so compare runs on the same host.
 
+These measurements back the project's budgets for idle CPU, memory and
+start time: at most 3% of a core idle (0.5% and 2 wakeups a second with
+``idle_suspend``), at most 64 MiB of RSS on pixman and 128 MiB on the GPU,
+and at most 100 ms from start to the first IPC reply. The budgets, with
+those for binary size, dependencies and system packages, are in the
+architecture guide (``docs/architecture.md``, *Lightweight budgets*). A change
+that crosses one is fixed, moved behind a Cargo feature, or raises the
+budget there with the reason.
+
 Command-line flags
 ------------------
 

@@ -26,7 +26,8 @@ erodes one of these should be treated as a regression, not a feature:
 
 1. **Lightweight & low-dependency.** Small binary, small dependency tree,
    no async runtime. New dependencies are resisted; the few exceptions are
-   deliberate and named (§2).
+   deliberate and named (§2). "Lightweight" is held to measured budgets
+   (§2, *Lightweight budgets*).
 2. **Floating, Openbox-style ergonomics.** Floating windows with
    manual half-tile/maximize snaps and Super+drag move/resize. No tiling
    tree, no scrolling layout, no mandatory decorations.
@@ -72,7 +73,7 @@ flowchart LR
     end
 
     subgraph wm["shoestring-wm  ·  the compositor"]
-      backend["Backend<br/>winit (dev) / udev-drm (native)"]
+      backend["Backend<br/>winit (nested dev) · udev-drm (native session)<br/>headless (virtual output: serve mode, CI)"]
       state["ShoestringWm state<br/>space · workspaces · outputs · focus"]
       wlsock(["Wayland socket"])
       ipcsock(["IPC socket<br/>newline-JSON"])
@@ -94,14 +95,23 @@ flowchart LR
 
     subgraph ipcclients["IPC clients (link shoestring-ipc)"]
       ctl["shoestring-ctl"]
-      baripc["bar · kill · menu"]
+      baripc["bar · kill · menu · tasks"]
       mediad["shoestring-mediad"]
+      rserver["shoestring-remote-server<br/>register · capture_stream · inject input"]
     end
     ipcsock --- ctl
     ipcsock --- baripc
     ipcsock --- mediad
+    ipcsock --- rserver
 
     portal["xdg-desktop-portal-shoestring"] -->|"zwlr_screencopy_v1"| wlsock
+
+    subgraph viewer["Viewing machine (also runs shoestring-wm)"]
+      rclient["shoestring-remote-client<br/>fullscreen viewer surface"]
+      vwm["local shoestring-wm<br/>Super+J/K machine axis"]
+      rclient -->|"Wayland + IPC<br/>register_remote_client"| vwm
+    end
+    rserver <-->|"private Unix socket, forwarded over ssh<br/>damage tiles (zlib) out · input in"| rclient
 ```
 
 Note that a few helpers use **both** channels: `shoestring-bar` and
@@ -109,6 +119,17 @@ Note that a few helpers use **both** channels: `shoestring-bar` and
 lists, workspace/focus events). `shoestring-notify` and the portal also
 serve D-Bus interfaces; `shoestring-mediad` and the portal talk to
 PipeWire.
+
+The remote path is drawn for **serve mode**, its headline case: the WM runs
+the `headless` backend on a box with no display, and
+`shoestring-remote-server` (an ordinary IPC client, started from
+`autostart`) streams the virtual output's damaged tiles to a viewer and
+injects the viewer's input back through the WM. The viewer is
+`shoestring-remote-client`, a Wayland and IPC client of the shoestring-wm on
+the machine you sit at. The two speak the `shoestring-remote` wire protocol
+over a Unix socket that only an ssh login can reach. Serving a box with a
+real display (mirror mode) is planned. See `docs/remote.rst` for the
+protocol and consent model.
 
 ### Crate dependency graph
 
@@ -128,6 +149,7 @@ flowchart TD
     ipc --> kill["shoestring-kill"]
     ipc --> menu["shoestring-menu"]
     ipc --> mediad["shoestring-mediad"]
+    ipc --> tasks["shoestring-tasks"]
     config --> portal["xdg-desktop-portal-shoestring"]
 
     font["shoestring-font<br/><i>font discovery · fontdue</i>"]
@@ -136,13 +158,23 @@ flowchart TD
     font --> menu
     font --> textonly["confirm · lock · notify"]
 
-    standalone["region · screenshot<br/><i>wayland-client only, no shared crate</i>"]
+    remote["shoestring-remote<br/><i>remote wire protocol + tile codec · flate2</i>"]
+    remote --> wm
+    remote --> rserver["shoestring-remote-server"]
+    remote --> rclient["shoestring-remote-client"]
+    ipc --> rserver
+    ipc --> rclient
+
+    standalone["region · screenshot · clipboard<br/><i>wayland-client only, no shared crate</i>"]
 ```
 
 (Arrows read *"is used by"*. `shoestring-font` is a third, smaller anchor:
 the font search every binary that draws text shares, so a font found by one
-is found by all. `wlcs-shoestring`, the WLCS test plugin, is
-excluded from the workspace and depends on `shoestring-wm` itself.)
+is found by all. `shoestring-remote` is the fourth: the remote-desktop
+handshake, messages and tile/zlib codec, shared by the WM (which encodes
+`capture_stream` tiles) and both remote binaries. `wlcs-shoestring`, the WLCS
+test plugin, is excluded from the workspace and depends on `shoestring-wm`
+itself.)
 
 ### Internal event & render loop
 
@@ -151,15 +183,21 @@ mutable state:
 
 ```mermaid
 flowchart LR
-    inev["libinput / winit<br/>input event"] --> filter{"keybind<br/>match?"}
+    inev["libinput / winit / IPC-injected<br/>input event"] --> filter{"keybind<br/>match?"}
     filter -->|yes| action["dispatch_action"]
     filter -->|no| forward["forward to<br/>focused client"]
     ipcreq["IPC request"] --> action
     action --> state["mutate state<br/>layout · workspace · focus"]
+    tick["vblank · winit redraw ·<br/>headless timer"] --> render
     state --> render["render_output<br/>(damage-tracked)"]
     render --> present["submit + send_frame"]
+    render --> tiles["damaged tiles to<br/>capture_stream subscribers"]
     state --> events["broadcast<br/>IPC events"]
 ```
+
+On the headless backend nothing is scanned out: "submit" only finishes the
+frame, and the damaged tiles go to any `capture_stream` subscriber (the
+remote server). An idle frame has no damage, so it sends nothing.
 
 ---
 
@@ -236,6 +274,33 @@ fontconfig/freetype or a browser-sized graphics stack. `resvg` is the
 heaviest single dependency; it is linked unconditionally but only exercised
 when a wallpaper image is configured.
 
+### Lightweight budgets
+
+Principle 1 is measured against the **compositor alone**, the
+`cargo build --release -p shoestring-wm` install (`docs/install.rst`,
+*Minimal install*). The companions are optional and each is judged on its
+own. The container image (about 330 MB) is a whole desktop with Mesa,
+XWayland and apps, so it is not a measure of the WM.
+
+| Measure | Now (v0.10.0) | Budget | How to check |
+|---|---|---|---|
+| `shoestring-wm` binary, stripped, release, x86_64 | 17.3 MiB | ≤ 20 MiB | `strip` + `ls -l`; table in `docs/install.rst` |
+| Crates in the WM's runtime dependency tree | 198 | ≤ 220; any new *direct* dependency is named in this section | `cargo tree -p shoestring-wm -e normal --prefix none` (unique names) |
+| Async runtime | none | none | the same `cargo tree` has no tokio, async-std or smol |
+| System libraries to build and run the WM | wayland, xkbcommon, DRM, GBM, udev, libinput, libseat, libdisplay-info, pixman | no additions without a recorded decision; PAM, PipeWire and libclang stay companion-only | `docs/install.rst`, *Minimal install* |
+| Idle CPU, headless, pixman, one window | 1.6 % of a core, 60 wakeups/s; 0.1 %, 1 wakeup/s with `idle_suspend` | ≤ 3 %; ≤ 0.5 % and ≤ 2 wakeups/s with `idle_suspend` | `scripts/measure-headless.sh` |
+| WM RSS, headless, pixman | 26-56 MiB | ≤ 64 MiB | `scripts/measure-headless.sh` |
+| WM RSS, headless, GPU (gles) | 91-118 MiB | ≤ 128 MiB | `scripts/measure-headless.sh` |
+| Start to first IPC reply, headless, no autostart | ~13 ms pixman, ~51 ms gles | ≤ 100 ms | launch with `--backend headless`, poll `shoestring-ctl workspaces` |
+
+The "now" figures come from the laptop described in `docs/running.rst`
+(*Resource use*): the binary size at commit `a427fb7`, the dependency count
+and start time at `984b43c`, the rest at v0.9.0. Budgets leave some
+headroom over today's numbers, so ordinary growth fits, but a feature that
+crosses one is a regression under principle 1. Fix it, put it behind a
+Cargo feature, or raise the budget here in the same change and say why.
+Compare measurements on the same host and renderer only.
+
 ---
 
 ## 3. Crate Layout
@@ -269,7 +334,10 @@ shoestring-wm/                  (workspace root + the WM binary)
     ├── shoestring-bar/             (status bar; Wayland + IPC)
     ├── shoestring-menu/            (launcher)
     ├── shoestring-{confirm,kill,region,screenshot,lock,notify}/  (helpers)
+    ├── shoestring-{clipboard,tasks}/   (clipboard tool, console window manager)
     ├── shoestring-mediad/          (PipeWire media-privacy monitor)
+    ├── shoestring-remote/          (remote wire protocol + tile codec)
+    ├── shoestring-remote-{server,client}/  (remote desktop: serve, view)
     ├── xdg-desktop-portal-shoestring/  (ScreenCast + Screenshot backend)
     └── wlcs-shoestring/            (WLCS test plugin; excluded from workspace)
 ```
@@ -476,9 +544,12 @@ Per-output render pass:
    bottom-most element, the cursor, and optionally borders / the diagnostics
    overlay;
 2. damage-tracked `render_output` (smithay handles damage and z-order);
-3. submit (winit GL swap, or DRM page-flip);
+3. submit (winit GL swap, DRM page-flip, or on headless no scanout, with the
+   damaged tiles pushed to `capture_stream` subscribers);
 4. `send_frame` to the rendered surfaces;
-5. schedule the next redraw (winit `request_redraw`, or the DRM vblank).
+5. schedule the next redraw (winit `request_redraw`, the DRM vblank, or the
+   headless ~60 Hz timer, which `[headless] idle_suspend` parks while
+   nothing changes).
 
 Wayland clients are **flushed eagerly** after every dispatch, not only at
 render time, so headless/SSH dev sessions and not-yet-visible nested windows
