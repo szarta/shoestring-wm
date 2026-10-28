@@ -28,19 +28,37 @@ use smithay::{
 /// but spec-compliant panels (and the WLCS layer-shell suite, which blocks on
 /// `wl_surface.frame` before checking surface position) hang. Called once per
 /// rendered frame by every backend.
+///
+/// A surface is paced by its primary scanout output only (recorded by
+/// [`update_primary_scanout_output`]). Every output runs its own vblank loop
+/// and the loops are not in phase, so answering every window from every
+/// output handed a client callbacks from two clocks at once, at twice the
+/// refresh rate and unevenly spaced. Surfaces with no primary output (fully
+/// occluded, off screen, or not yet drawn) still get one callback per
+/// [`FRAME_THROTTLE`], so a client blocked on one keeps making progress.
 pub fn send_frames(space: &Space<Window>, output: &Output, time: Duration) {
     for window in space.elements() {
-        window.send_frame(output, time, Some(Duration::ZERO), |_, _| {
-            Some(output.clone())
-        });
+        window.send_frame(
+            output,
+            time,
+            Some(FRAME_THROTTLE),
+            surface_primary_scanout_output,
+        );
     }
     let map = layer_map_for_output(output);
     for layer in map.layers() {
-        layer.send_frame(output, time, Some(Duration::ZERO), |_, _| {
-            Some(output.clone())
-        });
+        layer.send_frame(
+            output,
+            time,
+            Some(FRAME_THROTTLE),
+            surface_primary_scanout_output,
+        );
     }
 }
+
+/// How often a surface that isn't on screen anywhere still gets a frame
+/// callback.
+const FRAME_THROTTLE: Duration = Duration::from_secs(1);
 
 /// Record, for every surface that contributed to this frame, which output it
 /// primarily scanned out on. Must run before [`take_presentation_feedback`]
