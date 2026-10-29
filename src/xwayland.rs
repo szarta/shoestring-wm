@@ -773,6 +773,8 @@ pub fn init_xwayland_globals(dh: &DisplayHandle) -> XWaylandShellState {
 mod tests {
     use super::*;
 
+    // FreeBSD does not mount a procfs by default.
+    #[cfg(target_os = "linux")]
     #[test]
     fn proc_stat_reads_own_process() {
         let stat = proc_stat(std::process::id() as i32).expect("own /proc stat");
