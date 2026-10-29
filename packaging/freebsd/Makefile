@@ -1,6 +1,6 @@
 PORTNAME=	shoestring-wm
 DISTVERSIONPREFIX=	v
-DISTVERSION=	0.10.0
+DISTVERSION=	0.11.0
 CATEGORIES=	x11-wm wayland
 
 MAINTAINER=	barrendo@gmail.com

@@ -2480,7 +2480,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shoestring-bar"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2504,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-clipboard"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-config"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "regex",
  "serde",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-confirm"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-ctl"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-font"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "fontdue",
  "tracing",
@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-ipc"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-kill"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-lock"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-mediad"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-menu"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-notify"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "fontdue",
@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-region"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2665,14 +2665,14 @@ dependencies = [
 
 [[package]]
 name = "shoestring-remote"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
 ]
 
 [[package]]
 name = "shoestring-remote-client"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-remote-server"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2704,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-screenshot"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-tasks"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "ratatui",
@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "shoestring-wm"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bitflags 2.13.0",
@@ -4196,7 +4196,7 @@ checksum = "bec9e4a500ca8864c5b47b8b482a73d62e4237670e5b5f1d6b9e3cae50f28f2b"
 
 [[package]]
 name = "xdg-desktop-portal-shoestring"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "drm-fourcc",
