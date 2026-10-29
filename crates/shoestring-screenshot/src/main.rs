@@ -9,6 +9,16 @@
 //! - `--output NAME` picks by `wl_output.name` (e.g. `eDP-1`, `winit`).
 //! - Otherwise the first output the registry advertises is used.
 //!
+//! `--ocr` turns the capture into text instead of a file: the pixels are
+//! converted to grayscale and upscaled (tiny on-screen fonts OCR poorly at
+//! native size), written to a temp PNG, and run through `tesseract`, whose
+//! recognized text is printed to stdout. Pair it with `--region` to grab a
+//! coworker's message or a terminal snippet as text, or drive it over IPC
+//! (`run_command -- shoestring-screenshot --output … --region-rect … --ocr`)
+//! to read a widget's text without a vision round-trip. No build dependency —
+//! `tesseract` is spawned at runtime (override the binary with
+//! `$SHOESTRING_TESSERACT_BIN`), so OCR simply errors if it isn't installed.
+//!
 //! The protocol is wlr-screencopy v3; we only use the wl_shm path (no
 //! linux-dmabuf), so this works wherever the WM advertises the manager.
 
@@ -90,6 +100,26 @@ struct Cli {
     /// nothing is printed to stdout.
     #[arg(short = 'c', long)]
     clipboard: bool,
+
+    /// OCR the capture and print the recognized text to stdout instead of
+    /// saving a PNG. Runs `tesseract` (override with
+    /// `$SHOESTRING_TESSERACT_BIN`) on a grayscale, upscaled copy of the
+    /// capture. `--file`/`--clipboard` still save/copy the original image if
+    /// given (the path is logged to stderr, keeping stdout the text alone).
+    #[arg(long)]
+    ocr: bool,
+
+    /// Integer factor to upscale the capture by before OCR. Small on-screen
+    /// fonts recognize far better enlarged; the default suits a ~10px UI font.
+    /// Only meaningful with `--ocr`.
+    #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=8))]
+    ocr_scale: u32,
+
+    /// Tesseract page-segmentation mode (`--psm`) for `--ocr`. The default, 7,
+    /// treats the image as a single text line — right for a status bar or a
+    /// one-line label. Use 6 for a block of text, 3 for a full page.
+    #[arg(long, value_name = "MODE", default_value_t = 7, value_parser = clap::value_parser!(u32).range(0..=13))]
+    ocr_psm: u32,
 }
 
 /// One rectangle on a named output, in that output's logical coords.
@@ -101,13 +131,25 @@ struct Region {
     h: i32,
 }
 
+/// What `run` produced for stdout: a saved file's path, OCR text, or nothing
+/// (a clipboard-only capture).
+enum RunOutput {
+    Nothing,
+    Path(PathBuf),
+    Text(String),
+}
+
 fn main() -> ExitCode {
     match run() {
-        Ok(Some(path)) => {
+        Ok(RunOutput::Path(path)) => {
             println!("{}", path.display());
             ExitCode::SUCCESS
         }
-        Ok(None) => ExitCode::SUCCESS,
+        Ok(RunOutput::Text(text)) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Ok(RunOutput::Nothing) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("shoestring-screenshot: {e:#}");
             ExitCode::FAILURE
@@ -115,7 +157,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<Option<PathBuf>> {
+fn run() -> Result<RunOutput> {
     let cli = Cli::parse();
 
     // Region picker runs *before* we touch wayland. The picker has its own
@@ -243,9 +285,10 @@ fn run() -> Result<Option<PathBuf>> {
     frame.destroy();
     buffer.destroy();
 
-    // Map the buffer and encode to PNG bytes.
+    // Map the buffer and unpack it to tight RGBA, which both PNG encoding
+    // and OCR preprocessing build on.
     let mmap = unsafe { MmapMut::map_mut(&tmp).context("mmap shm pool")? };
-    let png_bytes = encode_png(
+    let rgba = to_rgba(
         &mmap,
         width,
         height,
@@ -255,9 +298,25 @@ fn run() -> Result<Option<PathBuf>> {
     )?;
     drop(mmap);
     drop(tmp);
-    // queue keeps wayland resources alive — drop after PNG encode.
+    // queue keeps wayland resources alive — drop after we've copied pixels out.
     drop(queue);
 
+    // OCR takes over stdout: print the recognized text, not a path. A --file
+    // or --clipboard alongside it still saves/copies the original capture,
+    // but the path is logged to stderr so stdout stays the text alone.
+    if cli.ocr {
+        if let Some(path) = cli.file.as_deref() {
+            write_png_file(path, &encode_png(&rgba, width, height)?)?;
+            eprintln!("shoestring-screenshot: saved {}", path.display());
+        }
+        if cli.clipboard {
+            copy_to_clipboard(&encode_png(&rgba, width, height)?)?;
+        }
+        let text = ocr_region(&rgba, width, height, cli.ocr_scale, cli.ocr_psm)?;
+        return Ok(RunOutput::Text(text));
+    }
+
+    let png_bytes = encode_png(&rgba, width, height)?;
     let dest = match (cli.file, cli.clipboard) {
         (Some(p), true) => Destination::Both(p),
         (Some(p), false) => Destination::File(p),
@@ -268,16 +327,16 @@ fn run() -> Result<Option<PathBuf>> {
     match dest {
         Destination::File(path) => {
             write_png_file(&path, &png_bytes)?;
-            Ok(Some(path))
+            Ok(RunOutput::Path(path))
         }
         Destination::Clipboard => {
             copy_to_clipboard(&png_bytes)?;
-            Ok(None)
+            Ok(RunOutput::Nothing)
         }
         Destination::Both(path) => {
             write_png_file(&path, &png_bytes)?;
             copy_to_clipboard(&png_bytes)?;
-            Ok(Some(path))
+            Ok(RunOutput::Path(path))
         }
     }
 }
@@ -434,7 +493,11 @@ fn unix_to_civil(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 
 // ---------------- PNG encoding ----------------
 
-fn encode_png(
+/// Unpack the compositor's `wl_shm` buffer into tight, top-down RGBA
+/// (`width * height * 4`, no stride padding). The WM advertises Argb8888 —
+/// little-endian BGRA in memory — so channels are swapped per pixel, and a
+/// `YInvert` frame is flipped back upright here.
+fn to_rgba(
     src: &[u8],
     width: u32,
     height: u32,
@@ -442,8 +505,6 @@ fn encode_png(
     format: wl_shm::Format,
     y_invert: bool,
 ) -> Result<Vec<u8>> {
-    // The WM advertises Argb8888 — that's little-endian BGRA in memory.
-    // For PNG output we want RGBA. Swap channels per pixel.
     if !matches!(format, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888) {
         anyhow::bail!("unexpected buffer format {format:?}; only ARGB8888/XRGB8888 supported");
     }
@@ -473,16 +534,96 @@ fn encode_png(
             };
         }
     }
+    Ok(rgba)
+}
 
+/// Encode tight top-down RGBA (from [`to_rgba`]) as PNG bytes.
+fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut buf, width, height);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
         let mut writer = enc.write_header()?;
-        writer.write_image_data(&rgba)?;
+        writer.write_image_data(rgba)?;
     }
     Ok(buf)
+}
+
+// ---------------- OCR ----------------
+
+/// Convert tight RGBA to grayscale and upscale it `scale`× with
+/// nearest-neighbor, returning the enlarged 8-bit grayscale plane and its new
+/// dimensions. Nearest-neighbor (not interpolation) keeps the hard edges of a
+/// pixel/bitmap UI font crisp rather than blurring them, which reads better
+/// for OCR; `tesseract` does its own binarization, so no thresholding here.
+fn to_gray_upscaled(rgba: &[u8], width: u32, height: u32, scale: u32) -> (Vec<u8>, u32, u32) {
+    let sw = width * scale;
+    let sh = height * scale;
+    let mut gray = vec![0u8; (sw as usize) * (sh as usize)];
+    for y in 0..sh as usize {
+        let sy = (y as u32 / scale) as usize;
+        for x in 0..sw as usize {
+            let sx = (x as u32 / scale) as usize;
+            let i = (sy * width as usize + sx) * 4;
+            // Integer Rec. 601 luma: (77 R + 150 G + 29 B) / 256.
+            let lum =
+                (77 * rgba[i] as u32 + 150 * rgba[i + 1] as u32 + 29 * rgba[i + 2] as u32) >> 8;
+            gray[y * sw as usize + x] = lum as u8;
+        }
+    }
+    (gray, sw, sh)
+}
+
+/// Encode an 8-bit grayscale plane as PNG bytes.
+fn encode_gray_png(gray: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, width, height);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header()?;
+        writer.write_image_data(gray)?;
+    }
+    Ok(buf)
+}
+
+/// OCR the capture: grayscale + upscale, hand the PNG to `tesseract`, and
+/// return its recognized text (trailing whitespace trimmed). The tesseract
+/// binary is `$SHOESTRING_TESSERACT_BIN` or `tesseract` on `$PATH`; a missing
+/// binary or a non-zero exit is surfaced as an error.
+fn ocr_region(rgba: &[u8], width: u32, height: u32, scale: u32, psm: u32) -> Result<String> {
+    let (gray, gw, gh) = to_gray_upscaled(rgba, width, height, scale);
+    let png_bytes = encode_gray_png(&gray, gw, gh)?;
+
+    // Tesseract reads a real file more reliably across versions than stdin;
+    // the temp PNG is removed when `img` drops.
+    let mut img = tempfile::Builder::new()
+        .prefix("shoestring-ocr-")
+        .suffix(".png")
+        .tempfile()
+        .context("tempfile for OCR image")?;
+    img.write_all(&png_bytes).context("write OCR image")?;
+    img.flush().ok();
+
+    let bin = std::env::var_os("SHOESTRING_TESSERACT_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("tesseract"));
+    let out = std::process::Command::new(&bin)
+        .arg(img.path())
+        .arg("stdout")
+        .arg("--psm")
+        .arg(psm.to_string())
+        .output()
+        .with_context(|| format!("spawning OCR tool {bin:?} (is tesseract installed?)"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{bin:?} exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
 fn write_png_file(path: &std::path::Path, png_bytes: &[u8]) -> Result<()> {
@@ -755,5 +896,102 @@ mod tests {
     fn parse_region_line_rejects_truncated() {
         assert!(parse_region_line("eDP-1 0 0 10").is_err());
         assert!(parse_region_line("").is_err());
+    }
+
+    #[test]
+    fn gray_upscale_dimensions_and_scale_1_luma() {
+        // 2x1 RGBA: pure white then pure black.
+        let rgba = [255, 255, 255, 255, 0, 0, 0, 255];
+        let (gray, w, h) = to_gray_upscaled(&rgba, 2, 1, 1);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(gray, vec![255, 0]);
+    }
+
+    #[test]
+    fn gray_upscale_replicates_pixels_nearest_neighbor() {
+        // 2x1 white/black upscaled 3x -> 6x3, each source pixel a 3x3 block,
+        // every row identical (nearest-neighbor).
+        let rgba = [255, 255, 255, 255, 0, 0, 0, 255];
+        let (gray, w, h) = to_gray_upscaled(&rgba, 2, 1, 3);
+        assert_eq!((w, h), (6, 3));
+        let want_row = [255, 255, 255, 0, 0, 0];
+        for row in 0..3 {
+            assert_eq!(&gray[row * 6..row * 6 + 6], &want_row);
+        }
+    }
+
+    #[test]
+    fn gray_upscale_luma_is_rec601_weighted() {
+        // Pure green is brighter than pure red is brighter than pure blue.
+        let rgba = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255];
+        let (gray, _, _) = to_gray_upscaled(&rgba, 3, 1, 1);
+        let (r, g, b) = (gray[0], gray[1], gray[2]);
+        assert!(g > r && r > b, "expected green>red>blue, got {g} {r} {b}");
+    }
+
+    #[test]
+    fn to_rgba_swaps_channels_handles_stride_and_y_invert() {
+        // 1x2 ARGB8888 (BGRA in memory) with 4 bytes of row padding:
+        //   row 0 = red  (B=0,G=0,R=255,A=255)
+        //   row 1 = blue (B=255,G=0,R=0,A=255)
+        let stride = 8; // 1px*4 + 4 pad
+        let src = [
+            0, 0, 255, 255, 0xAA, 0xBB, 0xAA, 0xBB, // red + 4 padding
+            255, 0, 0, 255, 0xCC, 0xDD, 0xCC, 0xDD, // blue + 4 padding
+        ];
+        let rgba = to_rgba(&src, 1, 2, stride, wl_shm::Format::Argb8888, false).unwrap();
+        assert_eq!(
+            rgba,
+            vec![255, 0, 0, 255, 0, 0, 255, 255],
+            "upright: red,blue"
+        );
+
+        let flipped = to_rgba(&src, 1, 2, stride, wl_shm::Format::Argb8888, true).unwrap();
+        assert_eq!(
+            flipped,
+            vec![0, 0, 255, 255, 255, 0, 0, 255],
+            "y-invert: blue,red"
+        );
+
+        // Xrgb8888 forces alpha opaque regardless of the source byte.
+        let x = to_rgba(&[10, 20, 30, 0], 1, 1, 4, wl_shm::Format::Xrgb8888, false).unwrap();
+        assert_eq!(x, vec![30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn encode_gray_png_roundtrips_dimensions() {
+        let gray = vec![0u8; 4 * 2];
+        let bytes = encode_gray_png(&gray, 4, 2).unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!((info.width, info.height), (4, 2));
+        assert_eq!(info.color_type, png::ColorType::Grayscale);
+    }
+
+    /// Exercise the full `ocr_region` glue — grayscale/upscale, temp PNG,
+    /// spawn, stdout capture, trim — against a stub `tesseract` so it is
+    /// deterministic and needs no real OCR engine. Both env-var cases live in
+    /// one test because `set_var` is process-global; no other test reads it.
+    #[test]
+    fn ocr_region_runs_the_tool_and_returns_trimmed_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // A stub that echoes a fixed line regardless of the image, so the test
+        // validates plumbing, not recognition. Trailing newline checks trim.
+        let stub = dir.path().join("fake-tesseract");
+        std::fs::write(&stub, "#!/bin/sh\nprintf 'ID #68  X: 1445\\n'\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let rgba = [255u8, 255, 255, 255, 0, 0, 0, 255]; // 2x1
+        std::env::set_var("SHOESTRING_TESSERACT_BIN", &stub);
+        let text = ocr_region(&rgba, 2, 1, 4, 7).unwrap();
+        assert_eq!(text, "ID #68  X: 1445");
+
+        // A missing binary is a tidy error, not a panic.
+        std::env::set_var("SHOESTRING_TESSERACT_BIN", dir.path().join("nope"));
+        assert!(ocr_region(&rgba, 2, 1, 4, 7).is_err());
+        std::env::remove_var("SHOESTRING_TESSERACT_BIN");
     }
 }

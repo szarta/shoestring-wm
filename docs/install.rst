@@ -200,10 +200,11 @@ stops working without it:
      - Not started by default; add it to ``autostart``. Without a daemon,
        application notifications aren't shown.
    * - ``shoestring-screenshot``, ``shoestring-region``
-     - The ``Print`` key, the region picker it uses, and the IPC
-       ``remote_screenshot`` request.
-     - none
-     - ``Print`` does nothing beyond a logged warning.
+     - The ``Print`` key, the region picker it uses, the IPC
+       ``remote_screenshot`` request, and ``--ocr`` capture-to-text.
+     - tesseract (``--ocr`` only)
+     - ``Print`` does nothing beyond a logged warning; without
+       ``tesseract`` only ``--ocr`` fails, the rest is unaffected.
    * - ``xdg-desktop-portal-shoestring``
      - Screen sharing and portal screenshots for browsers, Zoom and OBS.
        Also needs the portal files under ``resources/`` (see
