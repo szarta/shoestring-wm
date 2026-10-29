@@ -670,13 +670,16 @@ impl XwmHandler for ShoestringWm {
     fn disconnected(&mut self, _xwm: XwmId) {
         self.xwm = None;
         self.xdisplay = None;
-        // No unmap arrives once the X server is gone.
-        let windows: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|w| w.x11_surface().is_some())
-            .cloned()
-            .collect();
+        // No unmap arrives once the X server is gone. Windows on other
+        // workspaces and minimized ones are not in the Space, so take the
+        // workspace list as well.
+        let mut windows: Vec<Window> = self.space.elements().cloned().collect();
+        for (window, _) in self.workspaces.windows_on_any() {
+            if !windows.contains(&window) {
+                windows.push(window);
+            }
+        }
+        windows.retain(|w| w.x11_surface().is_some());
         for window in &windows {
             self.forget_x11_window(window);
         }
