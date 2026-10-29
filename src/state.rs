@@ -564,6 +564,9 @@ pub struct ShoestringWm {
     /// X display number Xwayland advertised; used to set `$DISPLAY` for
     /// child processes. `None` mirrors `xwm`.
     pub xdisplay: Option<u32>,
+    /// The running Xwayland, for its watchdog and for killing it on exit.
+    /// `None` before the first spawn and while it is down.
+    pub xwayland: Option<crate::xwayland::XwaylandProcess>,
     /// Wayland-side state for the `xwayland_shell_v1` global Xwayland
     /// uses to publish its toplevels. Held for the global's lifetime.
     pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
@@ -982,6 +985,7 @@ impl ShoestringWm {
             kill_cursor: None,
             xwm: None,
             xdisplay: None,
+            xwayland: None,
             xwayland_shell_state,
             primary_selection_state,
             data_control_state,

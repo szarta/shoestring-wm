@@ -583,7 +583,8 @@ Each request is a JSON object with a ``type`` discriminator:
        stale ``…-wayland-N.sock`` / ``wayland-N`` / ``.lock`` lingers. The
        group signal fires only when the WM is its own group leader — nested
        backends make themselves one at startup, the live tty session does
-       not — so it can never reach the parent session. Reply is ``ok``, sent
+       not — so it can never reach the parent session. XWayland is stopped
+       explicitly on every exit, the live session included. Reply is ``ok``, sent
        just before the loop stops. **Gated** by the automation gate (so a
        stray socket client can't kill a desktop session).
    * - ``{"type": "power_off"}`` / ``{"type": "reboot"}`` / ``{"type": "suspend"}``

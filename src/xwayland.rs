@@ -13,6 +13,14 @@
 //!        retroactive `$DISPLAY` — they need to be re-launched.
 //!     3. Upload the WM's xcursor sprite to the X server so X11 apps see
 //!        the user's themed cursor on first hover.
+//! - A watchdog polls Xwayland's Wayland connection. If that connection
+//!   dies while the X server lives on, X clients still connect and map
+//!   windows that can never be shown, so the watchdog kills Xwayland.
+//! - When the X11 WM disconnects, its windows are dropped and Xwayland is
+//!   restarted, unless it died soon after its last start.
+//! - On WM exit, [`ShoestringWm::stop_xwayland`] kills Xwayland. One whose
+//!   Wayland connection had already died never notices us exit, and as a
+//!   leftover it holds its X display, which the login greeter needs.
 //!
 //! ## Window mapping
 //!
@@ -21,12 +29,24 @@
 //! polymorphically via [`smithay::desktop::Window`]; the few places we
 //! reach into `window.toplevel()` are guarded by [`crate::window_ext`].
 
-use std::{os::unix::io::OwnedFd, process::Stdio};
+use std::{
+    os::unix::io::OwnedFd,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     desktop::Window,
     input::pointer::Focus,
-    reexports::wayland_server::{protocol::wl_surface::WlSurface, DisplayHandle},
+    reexports::{
+        calloop::{
+            timer::{TimeoutAction, Timer},
+            RegistrationToken,
+        },
+        wayland_server::{
+            backend::ClientId, protocol::wl_surface::WlSurface, Client, DisplayHandle,
+        },
+    },
     utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER},
     wayland::{
         seat::WaylandFocus,
@@ -50,23 +70,62 @@ use smithay::{
     },
 };
 
+use crate::child_pipe::{self, PipeEvent};
 use crate::clipboard::SelectionOrigin;
 use crate::layout::LayoutState;
 
 use crate::state::ShoestringWm;
+
+/// How often the watchdog checks Xwayland's Wayland connection.
+const XWAYLAND_WATCHDOG_PERIOD: Duration = Duration::from_secs(2);
+/// How long Xwayland gets to exit on SIGTERM before SIGKILL.
+const XWAYLAND_KILL_GRACE: Duration = Duration::from_secs(2);
+/// An Xwayland that dies sooner than this after starting is not restarted,
+/// so one that cannot run doesn't respawn in a loop.
+const XWAYLAND_MIN_UPTIME: Duration = Duration::from_secs(30);
+
+/// The running Xwayland instance.
+#[derive(Debug)]
+pub struct XwaylandProcess {
+    /// Xwayland's Wayland client, checked by the watchdog.
+    client: Client,
+    /// The `XWayland` event source. It owns the X display's lock files and
+    /// listening sockets, so it must be removed before a restart can reuse
+    /// the display number.
+    source: RegistrationToken,
+    /// Process id, found at `Ready`. smithay keeps the `Child` private.
+    pid: Option<i32>,
+    started: Instant,
+}
 
 impl ShoestringWm {
     /// Spawn Xwayland as a subprocess. Returns silently on failure — the
     /// compositor still functions, just without X11 client support.
     /// Invoked once at startup after the wayland socket is listening.
     pub fn start_xwayland(&mut self) {
+        // Xwayland's stderr carries libwayland-client's own diagnostics,
+        // such as "Error sending request: Resource temporarily
+        // unavailable" when its connection to us dies. Pipe it into our
+        // log so a wedged Xwayland leaves a trace.
+        let stderr = match std::io::pipe() {
+            Ok((reader, writer)) => {
+                if let Err(e) = self.log_xwayland_stderr(reader) {
+                    tracing::warn!(error = %e, "xwayland: stderr not captured");
+                }
+                Stdio::from(writer)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "xwayland: stderr pipe failed");
+                Stdio::null()
+            }
+        };
         let (xwayland, client) = match XWayland::spawn(
             &self.display_handle,
             None,
             std::iter::empty::<(String, String)>(),
             true,
             Stdio::null(),
-            Stdio::null(),
+            stderr,
             |_| (),
         ) {
             Ok(v) => v,
@@ -75,6 +134,8 @@ impl ShoestringWm {
                 return;
             }
         };
+        let started = Instant::now();
+        let watched = client.clone();
 
         let display_handle = self.display_handle.clone();
         let ret = self
@@ -98,6 +159,12 @@ impl ShoestringWm {
                     };
                     state.xwm = Some(wm);
                     state.xdisplay = Some(display_number);
+                    if let Some(process) = state.xwayland.as_mut() {
+                        process.pid = find_xwayland_pid();
+                        if process.pid.is_none() {
+                            tracing::warn!("xwayland: pid not found; it cannot be killed");
+                        }
+                    }
                     let display_str = format!(":{}", display_number);
                     // Apps spawned by the WM (autostart, dispatch-action
                     // spawn, run_command, etc.) inherit our env; setting
@@ -119,8 +186,152 @@ impl ShoestringWm {
                     tracing::warn!("xwayland crashed on startup");
                 }
             });
+        let source = match ret {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::warn!(error = %e, "xwayland disabled: loop insert failed");
+                return;
+            }
+        };
+        self.xwayland = Some(XwaylandProcess {
+            client: watched.clone(),
+            source,
+            pid: None,
+            started,
+        });
+        self.watch_xwayland_connection(watched.id());
+    }
+
+    /// Log each line Xwayland writes to stderr. The write end of the pipe
+    /// goes to the child, so the source sees EOF when Xwayland exits.
+    fn log_xwayland_stderr(&self, reader: std::io::PipeReader) -> anyhow::Result<()> {
+        let mut pending = Vec::new();
+        child_pipe::register(
+            &self.loop_handle,
+            reader,
+            "xwayland stderr",
+            move |_, event| {
+                let chunk = match event {
+                    PipeEvent::Data(chunk) => chunk,
+                    PipeEvent::Closed => &b"\n"[..],
+                };
+                pending.extend_from_slice(chunk);
+                while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8_lossy(&pending[..end]);
+                    let line = line.trim_end();
+                    if !line.is_empty() {
+                        tracing::info!(target: "shoestring_wm::xwayland", "{line}");
+                    }
+                    pending.drain(..=end);
+                }
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Poll Xwayland's Wayland connection. When a send to us would block,
+    /// Xwayland's libwayland-client gives up on the connection, but the X
+    /// server keeps running: X clients connect and map windows that never
+    /// get a surface. Kill it then, so the X11 WM disconnects and
+    /// [`XwmHandler::disconnected`] restarts it.
+    fn watch_xwayland_connection(&mut self, id: ClientId) {
+        let timer = Timer::from_duration(XWAYLAND_WATCHDOG_PERIOD);
+        let ret = self.loop_handle.insert_source(timer, move |_, _, state| {
+            let Some(process) = state.xwayland.as_ref() else {
+                return TimeoutAction::Drop;
+            };
+            if process.client.id() != id {
+                // Restarted; the new instance has its own watchdog.
+                return TimeoutAction::Drop;
+            }
+            if state
+                .display_handle
+                .backend_handle()
+                .get_client_data(id.clone())
+                .is_ok()
+            {
+                return TimeoutAction::ToDuration(XWAYLAND_WATCHDOG_PERIOD);
+            }
+            tracing::warn!(pid = ?process.pid, "xwayland: lost its wayland connection; killing it");
+            if let Some(pid) = process.pid {
+                state.terminate_xwayland(pid);
+            }
+            TimeoutAction::Drop
+        });
         if let Err(e) = ret {
-            tracing::warn!(error = %e, "xwayland disabled: loop insert failed");
+            tracing::warn!(error = %e, "xwayland: watchdog insert failed");
+        }
+    }
+
+    /// SIGTERM Xwayland, then SIGKILL it if it is still running after
+    /// [`XWAYLAND_KILL_GRACE`]. A wedged Xwayland can spin without
+    /// handling SIGTERM.
+    fn terminate_xwayland(&mut self, pid: i32) {
+        if !is_our_xwayland(pid) {
+            return;
+        }
+        signal(pid, libc::SIGTERM);
+        let timer = Timer::from_duration(XWAYLAND_KILL_GRACE);
+        let ret = self.loop_handle.insert_source(timer, move |_, _, _| {
+            if is_our_xwayland(pid) {
+                tracing::warn!(pid, "xwayland: ignored SIGTERM; sending SIGKILL");
+                signal(pid, libc::SIGKILL);
+            }
+            TimeoutAction::Drop
+        });
+        if let Err(e) = ret {
+            tracing::warn!(error = %e, "xwayland: kill timer insert failed; sending SIGKILL");
+            signal(pid, libc::SIGKILL);
+        }
+    }
+
+    /// Kill Xwayland on WM exit, waiting up to [`XWAYLAND_KILL_GRACE`]
+    /// for SIGTERM before SIGKILL. Called after the event loop stops.
+    pub fn stop_xwayland(&mut self) {
+        let Some(process) = self.xwayland.take() else {
+            return;
+        };
+        // Releases the X display's lock files.
+        self.loop_handle.remove(process.source);
+        let Some(pid) = process.pid else {
+            return;
+        };
+        if !is_our_xwayland(pid) {
+            return;
+        }
+        signal(pid, libc::SIGTERM);
+        let deadline = Instant::now() + XWAYLAND_KILL_GRACE;
+        while is_our_xwayland(pid) {
+            if Instant::now() >= deadline {
+                tracing::warn!(pid, "shutdown: xwayland ignored SIGTERM; sending SIGKILL");
+                signal(pid, libc::SIGKILL);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        tracing::info!(pid, "shutdown: xwayland stopped");
+    }
+
+    /// Drop every trace of an X11 window: Space, layout, workspace and
+    /// rule state, and its foreign-toplevel handles.
+    fn forget_x11_window(&mut self, window: &Window) {
+        // Tell wlr-foreign-toplevel-management taskbars the window is gone.
+        crate::foreign_toplevel_mgmt::close_toplevel(self, window);
+        self.space.unmap_elem(window);
+        self.layout.forget(window);
+        self.workspaces.forget(window);
+        self.pending_initial_center.remove(window);
+        self.rules_applied.remove(window);
+        self.sticky.remove(window);
+        self.always_on_top.remove(window);
+        self.window_name_overrides.remove(window);
+        // Same FT cleanup the xdg destroy path runs — see
+        // shoestring_wm_ft_drop memory note: dropping our Arc on the
+        // handle is not enough, must explicitly remove_toplevel.
+        if let Some(handle) = self.foreign_toplevels.remove(window) {
+            let id = handle.identifier();
+            self.foreign_toplevel_list.remove_toplevel(&handle);
+            self.emit_ipc(shoestring_ipc::Event::WindowClosed { id });
         }
     }
 
@@ -245,24 +456,7 @@ impl XwmHandler for ShoestringWm {
 
     fn unmapped_window(&mut self, _xwm: XwmId, surface: X11Surface) {
         if let Some(window) = self.space_element_for_x11(&surface) {
-            // Tell wlr-foreign-toplevel-management taskbars the window is gone.
-            crate::foreign_toplevel_mgmt::close_toplevel(self, &window);
-            self.space.unmap_elem(&window);
-            self.layout.forget(&window);
-            self.workspaces.forget(&window);
-            self.pending_initial_center.remove(&window);
-            self.rules_applied.remove(&window);
-            self.sticky.remove(&window);
-            self.always_on_top.remove(&window);
-            self.window_name_overrides.remove(&window);
-            // Same FT cleanup the xdg destroy path runs — see
-            // shoestring_wm_ft_drop memory note: dropping our Arc on the
-            // handle is not enough, must explicitly remove_toplevel.
-            if let Some(handle) = self.foreign_toplevels.remove(&window) {
-                let id = handle.identifier();
-                self.foreign_toplevel_list.remove_toplevel(&handle);
-                self.emit_ipc(shoestring_ipc::Event::WindowClosed { id });
-            }
+            self.forget_x11_window(&window);
         }
         if !surface.is_override_redirect() {
             let _ = surface.set_mapped(false);
@@ -476,7 +670,93 @@ impl XwmHandler for ShoestringWm {
     fn disconnected(&mut self, _xwm: XwmId) {
         self.xwm = None;
         self.xdisplay = None;
+        // No unmap arrives once the X server is gone.
+        let windows: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|w| w.x11_surface().is_some())
+            .cloned()
+            .collect();
+        for window in &windows {
+            self.forget_x11_window(window);
+        }
+        let Some(process) = self.xwayland.take() else {
+            return;
+        };
+        self.loop_handle.remove(process.source);
+        if let Some(pid) = process.pid {
+            self.terminate_xwayland(pid);
+        }
+        let uptime = process.started.elapsed();
+        if uptime < XWAYLAND_MIN_UPTIME {
+            tracing::error!(
+                uptime_secs = uptime.as_secs(),
+                "xwayland: X11 WM disconnected soon after start; not restarting"
+            );
+            return;
+        }
+        tracing::warn!(
+            dropped_windows = windows.len(),
+            "xwayland: X11 WM disconnected; restarting"
+        );
+        self.start_xwayland();
     }
+}
+
+/// Send `sig` to `pid`.
+fn signal(pid: i32, sig: libc::c_int) {
+    // SAFETY: plain libc process-control call with no memory effects.
+    unsafe {
+        libc::kill(pid, sig);
+    }
+}
+
+/// `pid` is a live (not zombie) Xwayland we spawned. Checked before each
+/// signal, so a recycled pid is never signalled.
+fn is_our_xwayland(pid: i32) -> bool {
+    proc_stat(pid).is_some_and(|stat| {
+        stat.comm == "Xwayland" && stat.ppid == std::process::id() as i32 && stat.state != 'Z'
+    })
+}
+
+/// Find the Xwayland we spawned. The newest wins, in case a killed
+/// predecessor has not exited yet.
+fn find_xwayland_pid() -> Option<i32> {
+    std::fs::read_dir("/proc")
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&pid| is_our_xwayland(pid))
+        .max_by_key(|&pid| proc_stat(pid).map_or(0, |stat| stat.start_time))
+}
+
+struct ProcStat {
+    comm: String,
+    state: char,
+    ppid: i32,
+    start_time: u64,
+}
+
+/// Read the fields we need from `/proc/<pid>/stat`.
+fn proc_stat(pid: i32) -> Option<ProcStat> {
+    parse_proc_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// `comm` is bracketed and may itself hold spaces or parentheses, so split
+/// at the last `)`.
+fn parse_proc_stat(stat: &str) -> Option<ProcStat> {
+    let (head, tail) = stat.rsplit_once(')')?;
+    let comm = head.split_once('(')?.1.to_owned();
+    let mut fields = tail.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    // Field 22 (starttime); `fields` is now at field 5.
+    let start_time = fields.nth(17)?.parse().ok()?;
+    Some(ProcStat {
+        comm,
+        state,
+        ppid,
+        start_time,
+    })
 }
 
 /// Initialise the wayland-side globals XWayland depends on. Must be
@@ -484,4 +764,33 @@ impl XwmHandler for ShoestringWm {
 pub fn init_xwayland_globals(dh: &DisplayHandle) -> XWaylandShellState {
     XWaylandKeyboardGrabState::new::<ShoestringWm>(dh);
     XWaylandShellState::new::<ShoestringWm>(dh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_stat_reads_own_process() {
+        let stat = proc_stat(std::process::id() as i32).expect("own /proc stat");
+        assert_eq!(stat.ppid, unsafe { libc::getppid() });
+        assert_ne!(stat.state, 'Z');
+        assert!(stat.start_time > 0);
+    }
+
+    #[test]
+    fn parse_proc_stat_handles_parens_in_comm() {
+        let line = "42 (a) b) S 7 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0\n";
+        let stat = parse_proc_stat(line).unwrap();
+        assert_eq!(stat.comm, "a) b");
+        assert_eq!(stat.state, 'S');
+        assert_eq!(stat.ppid, 7);
+        assert_eq!(stat.start_time, 12345);
+    }
+
+    #[test]
+    fn our_own_process_is_not_xwayland() {
+        assert!(!is_our_xwayland(std::process::id() as i32));
+        assert!(find_xwayland_pid().is_none());
+    }
 }

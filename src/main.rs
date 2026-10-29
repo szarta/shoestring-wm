@@ -360,6 +360,9 @@ fn main() -> Result<()> {
     // that display name's reuse on the next run. The IPC socket is unlinked by
     // `ipc::Server`'s Drop.
     unlink_wayland_socket(&state.socket_name);
+    // The tty session has no process group of its own to signal, and logind
+    // may leave session processes running, so stop Xwayland explicitly.
+    state.stop_xwayland();
     Ok(())
 }
 

@@ -67,6 +67,13 @@ What works:
   bidirectionally between X11 and Wayland clients.
 - Window rules match X11 apps too: the rule matcher reads ``WM_CLASS`` as
   the ``app_id`` equivalent. Use ``xprop WM_CLASS`` to find the value.
+- If XWayland dies, or loses its Wayland connection while it keeps
+  running (its X11 windows would then never appear), the WM kills it,
+  drops its windows, and starts a fresh one. Running X11 apps exit with
+  it; relaunch them. An XWayland that dies within 30 seconds of starting
+  is not restarted again.
+- The WM stops XWayland when it exits, so a stuck XWayland can't hold
+  its X display and keep the login greeter's X server from starting.
 
 Known XWayland limitations (these are inherent to XWayland, not specific to
 shoestring-wm):
