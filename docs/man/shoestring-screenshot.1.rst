@@ -4,7 +4,7 @@ shoestring-screenshot
 Synopsis
 --------
 
-| **shoestring-screenshot** [**-o** *NAME*] [**-f** *PATH*] [**-c**] [**-r** | **--region-rect** *X,Y,W,H*] [**--ocr** [**--ocr-scale** *N*] [**--ocr-psm** *MODE*]]
+| **shoestring-screenshot** [**-o** *NAME*] [**-f** *PATH*] [**-c**] [**-r** | **--region-rect** *X,Y,W,H*] [**--ocr** [**--ocr-scale** *N*] [**--ocr-psm** *MODE*] [**--ocr-threshold**]]
 
 Description
 -----------
@@ -68,6 +68,15 @@ Options
     7 treats the image as a single text line - right for a status bar or
     one-line label; 6 for a block of text, 3 for a full page. Only
     meaningful with **--ocr**.
+
+**--ocr-threshold**
+    Binarize the capture with an Otsu auto-threshold before OCR. Off by
+    default (tesseract binarizes internally and the grayscale path reads
+    most text). Turn it on to normalize polarity - light text on a dark
+    field comes out dark-on-light - and to strip anti-aliasing and faint
+    divider or grid lines to pure black and white, which cleans up labels
+    on crisp UI fonts at the cost of detail on soft or low-contrast text.
+    Only meaningful with **--ocr**.
 
 **-h**, **--help**
     Print usage and exit.

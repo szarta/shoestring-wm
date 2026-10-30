@@ -15,9 +15,12 @@
 //! recognized text is printed to stdout. Pair it with `--region` to grab a
 //! coworker's message or a terminal snippet as text, or drive it over IPC
 //! (`run_command -- shoestring-screenshot --output … --region-rect … --ocr`)
-//! to read a widget's text without a vision round-trip. No build dependency —
-//! `tesseract` is spawned at runtime (override the binary with
-//! `$SHOESTRING_TESSERACT_BIN`), so OCR simply errors if it isn't installed.
+//! to read a widget's text without a vision round-trip. `--ocr-threshold`
+//! adds an Otsu binarization pass (off by default) that normalizes polarity
+//! and strips anti-aliasing and faint divider lines — cleaner on crisp UI
+//! fonts, worse on soft or stylized text. No build dependency — `tesseract`
+//! is spawned at runtime (override the binary with `$SHOESTRING_TESSERACT_BIN`),
+//! so OCR simply errors if it isn't installed.
 //!
 //! The protocol is wlr-screencopy v3; we only use the wl_shm path (no
 //! linux-dmabuf), so this works wherever the WM advertises the manager.
@@ -120,6 +123,16 @@ struct Cli {
     /// one-line label. Use 6 for a block of text, 3 for a full page.
     #[arg(long, value_name = "MODE", default_value_t = 7, value_parser = clap::value_parser!(u32).range(0..=13))]
     ocr_psm: u32,
+
+    /// Binarize the capture (Otsu auto-threshold) before OCR. Off by default:
+    /// tesseract binarizes internally and the plain grayscale path already
+    /// reads most text. Turn it on to normalize polarity (light-on-dark text
+    /// comes out dark-on-light) and strip anti-aliasing and faint divider/grid
+    /// lines to pure black and white — cleaner labels on crisp UI fonts, at
+    /// the cost of detail on soft or low-contrast text. Only meaningful with
+    /// `--ocr`.
+    #[arg(long)]
+    ocr_threshold: bool,
 }
 
 /// One rectangle on a named output, in that output's logical coords.
@@ -312,7 +325,14 @@ fn run() -> Result<RunOutput> {
         if cli.clipboard {
             copy_to_clipboard(&encode_png(&rgba, width, height)?)?;
         }
-        let text = ocr_region(&rgba, width, height, cli.ocr_scale, cli.ocr_psm)?;
+        let text = ocr_region(
+            &rgba,
+            width,
+            height,
+            cli.ocr_scale,
+            cli.ocr_psm,
+            cli.ocr_threshold,
+        )?;
         return Ok(RunOutput::Text(text));
     }
 
@@ -552,27 +572,91 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
 
 // ---------------- OCR ----------------
 
-/// Convert tight RGBA to grayscale and upscale it `scale`× with
-/// nearest-neighbor, returning the enlarged 8-bit grayscale plane and its new
-/// dimensions. Nearest-neighbor (not interpolation) keeps the hard edges of a
-/// pixel/bitmap UI font crisp rather than blurring them, which reads better
-/// for OCR; `tesseract` does its own binarization, so no thresholding here.
-fn to_gray_upscaled(rgba: &[u8], width: u32, height: u32, scale: u32) -> (Vec<u8>, u32, u32) {
+/// Convert tight RGBA to an 8-bit grayscale plane (integer Rec. 601 luma),
+/// one output byte per pixel. The alpha channel is ignored.
+fn to_gray(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .map(|px| {
+            // Integer Rec. 601 luma: (77 R + 150 G + 29 B) / 256.
+            ((77 * px[0] as u32 + 150 * px[1] as u32 + 29 * px[2] as u32) >> 8) as u8
+        })
+        .collect()
+}
+
+/// Upscale a grayscale plane `scale`× with nearest-neighbor, returning the
+/// enlarged plane and its new dimensions. Nearest-neighbor (not interpolation)
+/// keeps the hard edges of a pixel/bitmap UI font crisp rather than blurring
+/// them, which reads better for OCR.
+fn upscale_gray(gray: &[u8], width: u32, height: u32, scale: u32) -> (Vec<u8>, u32, u32) {
     let sw = width * scale;
     let sh = height * scale;
-    let mut gray = vec![0u8; (sw as usize) * (sh as usize)];
+    let mut out = vec![0u8; (sw as usize) * (sh as usize)];
     for y in 0..sh as usize {
         let sy = (y as u32 / scale) as usize;
+        let src_row = sy * width as usize;
+        let dst_row = y * sw as usize;
         for x in 0..sw as usize {
             let sx = (x as u32 / scale) as usize;
-            let i = (sy * width as usize + sx) * 4;
-            // Integer Rec. 601 luma: (77 R + 150 G + 29 B) / 256.
-            let lum =
-                (77 * rgba[i] as u32 + 150 * rgba[i + 1] as u32 + 29 * rgba[i + 2] as u32) >> 8;
-            gray[y * sw as usize + x] = lum as u8;
+            out[dst_row + x] = gray[src_row + sx];
         }
     }
-    (gray, sw, sh)
+    (out, sw, sh)
+}
+
+/// Otsu's threshold: the gray level (0-255) that minimizes intra-class
+/// variance, picked from the histogram. The classic automatic split between
+/// foreground and background with no magic constant.
+fn otsu_threshold(gray: &[u8]) -> u8 {
+    let mut hist = [0u32; 256];
+    for &g in gray {
+        hist[g as usize] += 1;
+    }
+    let total = gray.len() as f64;
+    let sum_all: f64 = hist
+        .iter()
+        .enumerate()
+        .map(|(t, &c)| t as f64 * c as f64)
+        .sum();
+    let (mut w_b, mut sum_b, mut max_var, mut thresh) = (0.0f64, 0.0f64, -1.0f64, 0u8);
+    for (t, &count) in hist.iter().enumerate() {
+        w_b += count as f64;
+        if w_b == 0.0 {
+            continue;
+        }
+        let w_f = total - w_b;
+        if w_f == 0.0 {
+            break;
+        }
+        sum_b += t as f64 * count as f64;
+        let m_b = sum_b / w_b;
+        let m_f = (sum_all - sum_b) / w_f;
+        let var = w_b * w_f * (m_b - m_f) * (m_b - m_f);
+        if var > max_var {
+            max_var = var;
+            thresh = t as u8;
+        }
+    }
+    thresh
+}
+
+/// Binarize a grayscale plane to pure 0/255 at `thresh`, forcing the majority
+/// class to white. Text is usually the minority of pixels, so this lands it
+/// dark-on-light — what `tesseract` expects — whether the source was dark text
+/// on a light field or light text on a dark one (a terminal, a status bar).
+fn binarize(gray: &[u8], thresh: u8) -> Vec<u8> {
+    let dark = gray.iter().filter(|&&g| g <= thresh).count();
+    let light_is_majority = (gray.len() - dark) >= dark;
+    gray.iter()
+        .map(|&g| {
+            let is_light = g > thresh;
+            // Background (the majority class) -> white, foreground -> black.
+            if is_light == light_is_majority {
+                255
+            } else {
+                0
+            }
+        })
+        .collect()
 }
 
 /// Encode an 8-bit grayscale plane as PNG bytes.
@@ -588,12 +672,25 @@ fn encode_gray_png(gray: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// OCR the capture: grayscale + upscale, hand the PNG to `tesseract`, and
-/// return its recognized text (trailing whitespace trimmed). The tesseract
-/// binary is `$SHOESTRING_TESSERACT_BIN` or `tesseract` on `$PATH`; a missing
-/// binary or a non-zero exit is surfaced as an error.
-fn ocr_region(rgba: &[u8], width: u32, height: u32, scale: u32, psm: u32) -> Result<String> {
-    let (gray, gw, gh) = to_gray_upscaled(rgba, width, height, scale);
+/// OCR the capture: grayscale, optional Otsu binarization, nearest-neighbor
+/// upscale, hand the PNG to `tesseract`, and return its recognized text
+/// (trailing whitespace trimmed). The tesseract binary is
+/// `$SHOESTRING_TESSERACT_BIN` or `tesseract` on `$PATH`; a missing binary or
+/// a non-zero exit is surfaced as an error.
+fn ocr_region(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    scale: u32,
+    psm: u32,
+    threshold: bool,
+) -> Result<String> {
+    let mut gray = to_gray(rgba);
+    if threshold {
+        let t = otsu_threshold(&gray);
+        gray = binarize(&gray, t);
+    }
+    let (gray, gw, gh) = upscale_gray(&gray, width, height, scale);
     let png_bytes = encode_gray_png(&gray, gw, gh)?;
 
     // Tesseract reads a real file more reliably across versions than stdin;
@@ -899,34 +996,43 @@ mod tests {
     }
 
     #[test]
-    fn gray_upscale_dimensions_and_scale_1_luma() {
-        // 2x1 RGBA: pure white then pure black.
-        let rgba = [255, 255, 255, 255, 0, 0, 0, 255];
-        let (gray, w, h) = to_gray_upscaled(&rgba, 2, 1, 1);
-        assert_eq!((w, h), (2, 1));
-        assert_eq!(gray, vec![255, 0]);
+    fn to_gray_is_rec601_weighted() {
+        // 2x1 white then black, and separately green>red>blue by luma weight.
+        assert_eq!(to_gray(&[255, 255, 255, 255, 0, 0, 0, 255]), vec![255, 0]);
+        let rgb = to_gray(&[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
+        let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+        assert!(g > r && r > b, "expected green>red>blue, got {g} {r} {b}");
     }
 
     #[test]
-    fn gray_upscale_replicates_pixels_nearest_neighbor() {
+    fn upscale_gray_replicates_pixels_nearest_neighbor() {
         // 2x1 white/black upscaled 3x -> 6x3, each source pixel a 3x3 block,
         // every row identical (nearest-neighbor).
-        let rgba = [255, 255, 255, 255, 0, 0, 0, 255];
-        let (gray, w, h) = to_gray_upscaled(&rgba, 2, 1, 3);
+        let (up, w, h) = upscale_gray(&[255, 0], 2, 1, 3);
         assert_eq!((w, h), (6, 3));
         let want_row = [255, 255, 255, 0, 0, 0];
         for row in 0..3 {
-            assert_eq!(&gray[row * 6..row * 6 + 6], &want_row);
+            assert_eq!(&up[row * 6..row * 6 + 6], &want_row);
         }
     }
 
     #[test]
-    fn gray_upscale_luma_is_rec601_weighted() {
-        // Pure green is brighter than pure red is brighter than pure blue.
-        let rgba = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255];
-        let (gray, _, _) = to_gray_upscaled(&rgba, 3, 1, 1);
-        let (r, g, b) = (gray[0], gray[1], gray[2]);
-        assert!(g > r && r > b, "expected green>red>blue, got {g} {r} {b}");
+    fn otsu_splits_a_bimodal_histogram_between_the_clusters() {
+        // Half near-black, half near-white: the threshold lands between them.
+        let mut gray = vec![10u8; 50];
+        gray.resize(100, 240u8);
+        let t = otsu_threshold(&gray);
+        assert!((10..240).contains(&t), "threshold {t} not between clusters");
+    }
+
+    #[test]
+    fn binarize_forces_majority_class_to_white_both_polarities() {
+        // Dark text on light field (light is majority) -> text black, field white.
+        let light_field = [0u8, 200, 200, 200, 200];
+        assert_eq!(binarize(&light_field, 128), vec![0, 255, 255, 255, 255]);
+        // Light text on dark field (dark is majority) -> text black, field white.
+        let dark_field = [255u8, 20, 20, 20, 20];
+        assert_eq!(binarize(&dark_field, 128), vec![0, 255, 255, 255, 255]);
     }
 
     #[test]
@@ -986,12 +1092,17 @@ mod tests {
 
         let rgba = [255u8, 255, 255, 255, 0, 0, 0, 255]; // 2x1
         std::env::set_var("SHOESTRING_TESSERACT_BIN", &stub);
-        let text = ocr_region(&rgba, 2, 1, 4, 7).unwrap();
+        let text = ocr_region(&rgba, 2, 1, 4, 7, false).unwrap();
         assert_eq!(text, "ID #68  X: 1445");
+        // With thresholding on, the same stub path is exercised end to end.
+        assert_eq!(
+            ocr_region(&rgba, 2, 1, 4, 7, true).unwrap(),
+            "ID #68  X: 1445"
+        );
 
         // A missing binary is a tidy error, not a panic.
         std::env::set_var("SHOESTRING_TESSERACT_BIN", dir.path().join("nope"));
-        assert!(ocr_region(&rgba, 2, 1, 4, 7).is_err());
+        assert!(ocr_region(&rgba, 2, 1, 4, 7, false).is_err());
         std::env::remove_var("SHOESTRING_TESSERACT_BIN");
     }
 }
