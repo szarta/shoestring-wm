@@ -213,7 +213,10 @@ automatically to **pixman**, a CPU compositor, producing real, capturable
 frames either way (the capture/stream path is the same for both; see
 `docs/running.rst`, which also covers choosing Mesa's llvmpipe instead).
 This is the foundation for remote-desktop *serve mode* (`docs/remote.rst`)
-and ships today as a roughly 330 MB, GPU-optional Docker image — `docker run` with no `--device` needed (`docs/containers.rst`).
+and ships today as a GPU-optional Docker image of roughly 120 MB to pull
+and 340 MB unpacked (Docker's `docker images` shows about 460 MB, since it
+counts the compressed layers as well) — `docker run` with no `--device`
+needed (`docs/containers.rst`).
 
 Some context on where this sits relative to comparable projects: wlroots
 compositors (Sway, River, Hyprland) have had a mature no-GPU option for
