@@ -973,7 +973,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/szarta/smithay.git?rev=6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a#6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a"
+source = "git+https://github.com/szarta/smithay.git?rev=7e107c9375d2d84519019c4e46044ca063c193cb#7e107c9375d2d84519019c4e46044ca063c193cb"
 dependencies = [
  "appendlist",
  "atomic_float",

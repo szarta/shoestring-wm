@@ -40,6 +40,6 @@ libc = "0.2"
 
 [dependencies.smithay]
 git = "https://github.com/szarta/smithay.git"
-rev = "6f6d3920cad0d7d8ad5d6de27dbdd2fd8297307a"
+rev = "7e107c9375d2d84519019c4e46044ca063c193cb"
 default-features = false
 features = ["wayland_frontend", "desktop", "renderer_test"]
